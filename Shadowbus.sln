@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.13.35507.96 d17.13
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Shadowbus", "Shadowbus.csproj", "{A9CB007E-1EB1-7640-25B7-B798D61B70E7}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A9CB007E-1EB1-7640-25B7-B798D61B70E7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A9CB007E-1EB1-7640-25B7-B798D61B70E7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A9CB007E-1EB1-7640-25B7-B798D61B70E7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A9CB007E-1EB1-7640-25B7-B798D61B70E7}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {F7EBE844-E882-43CD-AF08-87B5801ED1A3}
+	EndGlobalSection
+EndGlobal
