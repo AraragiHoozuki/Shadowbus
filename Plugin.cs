@@ -28,6 +28,8 @@ public class Plugin : BaseUnityPlugin
     public BattleCardBase SelectedCard { get; set; }
     public bool UseCustomDeckSelf => customSelfDeck;
     public bool UseCustomDeckOpponent => customOpponentDeck;
+    public bool CustomDeckSave { get; set; } = false;
+    public string CustomDeckName { get; set; } = "MyDeck.svd";
 
     public string CustomDeckSelf => decks[selectedIndexSelf];
     public string CustomDeckOpponent => decks[selectedIndexOpponent];
@@ -83,8 +85,9 @@ public class Plugin : BaseUnityPlugin
             CardMasterPatcher.RevokeCardMasterPatches();
         }
 
-        GUILayout.Label("自定义卡组卡组:");
-        customSelfDeck = GUILayout.Toggle(customSelfDeck, "我方自定义卡组");
+        GUILayout.Space(10);
+        GUILayout.Label("自定义卡组:");
+        customSelfDeck = GUILayout.Toggle(customSelfDeck, "启用我方自定义卡组");
         if (GUILayout.Button(decks[selectedIndexSelf]))
         {
             customSelfDeckSelectorShow = !customSelfDeckSelectorShow;
@@ -98,7 +101,7 @@ public class Plugin : BaseUnityPlugin
                 customSelfDeckSelectorShow = false; 
             }
         }
-        customOpponentDeck = GUILayout.Toggle(customOpponentDeck, "对方自定义卡组");
+        customOpponentDeck = GUILayout.Toggle(customOpponentDeck, "启用对方自定义卡组");
         if (GUILayout.Button(decks[selectedIndexOpponent]))
         {
             customOpponentDeckSelectorShow = !customSelfDeckSelectorShow;
@@ -112,7 +115,11 @@ public class Plugin : BaseUnityPlugin
                 customOpponentDeckSelectorShow = false;
             }
         }
-
+        GUILayout.Space(10);
+        CustomDeckSave = GUILayout.Toggle(CustomDeckSave, "启用无限制卡组编辑");
+        GUILayout.Label("启用后，编辑卡组时可以选择所有卡牌");
+        GUILayout.Label("且点击保存时保存在本地，不上传服务器");
+        CustomDeckName = GUILayout.TextField(CustomDeckName);
 
         GUILayout.EndVertical();
         GUI.DragWindow();

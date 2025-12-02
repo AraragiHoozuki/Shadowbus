@@ -177,8 +177,9 @@ namespace Shadowbus
         public static void ApplyCardMasterPatches(CardMaster master = null)
         {
             Plugin.Logger.LogInfo("[Begin apply CardMaster mods]");
-            master ??= CardMaster.GetInstanceForBattle();
+            master ??= CardMaster.GetInstanceForBattle();  
             RevokeCardMasterPatches(master);
+            Dictionary<int, CardParameter> masterDict = (Dictionary<int, CardParameter>)AccessTools.Field(typeof(CardMaster), "m_cardParameters").GetValue(master);
             var mods_folder = Directory.CreateDirectory("Mods");
             var card_master_folder = mods_folder.CreateSubdirectory("CardMaster");
             var patches = card_master_folder.GetFiles("*.json");
@@ -208,7 +209,17 @@ namespace Shadowbus
                     }
                     else
                     {
-
+                        Plugin.Logger.LogInfo($"adding new card {patch.cardId} with tempalte: {template.CardId}");
+                        var newCard = template.Clone();
+                        patch.PatchTemplate(newCard);
+                        if (!masterDict.ContainsKey(patch.cardId))
+                        {
+                            masterDict.Add(patch.cardId, newCard);
+                        }
+                        else
+                        {
+                            Plugin.Logger.LogWarning($"card {patch.cardId} already exists, skipping");
+                        }
                     }
                 }
             }

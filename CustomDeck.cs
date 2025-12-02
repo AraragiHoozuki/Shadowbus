@@ -1,4 +1,5 @@
 ﻿using BepInEx.Logging;
+using Cute;
 using HarmonyLib;
 using System;
 using System.Collections;
@@ -7,6 +8,8 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using UnityEngine;
+using UnityEngine.UIElements;
 using Wizard;
 using Wizard.Battle.View;
 using Wizard.DeckCardEdit;
@@ -123,13 +126,153 @@ namespace Shadowbus
             }
             return true;
         }
+        [HarmonyPatch(typeof(FilterController), nameof(FilterController.InitializeFilterForDeckEdit))]
+        [HarmonyPrefix]
+        public static bool FilterController_InitializeFilterForDeckEdit_Patch(FilterController __instance, ref ClassSet classSet)
+        {
+            if (Plugin.Instance.CustomDeckSave)  classSet = new ClassSet(CardBasePrm.ClanType.ALL);
+            return true;
+        }
 
-        //[HarmonyPatch(typeof(SBattleLoad), "LoadComplete")]
-        //[HarmonyReversePatch]
-        //public static IEnumerator SBattleLoad_LoadComplete(object instance)
-        //{
-        //    throw new NotImplementedException("SBattleLoad_LoadComplete");
-        //}
+        [HarmonyPatch(typeof(FilterController), "RemoveTokenCard")]
+        [HarmonyPostfix]
+        public static void FilterController_RemoveTokenCard_Patch(FilterController __instance, List<int> cardPool, ref List<int> __result)
+        {
+            if (Plugin.Instance.CustomDeckSave)
+            {
+                __result.Clear();
+                __result.AddRange(cardPool);
+            }
+        }
+        [HarmonyPatch(typeof(UIBase_CardManager), nameof(UIBase_CardManager.SelectCardIDInConditionMask))]
+        [HarmonyPrefix]
+        public static bool UIBase_CardManager_SelectCardIDInConditionMask_Patch(ref UIBase_CardManager.FilterParameter filterParam)
+        {
+            if (Plugin.Instance.CustomDeckSave) { 
+                filterParam.Craftable = 0;
+                filterParam.IsEnableResurgentCard = true;
+                filterParam.DisableCardSetidList = [];
+            }
+            return true;
+        }
+        [HarmonyPatch(typeof(CardParameter), nameof(CardParameter.IsAvailableFormat))]
+        [HarmonyPrefix]
+        public static bool CardParameter_IsAvailableFormat_Patch(ref bool __result)
+        {
+            if (Plugin.Instance.CustomDeckSave)
+            {
+                __result = true;
+                return false;
+            }
+            return true;
+        }
+
+        [HarmonyPatch(typeof(CardParameter), nameof(CardParameter.GetSameKindNumMaxInFormat))]
+        [HarmonyPrefix]
+        public static bool CardParameter_GetSameKindNumMaxInFormat_Patch(ref int __result)
+        {
+            if (Plugin.Instance.CustomDeckSave)
+            {
+                __result = 999;
+                return false;
+            }
+            return true;
+        }
+
+        [HarmonyPatch(typeof(CardObject), nameof(CardObject.AttachGrayShader))]
+        [HarmonyPrefix]
+        public static bool CardObject_AttachGrayShader_Patch()
+        {
+            if (Plugin.Instance.CustomDeckSave)
+            {
+                return false;
+            }
+            return true;
+        }
+
+        [HarmonyPatch(typeof(CardSelectListUIBase), nameof(CardSelectListUIBase.IsRemainingAddableCardToSelectionArea))]
+        [HarmonyPostfix]
+        public static void CardSelectListUIBase_IsRemainingAddableCardToSelectionArea_Patch(ref bool __result)
+        {
+            if (Plugin.Instance.CustomDeckSave) __result = true;
+        }
+
+        [HarmonyPatch(typeof(CardSelectListUIBase), nameof(CardSelectListUIBase.IsAddableByBaseCardId))]
+        [HarmonyPrefix]
+        public static bool CardSelectListUIBase_IsAddableByBaseCardId_Patch(ref int cardId, out int addCardId, ref bool __result)
+        {
+            if (Plugin.Instance.CustomDeckSave)
+            {
+                addCardId = cardId;
+                __result = true;
+                return false;
+            }
+            addCardId = 0;
+            return true;
+        }
+
+        [HarmonyPatch(typeof(CardSelectListUIBase), "IsMaxCardNumInSelectionArea")]
+        [HarmonyPrefix]
+        public static bool CardSelectListUIBase_IsMaxCardNumInSelectionArea_Patch(ref bool __result)
+        {
+            if (Plugin.Instance.CustomDeckSave) { 
+                __result = false;
+                return false;
+            }
+            return true;
+        }
+
+        [HarmonyPatch(typeof(CardBundleControllerBase), MethodType.Constructor,
+            [typeof(Transform), typeof(Transform), typeof(UITexture), typeof(GameObject), typeof(IFormatBehavior), typeof(bool),
+        typeof(bool), typeof(bool), typeof(bool)])]
+        [HarmonyPrefix]
+        public static bool CardBundleControllerBase_Constructor_Patch(ref bool canUseNonPossessionCard)
+        {
+            if (Plugin.Instance.CustomDeckSave) canUseNonPossessionCard = true;
+            return true;
+        }
+
+        [HarmonyPatch(typeof(CardBundleController), nameof(CardBundleController.SaveDeck))]
+        [HarmonyPrefix]
+        public static bool CardBundleController_SaveDeck_Patch(CardBundleController __instance)
+        {
+            if (Plugin.Instance.CustomDeckSave)
+            {
+                var cards = __instance.SelectionAreaList.IdList.ToArray();
+                var path = Path.Combine("Mods", "Decks", Plugin.Instance.CustomDeckName);
+                if (path.EndsWith(".svd") == false)
+                {
+                    path += ".svd";
+                }
+                using (StreamWriter writer = new StreamWriter(path, false))
+                {
+                    foreach (int cardId in cards)
+                    {
+                        writer.WriteLine($"{cardId} #{CardMaster.GetInstanceForBattle().GetCardParameterFromId(cardId)?.CardName}");
+                    }
+                }
+                Plugin.Logger.LogInfo($"Custom deck saved to {path}");
+                return false;
+            }
+            return true;
+        }
+
+        [HarmonyPatch(typeof(CardBundleController), "GetAutoCreateDeckCards")]
+        [HarmonyPrefix]
+        public static bool CardBundleController_GetAutoCreateDeckCards_Patch(Action<List<int>> onFinish)
+        {
+            if (Plugin.Instance.CustomDeckSave)
+            {
+                var path = Path.Combine("Mods", "Decks", Plugin.Instance.CustomDeckName);
+                if (File.Exists(path))
+                {
+                    List<int> deck = LoadDeck(path);
+                    onFinish.Call(deck);
+                    return false;
+                }
+            }
+            return true;
+        }
 
         public static List<int> LoadDeck(string path)
         {
@@ -146,7 +289,7 @@ namespace Shadowbus
                 }
                 else
                 {
-                    Plugin.Logger.LogWarning($"card ${ids} in deck cannot be parsed and is skipped.");
+                    Plugin.Logger.LogWarning($"card ${ids} in deck ${path} cannot be parsed and is skipped.");
                 }
             }
             return deck;
