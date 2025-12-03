@@ -1,0 +1,28 @@
+[{
+    "newCard": false,  
+    "cardId": 0,
+    "templateCardId": 124541020,
+    "intFields": {
+        "Cost": 5,
+        "Atk": 5,
+        "Life": 5,
+        "ResourceCardId": 999900001
+    },
+    "stringChangeFields": {
+    },
+    "stringAppendFields": {
+        "Skill": ",update_deck,banish",
+        "SkillTiming": ",when_draw,when_draw",
+        "SkillCondition": ",character=me&target=self,character=me&target=self",
+        "SkillTarget": ",character=me&target=self,character=me&target=self",
+        "SkillOption": ",type=add,none",
+        "SkillPreprocess": ",none,none"
+    },
+    "localizationFields": {
+        "CardName": "测试",
+        "Description": "测试",
+        "EvoDescription": "",
+        "SkillDescription": "",
+        "EvoSkillDescription": ""
+    }
+}]
