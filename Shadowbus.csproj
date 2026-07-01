@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net46</TargetFramework>
@@ -17,6 +17,10 @@
 
   <ItemGroup>
     <PackageReference Include="BepInEx.Analyzers" Version="1.*" PrivateAssets="all" />
+    <PackageReference Include="BepInEx.AssemblyPublicizer.MSBuild" Version="0.4.3">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
     <PackageReference Include="BepInEx.Unity.Mono" Version="6.0.0-be.*" IncludeAssets="compile" />
     <PackageReference Include="BepInEx.PluginInfoProps" Version="2.*" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
@@ -28,9 +32,17 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Reference Include="Assembly-CSharp">
+    <Reference Include="Assembly-CSharp" Publicize="True">
       <HintPath>..\..\..\SteamLibrary\steamapps\common\Shadowverse\Shadowverse_Data\Managed\Assembly-CSharp.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="Assembly-CSharp-firstpass">
+      <HintPath>..\..\..\SteamLibrary\steamapps\common\Shadowverse\Shadowverse_Data\Managed\Assembly-CSharp-firstpass.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="UIs\" />
   </ItemGroup>
 </Project>

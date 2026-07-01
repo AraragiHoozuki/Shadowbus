@@ -223,6 +223,16 @@ namespace Shadowbus
                     }
                 }
             }
+
+            Data.Load.data.UserCardList.Clear();
+            var all = master.GetAllCardIds();
+            for (int i = 0; i < all.Count; i++)
+            {
+                UserCard userCard = new UserCard();
+                userCard.card_id = all[i];
+                userCard.number = 99;
+                Data.Load.data.UserCardList.Add(userCard);
+            }
             Plugin.Logger.LogInfo("[End apply CardMaster mods]");
         }
 
