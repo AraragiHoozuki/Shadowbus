@@ -23,6 +23,8 @@ Shadowverse 国际服 单机化 & mod 工具
 ## 自定义 AI 卡组
 在 `Mods/AISettings.json` 设置，将 `enable` 设置为 `true` 即启动自定义AI卡组。将 `deckName` 设置为自己的卡组名称即可生效。
 
+其他选项目前无效
+
 与AI对战的方式:游戏中选择 单人>对战 即可。
 
 
