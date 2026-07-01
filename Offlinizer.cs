@@ -58,12 +58,12 @@ namespace Shadowbus
         }
         #endregion
 
-        [HarmonyPatch(typeof(LocalLog), nameof(LocalLog.AddRoomCreateLog))]
-        [HarmonyPostfix]
-        public static void LocalLog_AddRoomCreateLog_Postfix(LocalLog __instance, string log)
-        {
-            Plugin.Logger.LogInfo($"Offlinizer: LocalLog.AddRoomCreateLog called with: {log}");
-        }
+        //[HarmonyPatch(typeof(LocalLog), nameof(LocalLog.AddRoomCreateLog))]
+        //[HarmonyPostfix]
+        //public static void LocalLog_AddRoomCreateLog_Postfix(LocalLog __instance, string log)
+        //{
+        //    Plugin.Logger.LogInfo($"Offlinizer: LocalLog.AddRoomCreateLog called with: {log}");
+        //}
 
         [HarmonyPatch(typeof(LoadDetail), nameof(LoadDetail.ConvertJsonData))]
         [HarmonyPostfix]
