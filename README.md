@@ -1,18 +1,33 @@
 # Shdowbus
-Shadowverse 国际服 mod 工具
-
-## 安装
-首先安装 bepinex （mono 32位版本）
-将本 dll 和 newtonsoft dll一同放到 bepinex 的 plugins 文件夹
+Shadowverse 国际服 单机化 & mod 工具
 
 ## 功能
- - 修改原有卡牌
- - 新增自定义卡牌
- - 读取外部 png 文件作为卡图
- - 自定义我方和对方卡组（无视职业、token限制）
- - 热重载以上所有修改
+ - [x] 单机化，在游戏关服后可以继续游玩，目前支持查看主界面，编辑卡组（仅无限制），与CPU对战，开包（仅展示开包、翻牌动画，无实际效果）
+ - [x] 默认全卡999张、全皮肤、全卡背，可以在卡组编辑时使用（不支持随机皮肤选项）
+ - [x] 无限制卡组编辑: 无视职业及其他限制，可以往卡组放入任何卡牌（包含token），无数量限制，无卡组总张数限制。目前仅支持无限制的卡组。
+ - [x] 自定义AI卡组
+ - [ ] 强化AI
+ - [ ] 卡牌Mod
 
-## 卡牌修改/新增
+
+## 安装
+### 成品安装
+到https://pan.baidu.com/s/1iNJ7HMVR2cbV1aKvLzI2AA?pwd=7ejh 下载 bepinex 和 本插件压缩包，解压到游戏根目录即可。
+
+### 自行安装
+1.首先安装 bepinex （mono 32位版本），从官网下载解压到根目录。
+2.将本 shadowbus.dll 和 newtonsoft.dll一同放到 bepinex 的 plugins 文件夹。
+3.从上面百度网盘的 shadowverse.zip 中解压出 Mods 文件夹放到游戏根目录
+
+
+## 自定义 AI 卡组
+在 `Mods/AISettings.json` 设置，将 `enable` 设置为 `true` 即启动自定义AI卡组。将 `deckName` 设置为自己的卡组名称即可生效。
+
+与AI对战的方式:游戏中选择 单人>对战 即可。
+
+
+## 卡牌 Mod（开发中）
+### 卡牌修改/新增
 通过 `mods\cardmaster\` 中的 json 文件实现，json实例如下：
 ```json
 [{
@@ -47,9 +62,6 @@ Shadowverse 国际服 mod 工具
     }
 }]
 ```
-
-## 卡图
+### 卡图
 将 png 放置在 `mods\cardimages\` 下即可，需要自行提前调整好宽高比
 
-## 卡组
-纯文本文件，每一行写一个卡牌 id 即可，#后面的文本会被无视，可以作注释用
