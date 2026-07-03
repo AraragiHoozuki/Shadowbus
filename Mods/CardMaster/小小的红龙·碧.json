@@ -1,0 +1,79 @@
+[
+  {
+    "newCard": false,
+    "cardId": 0,
+    "templateCardId": 119031011,
+    "boolFields": {
+      "IsFoil": true,
+      "IsResurgentCard": false,
+      "IsVariableCost": false
+    },
+    "intFields": {
+      "CardId": 119031011,
+      "ResourceCardId": 119031011,
+      "CharType": 1,
+      "Clan": 0,
+      "SummonMoveType": 16,
+      "SummonEffectType": 1,
+      "Cost": 1,
+      "Atk": 1,
+      "Life": 1,
+      "EvoAtk": 2,
+      "EvoLife": 2,
+      "ChantCount": 0,
+      "Rarity": 3,
+      "GetRedEther": 600,
+      "UseRedEther": 0,
+      "EvoEffectType": 1,
+      "BaseCardId": 119031010,
+      "NormalCardId": 119031010,
+      "FoilCardId": 119031011,
+      "SameKindNumMaxInUnlimited": 3,
+      "SameKindNumMaxInCrossoverMainClass": 3,
+      "SameKindNumMaxInCrossoverSubClass": 3,
+      "SortIndex": 317
+    },
+    "stringChangeFields": {
+      "SkillDescription": "[u][ffcd45]入场曲[-][/u] 进化。若你的剩余EP比对方多，则抽取1张卡牌。（无法进化的回合，剩余的EP为0）",
+      "EvoSkillDescription": "",
+      "CardHashId": "764JZ",
+      "CardSetId": "10019",
+      "Path": "119031010",
+      "Skill": "evolve,draw",
+      "SkillTiming": "when_play,when_play",
+      "SkillCondition": "character=me,{me.usable_ep}>{op.usable_ep}",
+      "SkillTarget": "character=me,character=me&target=deck&card_type=all&random_count=1",
+      "SkillOption": "none,none",
+      "SkillPreprocess": "none,none",
+      "SkillIcon": "",
+      "SummonEffectPath": "smn_holy_normal_1",
+      "SummonSePath": "se_smn_holy_normal_1",
+      "DestroyEffectPath": "",
+      "PlayVoice": "119031010_1,119031010_7_900041140,119031010_8_900041140",
+      "EvoVoice": "119031010_3",
+      "AtkVoice": "119031010_2",
+      "DestroyVoice": "119031010_4",
+      "SkillVoice": ""
+    },
+    "stringAppendFields": {},
+    "stringArrayFields": {
+      "SkillEffectPath": [],
+      "SkillSe": [],
+      "SkillEffectTime": [
+        "1"
+      ],
+      "EvoSkillEffectPath": [],
+      "EvoSkillSe": [],
+      "EvoSkillEffectTime": [
+        "1"
+      ],
+      "EvolEffectPath": [
+        "smn_evo_normal_1"
+      ],
+      "EvolSePath": [
+        "se_smn_evo_normal_1"
+      ]
+    },
+    "localizationFields": {}
+  }
+]

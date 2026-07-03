@@ -1,0 +1,195 @@
+{
+  "data_headers": {
+    "short_udid": 986309026,
+    "viewer_id": 620044011,
+    "sid": "",
+    "servertime": 1782850289,
+    "result_code": 1
+  },
+  "data": {
+    "user_info": {
+      "device_type": "2",
+      "name": "Araragi",
+      "country_code": "",
+      "max_friend": "20",
+      "last_play_time": "2026-06-30 20:11:29",
+      "is_received_two_pick_mission": "1",
+      "birth": "19940901",
+      "selected_emblem_id": "1155410110",
+      "selected_degree_id": "300035",
+      "mission_change_time": "2022-12-02 09:15:20",
+      "mission_receive_type": "0",
+      "is_official": "0",
+      "is_official_mark_displayed": "0"
+    },
+    "sealed_info": {
+      "enable": 1,
+      "crystal_cost": 600,
+      "rupy_cost": 600,
+      "ticket_cost": 4,
+      "is_join": false,
+      "pack_info": [10032, 10032, 10031, 10030, 10029],
+      "deck_using_num_min": 30,
+      "schedule_id": 21,
+      "is_deck_code_maintenance": false,
+      "sales_period_info": { "sales_period_series": 33 }
+    },
+    "colosseum_info": { "is_colosseum_period": false },
+    "is_available_colosseum_free_entry": false,
+    "arena_info": [
+      {
+        "mode": 1,
+        "enable": 1,
+        "cost": 150,
+        "rupy_cost": 150,
+        "ticket_cost": 1,
+        "is_join": false,
+        "format_info": {
+          "two_pick_type": "3",
+          "card_pool_name": "Winter Cup 2021",
+          "announce_id": "0",
+          "card_pool_url": "https://shadowverse-portal.com/cardlist_2pick_08?lang=ja",
+          "start_time": "2026-06-01 02:00:00",
+          "end_time": "2099-07-01 01:59:59"
+        },
+        "sales_period_info": { "sales_period_time": "2099-07-01 01:59:59" }
+      }
+    ],
+    "is_arena_challenge_period": true,
+    "is_hidden_boss_appeared": false,
+    "competition_info": { "is_competition_period": false },
+    "treasure_info": null,
+    "unread_present_count": 0,
+    "unreceived_mission_reward_count": 0,
+    "lottery_period_info": null,
+    "master_point_ranking_period": {
+      "id": "120",
+      "period_num": "119",
+      "necessary_score": "0",
+      "begin_time": "2026-06-01 02:00:00",
+      "end_time": "2099-07-01 01:59:59"
+    },
+    "last_announce_id": "3352",
+    "last_announce_update_time": "2026-06-25 10:09:07",
+    "unfinished_battle_exists": false,
+    "is_joined_room": false,
+    "receive_friend_apply_count": 0,
+    "feature_maintenance_list": [],
+    "can_give_daily_login_bonus": false,
+    "friend_battle_invite_count": 0,
+    "user_config": {
+      "receive_invitation": "1",
+      "receive_invitation_in_battle": "1",
+      "receive_invitation_in_offline": "1",
+      "receive_friend_apply": "1",
+      "is_allow_send_adjust": "0",
+      "is_foil_preferred": "0",
+      "is_prize_preferred": "0"
+    },
+    "banner": [
+      {
+        "image_name": "banner_000788",
+        "click": "account_transition_with_two",
+        "status": "10",
+        "change_time": "10",
+        "remaining_time": "0",
+        "image_paths": []
+      },
+      {
+        "image_name": "banner_000220",
+        "click": "deck_intro_rotation",
+        "status": "34",
+        "change_time": "10",
+        "remaining_time": "0",
+        "image_paths": []
+      },
+      {
+        "image_name": "banner_000841",
+        "click": "mission",
+        "status": "2",
+        "change_time": "10",
+        "remaining_time": "0",
+        "image_paths": []
+      }
+    ],
+    "sub_banner": null,
+    "sub_banner_list": [],
+    "user_mypage_info": {
+      "user_mypage_setting": {
+        "mypage_id": "1211410310",
+        "select_type": "1",
+        "mypage_id_list": [
+          "1211410310",
+          "1212410310",
+          "1213410310",
+          "1214410310",
+          "1215410310",
+          "1216410310",
+          "1217410310",
+          "1218410310"
+        ]
+      }
+    },
+    "user_offline_event": [],
+    "convention": {
+      "is_join_tournament": false,
+      "recent_start_date": null,
+      "is_admin_watch_user": false
+    },
+    "special_crystal_info": [],
+    "room_type_in_session": {
+      "special_deck_format_list": [
+        { "deck_format": "5", "end_time": "2099-06-26 19:59:59" }
+      ],
+      "special_two_pick_list": [
+        {
+          "is_challenge_format": "1",
+          "two_pick_type": "3",
+          "end_time": "2099-07-01 01:59:59"
+        },
+        {
+          "is_challenge_format": "1",
+          "two_pick_type": "5",
+          "end_time": "2099-07-01 01:59:59"
+        }
+      ]
+    },
+    "guild_notification": {
+      "guild_id": "341535304",
+      "guild_room_message_id": null,
+      "is_join_request": false,
+      "is_invited": false
+    },
+    "shop_notification": {
+      "card_pack": {
+        "is_open_free_gacha_campaign": false,
+        "can_free_gacha": false
+      },
+      "build_deck": [],
+      "sleeve": [],
+      "leader_skin": []
+    },
+    "pre_release_status": 0,
+    "gathering_info": { "has_invite": 0, "is_entry": 0 },
+    "quest": {
+      "is_open": false,
+      "is_display_badge": false,
+      "is_daily_first_access": false,
+      "end_time": "",
+      "name": ""
+    },
+    "basic_puzzle": { "is_display_badge": false },
+    "all_card_enabled_period": null,
+    "user_item_list": [
+      { "item_id": "1", "number": "2" },
+      { "item_id": "1000", "number": "42" },
+      { "item_id": "1001", "number": "44" }
+    ],
+    "is_battle_pass_period": true,
+    "story_notification": {
+      "is_display_ribbon": false,
+      "is_display_badge": false
+    },
+    "home_dialog_list": []
+  }
+}

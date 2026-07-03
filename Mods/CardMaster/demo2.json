@@ -1,0 +1,26 @@
+[{
+    "newCard": true,  
+    "cardId": 999990002,
+    "templateCardId": 122814010,
+    "intFields": {
+        "Rarity": 4,
+        "ResourceCardId": 999990002
+    },
+    "stringChangeFields": {
+    },
+    "stringAppendFields": {
+        "Skill": ",draw",
+        "SkillTiming": ",self_turn_start",
+        "SkillCondition": ",character=me&target=deck_self&card_type=spell",
+        "SkillTarget": ",character=me&target=deck_self&card_type=spell",
+        "SkillOption": ",is_open=true",
+        "SkillPreprocess": ",preprocess_condition=({me.hand_other_self.count}<=8)&per_turn=1:same_base_card_id"
+    },
+    "localizationFields": {
+        "CardName": "改良实验 NEW",
+        "Description": "",
+        "EvoDescription": "",
+        "SkillDescription": "",
+        "EvoSkillDescription": ""
+    }
+}]

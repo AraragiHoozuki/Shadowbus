@@ -1,5 +1,4 @@
-﻿using BepInEx.Core.Logging.Interpolation;
-using Cute;
+﻿using Cute;
 using HarmonyLib;
 using LitJson;
 using System;
@@ -7,11 +6,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using UnityEngine;
 using Wizard;
-using Wizard.Title;
 
 namespace Shadowbus
 {
@@ -22,7 +17,7 @@ namespace Shadowbus
         [HarmonyPrefix]
         public static bool SetUp_StartTitleCheckTask(ref SetUp __instance)
         {
-            Plugin.Logger.LogInfo($"Offlinizer: Skipped api: check/special_title");
+            Plugin.Logger.LogInfo($"[Offlinizer] Skipped api: check/special_title");
             return false;
         }
 
@@ -31,7 +26,7 @@ namespace Shadowbus
         public static bool Certification_GameStartCheckTaskExec(Certification __instance, ref IEnumerator __result)
         {
             __result = SkipGameStartCheckCoroutine();
-            Plugin.Logger.LogInfo($"Offlinizer: Skipped api: check/game_start");
+            Plugin.Logger.LogInfo($"[Offlinizer] Skipped api: check/game_start");
             return false;
         }
         private static IEnumerator SkipGameStartCheckCoroutine()
@@ -57,14 +52,6 @@ namespace Shadowbus
             __instance.IsAcquired = true;
         }
         #endregion
-
-        //[HarmonyPatch(typeof(LocalLog), nameof(LocalLog.AddRoomCreateLog))]
-        //[HarmonyPostfix]
-        //public static void LocalLog_AddRoomCreateLog_Postfix(LocalLog __instance, string log)
-        //{
-        //    Plugin.Logger.LogInfo($"Offlinizer: LocalLog.AddRoomCreateLog called with: {log}");
-        //}
-
         [HarmonyPatch(typeof(LoadDetail), nameof(LoadDetail.ConvertJsonData))]
         [HarmonyPostfix]
         public static void LoadDetail_ConvertJsonData_Postfix(LoadDetail __instance)
@@ -93,7 +80,7 @@ namespace Shadowbus
                 }
                 catch (Exception ex)
                 {
-                    Plugin.Logger.LogError($"Offlinizer: Failed to load unlimited deck from {file}: {ex.Message}");
+                    Plugin.Logger.LogError($"[Offlinizer] Failed to load unlimited deck from {file}: {ex.Message}");
                 }
             });
             if (!hasEmptyDecks)
@@ -143,7 +130,7 @@ namespace Shadowbus
                 }
                 catch (Exception ex)
                 {
-                    Plugin.Logger.LogError($"Offlinizer: Failed to load unlimited deck from {file}: {ex.Message}");
+                    Plugin.Logger.LogError($"[Offlinizer] Failed to load unlimited deck from {file}: {ex.Message}");
                 }
             });
             return false;
@@ -175,7 +162,7 @@ namespace Shadowbus
                 }
                 catch (Exception ex)
                 {
-                    Plugin.Logger.LogError($"Offlinizer: Failed to load unlimited deck from {file}: {ex.Message}");
+                    Plugin.Logger.LogError($"[Offlinizer] Failed to load unlimited deck from {file}: {ex.Message}");
                 }
             });
             return false;
@@ -202,7 +189,7 @@ namespace Shadowbus
                 }
                 catch (Exception ex)
                 {
-                    Plugin.Logger.LogError($"Offlinizer: Failed to load unlimited deck from {file}: {ex.Message}");
+                    Plugin.Logger.LogError($"[Offlinizer] Failed to load unlimited deck from {file}: {ex.Message}");
                 }
             });
             return false;
@@ -254,7 +241,7 @@ namespace Shadowbus
                 }
                 catch (Exception ex)
                 {
-                    Plugin.Logger.LogError($"Offlinizer: Failed to load unlimited deck from {file}: {ex.Message}");
+                    Plugin.Logger.LogError($"[Offlinizer] Failed to load unlimited deck from {file}: {ex.Message}");
                 }
             });
             return false;

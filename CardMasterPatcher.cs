@@ -4,6 +4,7 @@ using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using Wizard;
@@ -12,15 +13,15 @@ namespace Shadowbus
 {
     public class CardParameterPatch
     {
-        public bool newCard;
-        public int cardId;
+        public bool newCard = false;
+        public int cardId = 0;
         public int templateCardId;
-        public Dictionary<string, bool> boolFields;
-        public Dictionary<string, int> intFields;
-        public Dictionary<string, string> stringChangeFields;
-        public Dictionary<string, string> stringAppendFields;
-        public Dictionary<string, string[]> stringArrayFields;
-        public Dictionary<string, string> localizationFields;
+        public Dictionary<string, bool> boolFields = [];
+        public Dictionary<string, int> intFields = [];
+        public Dictionary<string, string> stringChangeFields = [];
+        public Dictionary<string, string> stringAppendFields = [];
+        public Dictionary<string, string[]> stringArrayFields = [];
+        public Dictionary<string, string> localizationFields = [];
 
         public void PatchTemplate(CardParameter card)
         {
@@ -73,6 +74,54 @@ namespace Shadowbus
                 Plugin.Logger.LogError($"Error patching card {cardId}: {e.Message}");
             }
 
+        }
+
+        public void ConvertFrom(CardParameter original)
+        {
+            PropertyInfo[] properties = typeof(CardParameter).GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            templateCardId = original.CardId;
+            foreach (PropertyInfo property in properties)
+            {
+                if (!property.CanWrite||!property.CanRead || property.GetIndexParameters().Length > 0)
+                {
+                    continue;
+                }
+
+                if (property.Name == "CardId")
+                {
+                    continue;
+                }
+
+                object value = property.GetValue(original);
+                Type propType = property.PropertyType;
+
+                if (propType == typeof(int))
+                {
+                    this.intFields[property.Name] = (int)value;
+                }
+                else if (propType == typeof(bool))
+                {
+                    this.boolFields[property.Name] = (bool)value;
+                }
+                else if (propType == typeof(string))
+                {
+                    if (value != null)
+                    {
+                        this.stringChangeFields[property.Name] = (string)value;
+                    }
+                }
+                else if (propType == typeof(string[]))
+                {
+                    if (value != null)
+                    {
+                        this.stringArrayFields[property.Name] = (string[])value;
+                    }
+                }
+                else if (propType.IsEnum)
+                {
+                    this.intFields[property.Name] = (int)value;
+                }
+            }
         }
     }
     public class CardMasterPatcher

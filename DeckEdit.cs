@@ -1,12 +1,9 @@
-﻿using Cute;
-using HarmonyLib;
-using System;
+﻿using HarmonyLib;
+using Newtonsoft.Json;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using UnityEngine;
 using Wizard;
-using Wizard.Battle.View;
 using Wizard.DeckCardEdit;
 
 namespace Shadowbus
@@ -89,22 +86,6 @@ namespace Shadowbus
         //}
 
         
-
-        //[HarmonyPatch(typeof(DataMgr), nameof(DataMgr.SetCurrentEnemyDeckData))]
-        //[HarmonyPrefix]
-        //public static bool DataMgr_SetCurrentEnemyDeckData_Patch(ref IList<int> deckdata)
-        //{
-        //    if (Plugin.Instance.UseCustomDeckOpponent)
-        //    {
-        //        var path = Path.Combine("Mods", "Decks", Plugin.Instance.CustomDeckOpponent);
-        //        if (File.Exists(path))
-        //        {
-        //            List<int> deck = LoadDeck(path);
-        //            deckdata = deck;
-        //        }
-        //    }
-        //    return true;
-        //}
         [HarmonyPatch(typeof(FilterController), nameof(FilterController.InitializeFilterForDeckEdit))]
         [HarmonyPrefix]
         public static bool FilterController_InitializeFilterForDeckEdit_Patch(FilterController __instance, ref ClassSet classSet)
@@ -145,13 +126,6 @@ namespace Shadowbus
             return false;
         }
 
-        [HarmonyPatch(typeof(CardObject), nameof(CardObject.AttachGrayShader))]
-        [HarmonyPrefix]
-        public static bool CardObject_AttachGrayShader_Patch()
-        {
-            return false;
-        }
-
         [HarmonyPatch(typeof(CardSelectListUIBase), nameof(CardSelectListUIBase.IsRemainingAddableCardToSelectionArea))]
         [HarmonyPostfix]
         public static void CardSelectListUIBase_IsRemainingAddableCardToSelectionArea_Patch(ref bool __result)
@@ -184,6 +158,44 @@ namespace Shadowbus
         {
             canUseNonPossessionCard = true;
             return true;
+        }
+
+
+        [HarmonyPatch(typeof(CardCraftPanel), nameof(CardCraftPanel.UpdateCraftPanel))]
+        [HarmonyPrefix]
+        public static bool CardCraftPanel_UpdateCraftPanel_Prefix(CardCraftPanel __instance, CardParameter inCardParam)
+        {
+            __instance._createButton.gameObject.SetActive(true);
+            __instance._cantCreateLabel.gameObject.SetActive(false);
+            __instance._destructButton.gameObject.SetActive(true);
+            __instance._cantDestructLabel.gameObject.SetActive(false);
+            __instance._cantCreateDestructLabel.gameObject.SetActive(false);
+
+            Utils.ChangeChildUILabelText(__instance._createButton.gameObject, "LabelBuy", "导出卡牌数据", true);
+            Utils.ChangeChildUILabelText(__instance._createButton.gameObject, "RedEtherlabelBuyKey", "卡牌ID", true);
+            Utils.ChangeChildUILabelText(__instance._createButton.gameObject, "RedEtherlabelBuy2", "卡牌ID", true);
+            __instance._useRedetherLabel.text = inCardParam.CardId.ToString();
+
+            UIEventListener.Get(__instance._createButton.gameObject).onClick = delegate (GameObject obj)
+            {
+                CardParameterPatch[] patches = [new CardParameterPatch()];
+                patches[0].ConvertFrom(inCardParam);
+                var path = Path.Combine(PathHelper.CardMasterPath, $"{inCardParam.CardName}.json");
+                File.WriteAllText(path, JsonConvert.SerializeObject(patches, Formatting.Indented));
+                Plugin.Logger.LogInfo($"Card {inCardParam.CardName} exported to {path}");
+            };
+            return false;
+        }
+
+        [HarmonyPatch(typeof(CardCraftPanel), nameof(CardCraftPanel.Init))]
+        [HarmonyPrefix]
+        public static bool CardCraftPanel_Init_Prefix(CardCraftPanel __instance)
+        {
+            UIEventListener.Get(__instance._destructButton.gameObject).onClick = delegate (GameObject obj)
+            {
+                Utils.PrintAllComponents(__instance._destructButton);
+            };
+            return false;
         }
 
         //[HarmonyPatch(typeof(CardBundleController), nameof(CardBundleController.SaveDeck))]
@@ -226,34 +238,5 @@ namespace Shadowbus
         //    }
         //    return true;
         //}
-
-        public static List<int> LoadDeck(string path)
-        {
-            string[] lines = File.ReadAllLines(path);
-            List<int> deck = [];
-            foreach (string line in lines)
-            {
-                string[] splitted = line.Split(['#'], StringSplitOptions.RemoveEmptyEntries);
-                if (splitted.Length < 1) continue;
-                string ids = splitted[0];
-                if (int.TryParse(ids, out int card_id))
-                {
-                    deck.Add(card_id);
-                }
-                else
-                {
-                    Plugin.Logger.LogWarning($"card ${ids} in deck ${path} cannot be parsed and is skipped.");
-                }
-            }
-            return deck;
-        }
-
-        public static IEnumerable<string> GetDeckNames()
-        {
-            var mods_folder = Directory.CreateDirectory("Mods");
-            var card_master_folder = mods_folder.CreateSubdirectory("Decks");
-            var patches = card_master_folder.GetFiles("*.svd");
-            return patches.Select(f => f.Name);
-        }
     }
 }

@@ -1,0 +1,108 @@
+[
+  {
+    "newCard": false,
+    "cardId": 0,
+    "templateCardId": 930244071,
+    "boolFields": {
+      "IsTribeAll": false,
+      "IsChoiceEvolutionCard": false,
+      "IsFoil": true,
+      "IsResurgentCard": false,
+      "IsVariableCost": false,
+      "IsPrizeCard": false,
+      "IsBasicCard": false,
+      "IsTokenCard": true,
+      "IsCollaboCard": false,
+      "IsEvolveChoiceCard": false,
+      "IsPhantomCard": false,
+      "IsReprintedCard": false,
+      "IsEnableFavorite": true,
+      "IsPreReleaseCard": false,
+      "IsNotCraftDestruct": true,
+      "CanCraft": false
+    },
+    "intFields": {
+      "CardId": 930244071,
+      "ResourceCardId": 129214011,
+      "CharType": 4,
+      "Clan": 2,
+      "SummonMoveType": 16,
+      "SummonEffectType": 1,
+      "Cost": -1,
+      "Atk": 0,
+      "Life": 0,
+      "EvoAtk": 0,
+      "EvoLife": 0,
+      "ChantCount": 0,
+      "Rarity": 1,
+      "GetRedEther": 0,
+      "UseRedEther": 0,
+      "EvoEffectType": 1,
+      "BaseCardId": 930244070,
+      "NormalCardId": 930244070,
+      "FoilCardId": 930244071,
+      "SameKindNumMaxInUnlimited": 3,
+      "SameKindNumMaxInCrossoverMainClass": 3,
+      "SameKindNumMaxInCrossoverSubClass": 3,
+      "SortIndex": 9
+    },
+    "stringChangeFields": {
+      "CardName": "娜哈特·纳赫德的技巧",
+      "CardHiragana": "娜哈特·纳赫德的技巧",
+      "TribeName": "ALL",
+      "SkillDescription": "舍弃你手牌中的1张随从。将1张与其同名的卡牌加入牌组，使其获得士兵类型。抽取1张卡牌。",
+      "EvoSkillDescription": "",
+      "Description": "",
+      "EvoDescription": "",
+      "CardVoice": "",
+      "ConvertedSkillDescription": "舍弃你手牌中的1张随从。将1张与其同名的卡牌加入牌组，使其获得士兵类型。抽取1张卡牌。",
+      "ConvertedEvoSkillDescription": "",
+      "CardHashId": "tScNd",
+      "CardSetId": "90000",
+      "Path": "930244070",
+      "Skill": "discard,update_deck,change_affiliation,draw",
+      "SkillTiming": "when_play,when_play,when_play,when_play",
+      "SkillCondition": "character=me,character=me,character=me,character=me",
+      "SkillTarget": "character=me&target=hand&card_type=unit&select_count=1,character=me&target=last_target&card_type=all,character=me&target=skill_update_deck_card&card_type=unit,character=me&target=deck&card_type=all&random_count=1",
+      "SkillOption": "none,type=add,tribe=legion&type=add,none",
+      "SkillPreprocess": "none,none,none,none",
+      "SkillIcon": "",
+      "SummonEffectPath": "smn_wind_normal_1",
+      "SummonSePath": "se_smn_wind_normal_1",
+      "DestroyEffectPath": "",
+      "PlayVoice": "930244070_1",
+      "EvoVoice": "",
+      "AtkVoice": "",
+      "DestroyVoice": "",
+      "SkillVoice": ""
+    },
+    "stringAppendFields": {},
+    "stringArrayFields": {
+      "SkillEffectPath": [
+        "btl_other_up",
+        "btl_other_up",
+        "btl_deck_up_1"
+      ],
+      "SkillSe": [
+        "se_btl_other_up",
+        "se_btl_other_up",
+        "se_btl_deck_up_1"
+      ],
+      "SkillEffectTime": [
+        "0"
+      ],
+      "EvoSkillEffectPath": [],
+      "EvoSkillSe": [],
+      "EvoSkillEffectTime": [
+        "1"
+      ],
+      "EvolEffectPath": [
+        "smn_evo_normal_1"
+      ],
+      "EvolSePath": [
+        "se_smn_evo_normal_1"
+      ]
+    },
+    "localizationFields": {}
+  }
+]

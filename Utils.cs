@@ -1,10 +1,5 @@
-﻿using BepInEx;
-using System;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using UnityEngine;
 
 namespace Shadowbus
@@ -29,6 +24,52 @@ namespace Shadowbus
                 }
             }
             return null;
+        }
+
+        public static void PrintAllComponents(MonoBehaviour mb)
+        {
+            Plugin.Logger.LogInfo($"=== 开始分析 {mb.name} 上的组件 ===");
+            Component[] selfComponents = mb.GetComponents<Component>();
+            foreach (var comp in selfComponents)
+            {
+                if (comp != null)
+                {
+                    Plugin.Logger.LogInfo($"自身组件: {comp.GetType().FullName}");
+                }
+            }
+            Plugin.Logger.LogInfo("---");
+
+            Component[] childComponents = mb.GetComponentsInChildren<Component>(true);
+            foreach (var comp in childComponents)
+            {
+                if (comp != null && comp.gameObject != mb.gameObject)
+                {
+                    Plugin.Logger.LogInfo($"子物体 [{comp.gameObject.name}] 上的组件: {comp.GetType().FullName}");
+                }
+            }
+
+            Plugin.Logger.LogInfo("=== 分析结束 ===");
+        }
+
+        public static void ChangeChildUILabelText(GameObject obj, string name,string text, bool withStaticText = true)
+        {
+            var child = obj.transform.Find(name);
+            if (child != null)
+            {
+                var label = child.GetComponent<UILabel>();
+                if (label != null)
+                {
+                    if (withStaticText)
+                    {
+                        var staticText = child.GetComponent<StaticTextForUILabel>();
+                        if (staticText != null)
+                        {
+                            staticText.enabled = false;
+                        }
+                    }
+                    label.text = text;
+                }
+            }
         }
     }
 }

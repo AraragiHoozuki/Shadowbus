@@ -13,6 +13,7 @@ public class Plugin : BaseUnityPlugin
     public static readonly string ModPath = System.IO.Path.Combine(Paths.GameRootPath, "Mods");
     public static readonly string UnlimitedDeckPath = System.IO.Path.Combine(ModPath, "UnlimitedDecks");
     public static readonly string AISettingsPath = System.IO.Path.Combine(ModPath, "AISettings.json");
+    public static readonly string CardMasterPath = System.IO.Path.Combine(ModPath, "CardMaster");
     public static Plugin Instance { get; private set; }
 
     public BattleCardBase SelectedCard { get; set; }

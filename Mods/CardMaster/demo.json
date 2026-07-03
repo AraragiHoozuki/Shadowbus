@@ -1,12 +1,10 @@
-[{
+[
+    {
     "newCard": false,  
     "cardId": 0,
     "templateCardId": 124541020,
     "intFields": {
-        "Cost": 5,
-        "Atk": 5,
-        "Life": 5,
-        "ResourceCardId": 999900001
+        "Cost": 6
     },
     "stringChangeFields": {
     },
@@ -19,10 +17,11 @@
         "SkillPreprocess": ",none,none"
     },
     "localizationFields": {
-        "CardName": "测试",
-        "Description": "测试",
+        "CardName": "DEMO",
+        "Description": "",
         "EvoDescription": "",
         "SkillDescription": "",
         "EvoSkillDescription": ""
     }
-}]
+}
+]

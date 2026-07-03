@@ -1,0 +1,35 @@
+{
+  "data_headers": {
+    "sid": "7dae4386090d7486f3f67abdbbe403ea1782850312",
+    "short_udid": 986309026,
+    "viewer_id": 620044011,
+    "servertime": 1782850312,
+    "result_code": 1
+  },
+  "data": {
+    "reward_list": [
+      { "reward_type": 9, "reward_id": 0, "reward_num": 530 },
+      { "reward_type": 5, "reward_id": 116441010, "reward_num": 4 },
+      { "reward_type": 5, "reward_id": 116441010, "reward_num": 4 },
+      { "reward_type": 5, "reward_id": 116441010, "reward_num": 5 },
+      { "reward_type": 5, "reward_id": 116441010, "reward_num": 5 },
+      { "reward_type": 5, "reward_id": 116441010, "reward_num": 4 },
+      { "reward_type": 5, "reward_id": 116441010, "reward_num": 4 },
+      { "reward_type": 5, "reward_id": 116441010, "reward_num": 4 },
+      { "reward_type": 5, "reward_id": 116441010, "reward_num": 4 }
+    ],
+    "pack_list": [
+      { "card_id": 116441010, "rarity": 1, "number": 1 },
+      { "card_id": 116441010, "rarity": 1, "number": 1 },
+      { "card_id": 116441010, "rarity": 1, "number": 1 },
+      { "card_id": 116441010, "rarity": 1, "number": 1 },
+      { "card_id": 116441010, "rarity": 1, "number": 1 },
+      { "card_id": 116441010, "rarity": 1, "number": 1 },
+      { "card_id": 116441010, "rarity": 2, "number": 1 },
+      { "card_id": 116441010, "rarity": 2, "number": 1 }
+    ],
+    "rewards": [],
+    "is_special_effect": false,
+    "mission_result": []
+  }
+}
