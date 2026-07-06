@@ -33,7 +33,7 @@ namespace Shadowbus
             string taskTypeName = currentTask.GetType().Name;
             if (IsTaskSkipped(taskTypeName))
             {
-                Plugin.Logger.LogInfo($"[Offlinizer] 拦截并直接跳过任务: {taskTypeName}");
+                Plugin.Logger.LogInfo($"[Offlinizer] Skipped Task: {taskTypeName}");
                 yield return ProcessSkipTask(__instance, currentTask);
             } else
             if (IsTaskOfflinized(taskTypeName))

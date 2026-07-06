@@ -1,24 +1,94 @@
 ﻿using Cute;
 using HarmonyLib;
 using LitJson;
+using Newtonsoft.Json;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
+using UnityEngine;
 using Wizard;
+using Wizard.Title;
 
 namespace Shadowbus
 {
     public class Offlinizer
     {
         #region GameStart
+        [HarmonyPatch(typeof(AssetManager), nameof(AssetManager.InitializeManifest))]
+        [HarmonyPrefix]
+        public static bool AssetManager_InitializeManifest_Prefix(AssetManager __instance, Action completeCallback, ref IEnumerator __result)
+        {
+            __result = SkipInitializeManifestCoroutine(__instance, completeCallback);
+            
+            return false;
+        }
+        private static IEnumerator SkipInitializeManifestCoroutine(AssetManager __instance, Action completeCallback)
+        {
+            
+            List<string> list;
+            List<string> loadList;
+            __instance.PrepareManifestList(out list, out loadList, true);
+            //Plugin.Logger.LogInfo(string.Join("\n",__instance.handleDictionary.Keys.Select(x => $"[Offlinizer] AssetHandle Key: {x}")));
+            yield return __instance.StartCoroutine(Toolbox.ResourcesManager.LoadAssetGroupSync(loadList, null, false));
+            bool isDone = false;
+            __instance.CacheAsset("card_shader_common.unity3d", delegate
+            {
+                isDone = true;
+            });
+            while (!isDone)
+            {
+                yield return 0;
+            }
+            loadList.Sort();
+            __instance.ClearManifestOfManifests();
+            Toolbox.SavedataManager.Save();
+            QualitySettings.vSyncCount = 0;
+            Application.targetFrameRate = Toolbox.QualityManager.GetFrameRate();
+            completeCallback?.Invoke();
+            yield break;
+        }
+
+        [HarmonyPatch(typeof(ResourceDownloader), nameof(ResourceDownloader.CheckAndStartNeedDownload))]
+        [HarmonyPrefix]
+        public static bool ResourceDownloader_CheckAndStartNeedDownload_Prefix(ResourceDownloader __instance)
+        {
+            __instance.IsFinished = true;
+            return false;
+        }
+
         [HarmonyPatch(typeof(SetUp), nameof(SetUp.StartTitleCheckTask))]
         [HarmonyPrefix]
         public static bool SetUp_StartTitleCheckTask(ref SetUp __instance)
         {
             Plugin.Logger.LogInfo($"[Offlinizer] Skipped api: check/special_title");
             return false;
+        }
+
+        [HarmonyPatch(typeof(SignUpTask), nameof(SignUpTask.Parse))]
+        [HarmonyPrefix]
+        public static bool SignUpTask_Parse_Prefix(SignUpTask __instance)
+        {
+            JsonData jsonData = __instance.ResponseData["data_headers"];
+            Certification.udid = jsonData["udid"].ToString();
+            return true;
+        }
+
+        [HarmonyPatch(typeof(Certification), nameof(Certification.Login))]
+        [HarmonyPrefix]
+        public static bool Certification_Login_Prefix(Certification __instance, ref IEnumerator __result)
+        {
+            if (Certification.ViewerId == 0)
+            { Certification.ViewerId = 1; }
+            return true;
+        }
+
+        private static IEnumerator SkipSignUpCoroutine(Certification __instance)
+        {
+            yield return __instance.StartCoroutine(__instance.GameStartCheckTaskExec());
+            yield break;
         }
 
         [HarmonyPatch(typeof(Certification), nameof(Certification.GameStartCheckTaskExec))]

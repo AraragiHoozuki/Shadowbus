@@ -14,12 +14,14 @@ namespace Shadowbus
         public static readonly string UnlimitedDeckPath = Path.Combine(ModPath, "UnlimitedDecks");
         public static readonly string CardMasterPath = Path.Combine(ModPath, "CardMaster");
         public static readonly string AISettingsPath = Path.Combine(ModPath, "AISettings.json");
+        public static readonly string AIDataPath = Path.Combine(ModPath, "AIData");
 
         static PathHelper()
         {
             Directory.CreateDirectory(ModPath);
             Directory.CreateDirectory(UnlimitedDeckPath);
             Directory.CreateDirectory(CardMasterPath);
+            Directory.CreateDirectory(AIDataPath);
         }
     }
 }
