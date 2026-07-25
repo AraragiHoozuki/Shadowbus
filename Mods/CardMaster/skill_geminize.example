@@ -1,0 +1,18 @@
+[
+  {
+    "newCard": false,
+    "cardId": 0,
+    "templateCardId": 100011010,
+    "stringAppendFields": {
+      "Skill": ",skill_geminize",
+      "SkillTiming": ",when_activate",
+      "SkillCondition": ",character=me",
+      "SkillTarget": ",character=both&target=inplay&card_type=unit&select_count=1",
+      "SkillOption": ",none",
+      "SkillPreprocess": ",none"
+    },
+    "localizationFields": {
+      "SkillDescription": "Activate: Copy a target follower's name, traits, attack, defense, ability text, and abilities. Remove this follower's other abilities."
+    }
+  }
+]

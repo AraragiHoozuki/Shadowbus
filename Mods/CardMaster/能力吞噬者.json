@@ -1,0 +1,26 @@
+[
+  {
+    "newCard": true,
+    "cardId": 999990004,
+    "templateCardId": 100011010,
+    "intFields": {
+      "CardId": 999990004,
+      "BaseCardId": 999990004,
+      "NormalCardId": 999990004,
+      "FoilCardId": 999990005,
+      "ResourceCardId": 100011010
+    },
+    "stringChangeFields": {
+      "Skill": "skill_acquire_skills,destroy,powerup",
+      "SkillTiming": "when_activate,when_activate,when_activate",
+      "SkillCondition": "character=me,character=me,character=me",
+      "SkillTarget": "character=both&target=inplay_other_self&card_type=unit&select_count=1,character=both&target=selected_cards&card_type=unit,character=me&target=self",
+      "SkillOption": "none,none,add_offense=1&add_life=1",
+      "SkillPreprocess": "use_pp=1,none,none"
+    },
+    "localizationFields": {
+      "CardName": "能力吞噬者",
+      "SkillDescription": "启动（1PP）：获得1个其他随从的全部能力（“获得其他随从能力”的能力除外），破坏该随从，并获得+1/+1。"
+    }
+  }
+]

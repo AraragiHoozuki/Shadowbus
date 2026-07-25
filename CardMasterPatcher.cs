@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using Wizard;
@@ -128,12 +129,56 @@ namespace Shadowbus
     {
         public static Dictionary<int,CardParameter> CardParameterBackup = [];
         public static Dictionary<string, string> CustomLocalization = [];
+        private static readonly ConditionalWeakTable<CardParameter, RuntimeCardText>
+            RuntimeCardTexts = new ConditionalWeakTable<CardParameter, RuntimeCardText>();
+
+        private sealed class RuntimeCardText
+        {
+            public string CardName;
+            public string TribeName;
+            public string SkillDescription;
+            public string EvoSkillDescription;
+            public string Description;
+            public string EvoDescription;
+        }
+
+        public static void SetRuntimeCardText(
+            CardParameter parameter,
+            string cardName,
+            string tribeName,
+            string skillDescription,
+            string evoSkillDescription,
+            string description,
+            string evoDescription)
+        {
+            if (parameter == null)
+            {
+                return;
+            }
+
+            RuntimeCardTexts.Remove(parameter);
+            RuntimeCardTexts.Add(parameter, new RuntimeCardText
+            {
+                CardName = cardName,
+                TribeName = tribeName,
+                SkillDescription = skillDescription,
+                EvoSkillDescription = evoSkillDescription,
+                Description = description,
+                EvoDescription = evoDescription
+            });
+        }
 
 
         [HarmonyPatch(typeof(CardParameter), nameof(CardParameter.CardName), MethodType.Getter)]
         [HarmonyPrefix]
         public static bool CardParameter_CardName_Get(ref CardParameter __instance, ref string __result)
         {
+            if (RuntimeCardTexts.TryGetValue(__instance, out RuntimeCardText runtimeText))
+            {
+                __result = runtimeText.CardName;
+                return false;
+            }
+
             var id = __instance.CardId;
             var key = $"{id}_CardName";
             if (CustomLocalization.TryGetValue(key, out string result)) {
@@ -143,10 +188,28 @@ namespace Shadowbus
             }
             return true;
         }
+        [HarmonyPatch(typeof(CardParameter), nameof(CardParameter.TribeName), MethodType.Getter)]
+        [HarmonyPrefix]
+        public static bool CardParameter_TribeName_Get(ref CardParameter __instance, ref string __result)
+        {
+            if (!RuntimeCardTexts.TryGetValue(__instance, out RuntimeCardText runtimeText))
+            {
+                return true;
+            }
+
+            __result = runtimeText.TribeName;
+            return false;
+        }
         [HarmonyPatch(typeof(CardParameter), nameof(CardParameter.SkillDescription), MethodType.Getter)]
         [HarmonyPrefix]
         public static bool CardParameter_SkillDescription_Get(ref CardParameter __instance, ref string __result)
         {
+            if (RuntimeCardTexts.TryGetValue(__instance, out RuntimeCardText runtimeText))
+            {
+                __result = runtimeText.SkillDescription;
+                return false;
+            }
+
             var id = __instance.CardId;
             var key = $"{id}_SkillDescription";
             if (CustomLocalization.TryGetValue(key, out string result))
@@ -161,6 +224,12 @@ namespace Shadowbus
         [HarmonyPrefix]
         public static bool CardParameter_EvoSkillDescription_Get(ref CardParameter __instance, ref string __result)
         {
+            if (RuntimeCardTexts.TryGetValue(__instance, out RuntimeCardText runtimeText))
+            {
+                __result = runtimeText.EvoSkillDescription;
+                return false;
+            }
+
             var id = __instance.CardId;
             var key = $"{id}_EvoSkillDescription";
             if (CustomLocalization.TryGetValue(key, out string result))
@@ -175,6 +244,12 @@ namespace Shadowbus
         [HarmonyPrefix]
         public static bool CardParameter_Description_Get(ref CardParameter __instance, ref string __result)
         {
+            if (RuntimeCardTexts.TryGetValue(__instance, out RuntimeCardText runtimeText))
+            {
+                __result = runtimeText.Description;
+                return false;
+            }
+
             var id = __instance.CardId;
             var key = $"{id}_Description";
             if (CustomLocalization.TryGetValue(key, out string result))
@@ -189,6 +264,12 @@ namespace Shadowbus
         [HarmonyPrefix]
         public static bool CardParameter_EvoDescription_Get(ref CardParameter __instance, ref string __result)
         {
+            if (RuntimeCardTexts.TryGetValue(__instance, out RuntimeCardText runtimeText))
+            {
+                __result = runtimeText.EvoDescription;
+                return false;
+            }
+
             var id = __instance.CardId;
             var key = $"{id}_EvoDescription";
             if (CustomLocalization.TryGetValue(key, out string result))
@@ -229,8 +310,7 @@ namespace Shadowbus
             master ??= CardMaster.GetInstanceForBattle();  
             RevokeCardMasterPatches(master);
             Dictionary<int, CardParameter> masterDict = (Dictionary<int, CardParameter>)AccessTools.Field(typeof(CardMaster), "m_cardParameters").GetValue(master);
-            var mods_folder = Directory.CreateDirectory("Mods");
-            var card_master_folder = mods_folder.CreateSubdirectory("CardMaster");
+            var card_master_folder = Directory.CreateDirectory(Plugin.CardMasterPath);
             var patches = card_master_folder.GetFiles("*.json");
             foreach (var pat in patches)
             {
@@ -259,7 +339,7 @@ namespace Shadowbus
                     else
                     {
                         Plugin.Logger.LogInfo($"adding new card {patch.cardId} with tempalte: {template.CardId}");
-                        var newCard = template.Clone();
+                        var newCard = CardParameterCloner.DeepClone(template);
                         patch.PatchTemplate(newCard);
                         if (!masterDict.ContainsKey(patch.cardId))
                         {

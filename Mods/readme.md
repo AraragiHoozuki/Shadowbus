@@ -1,5 +1,14 @@
 ## Skill Timings
 
+### Shadowbus 自定义主动时点
+
+* `when_activate`（仅 Shadowbus 支持）：卡牌位于己方场上时，在详情面板显示“启动”按钮；点击后主动发动该时点的技能。该时点不会被游戏自动触发，也不会触发入场曲或进化时能力。
+
+* PP 消费：在对应技能的 `SkillPreprocess` 项写入 `use_pp=N`，例如 `,use_pp=2`。当前 PP 小于本次可发动技能的消费总和时，启动按钮会禁用；实际扣费、PP 动画和战斗日志由游戏原生 `SkillPreprocessUsePp` 处理。不需要消费 PP 时继续使用 `none`。
+* 启动特效：技能结算前会在发动卡牌上播放一次通用技能发动特效。
+
+测试配置见 `CardMaster/when_activate.example`。将其扩展名改为 `.json` 后，进入卡组列表即可热重载；无需重新启动游戏。
+
 ### 回合与阶段相关
 * `turn_start` (回合开始)
 * `self_turn_start` (己方回合开始)

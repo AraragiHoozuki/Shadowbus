@@ -1,0 +1,16 @@
+[
+  {
+    "newCard": false,
+    "cardId": 0,
+    "templateCardId": 124541020,
+    "stringAppendFields": {
+      "Skill": ",draw",
+      "SkillTiming": ",when_activate",
+      "SkillCondition": ",character=me",
+      "SkillTarget": ",character=me&target=deck&card_type=all&random_count=1",
+      "SkillOption": ",none",
+      "SkillPreprocess": ",use_pp=1"
+    },
+    "localizationFields": {}
+  }
+]

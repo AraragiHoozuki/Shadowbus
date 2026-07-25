@@ -1,0 +1,18 @@
+[
+  {
+    "newCard": false,
+    "cardId": 0,
+    "templateCardId": 100011010,
+    "stringAppendFields": {
+      "Skill": ",skill_geminize",
+      "SkillTiming": ",when_activate",
+      "SkillCondition": ",character=me",
+      "SkillTarget": ",character=both&target=inplay&card_type=unit&select_count=1",
+      "SkillOption": ",none",
+      "SkillPreprocess": ",use_pp=1"
+    },
+    "localizationFields": {
+      "SkillDescription": "启动（1PP）：复制场上1个随从的名称、类型、攻击力、生命值、效果文本与全部技能，并移除此随从除双生以外的其他技能。"
+    }
+  }
+]

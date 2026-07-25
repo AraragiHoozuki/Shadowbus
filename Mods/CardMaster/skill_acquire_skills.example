@@ -1,0 +1,18 @@
+[
+  {
+    "newCard": false,
+    "cardId": 0,
+    "templateCardId": 100011010,
+    "stringAppendFields": {
+      "Skill": ",skill_acquire_skills",
+      "SkillTiming": ",when_activate",
+      "SkillCondition": ",character=me",
+      "SkillTarget": ",character=both&target=inplay&card_type=unit&select_count=1",
+      "SkillOption": ",none",
+      "SkillPreprocess": ",none"
+    },
+    "localizationFields": {
+      "SkillDescription": "Activate: Gain all abilities and non-stat buffs of a target follower except Acquire Skills abilities. Keep this follower's existing abilities."
+    }
+  }
+]

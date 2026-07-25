@@ -2,6 +2,7 @@
 using BepInEx.Logging;
 using BepInEx.Unity.Mono;
 using HarmonyLib;
+using System.Linq;
 
 
 namespace Shadowbus;
@@ -32,13 +33,20 @@ public class Plugin : BaseUnityPlugin
             Harmony.CreateAndPatchAll(typeof(DeckEdit));
             Harmony.CreateAndPatchAll(typeof(CardMasterPatcher));
             Harmony.CreateAndPatchAll(typeof(Offlinizer));
+            var deckListHotReloadHarmony = Harmony.CreateAndPatchAll(typeof(DeckListHotReload));
+            Logger.LogInfo(
+                $"[DeckListHotReload] Harmony registration complete: " +
+                $"{deckListHotReloadHarmony.GetPatchedMethods().Count()} game method(s) patched.");
             Harmony.CreateAndPatchAll(typeof(FakeConnect));
             Harmony.CreateAndPatchAll(typeof(AIManager));
+            Harmony.CreateAndPatchAll(typeof(ActiveSkill));
+            Harmony.CreateAndPatchAll(typeof(GeminizeSkillPatcher));
+            Harmony.CreateAndPatchAll(typeof(AcquireSkillsSkillPatcher));
 
         }
-        catch
+        catch (System.Exception exception)
         {
-            Logger.LogError("Harmony - FAILED to Apply Patch(s)!");
+            Logger.LogError($"Harmony - FAILED to Apply Patch(s): {exception}");
         }
     }
 }
