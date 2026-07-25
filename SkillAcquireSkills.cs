@@ -65,6 +65,7 @@ namespace Shadowbus
             owner.NormalSkills.Complete();
             owner.EvolutionSkills.Complete();
             Skill_geminize.SetCurrentSkills(owner);
+            Skill_geminize.RegisterResidentSkills(owner, parameter.skillProcessor);
             SetPublishedActiveSkillCounts(
                 owner,
                 copiedNormalBuilds,

@@ -69,6 +69,9 @@ Shadowverse/
 | `when_activate` | 为己方场上随从提供主动发动时点；在 `SkillPreprocess` 中使用 `use_pp=N` 设置 PP 消费。 |
 | `skill_geminize` | 复制目标随从的名称、类型、身材、文本与全部技能，并清除自身除该技能外的技能。 |
 | `skill_acquire_skills` | 获得目标随从的全部技能与非身材 Buff，并保留自身技能；不会复制同类型技能或攻击力、生命值修正。 |
+| `skill_mirror` | 成为法术的指定目标时，使对应的法术效果对施法者的随机随从再生效一次。 |
+
+`skill_mirror` 支持 `all=true/false` 和 `include_self=true/false`。前者控制随机一个或全部随从，后者控制镜像目标自身能否成为追加目标；默认分别为 `false` 和 `true`。
 
 具体配置可参考 `Mods/CardMaster/` 下的示例和现有卡牌文件。更多技能时点说明见 [Mods/readme.md](Mods/readme.md)。
 

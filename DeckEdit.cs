@@ -180,7 +180,7 @@ namespace Shadowbus
             {
                 CardParameterPatch[] patches = [new CardParameterPatch()];
                 patches[0].ConvertFrom(inCardParam);
-                var path = Path.Combine(PathHelper.CardMasterPath, $"{inCardParam.CardName}.json");
+                var path = Path.Combine(PathHelper.CardMasterPath, $"{inCardParam.CardName}.example");
                 File.WriteAllText(path, JsonConvert.SerializeObject(patches, Formatting.Indented));
                 Plugin.Logger.LogInfo($"Card {inCardParam.CardName} exported to {path}");
             };

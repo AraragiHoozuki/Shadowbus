@@ -1,0 +1,29 @@
+[
+  {
+    "newCard": true,
+    "cardId": 999990005,
+    "templateCardId": 120341020,
+    "intFields": {
+      "Cost": 2,
+      "Atk": 2,
+      "Life": 2,
+      "EvoAtk": 4,
+      "EvoLife": 4
+    },
+    "stringChangeFields": {
+      "Skill": "force_skill_target,skill_mirror",
+      "SkillTiming": "when_change_inplay,when_change_inplay",
+      "SkillCondition": "{me.inplay_self.unit.count}>0,character=me&target=self&is_inplay=true",
+      "SkillTarget": "character=me&target=self&card_type=unit,character=me&target=self",
+      "SkillOption": "none,all=false&include_self=true",
+      "SkillPreprocess": "none,none"
+    },
+    "localizationFields": {
+      "CardName": "法术棱镜",
+      "Description": "",
+      "EvoDescription": "",
+      "SkillDescription": "当这个随从成为法术的指定目标时，使该法术对施法者的1个随机随从再生效一次。\n对方能力可以选择本随从时，就必须选择本随从。",
+      "EvoSkillDescription": ""
+    }
+  }
+]

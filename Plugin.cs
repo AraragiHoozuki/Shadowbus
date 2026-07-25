@@ -42,6 +42,8 @@ public class Plugin : BaseUnityPlugin
             Harmony.CreateAndPatchAll(typeof(ActiveSkill));
             Harmony.CreateAndPatchAll(typeof(GeminizeSkillPatcher));
             Harmony.CreateAndPatchAll(typeof(AcquireSkillsSkillPatcher));
+            Harmony.CreateAndPatchAll(typeof(MirrorSkillPatcher));
+            Harmony.CreateAndPatchAll(typeof(MirrorResidentEffectPatcher));
 
         }
         catch (System.Exception exception)

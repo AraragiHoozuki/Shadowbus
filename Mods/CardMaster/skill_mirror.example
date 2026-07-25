@@ -1,0 +1,18 @@
+[
+  {
+    "newCard": false,
+    "cardId": 0,
+    "templateCardId": 100011010,
+    "stringAppendFields": {
+      "Skill": ",skill_mirror",
+      "SkillTiming": ",when_change_inplay",
+      "SkillCondition": ",character=me&target=self&is_inplay=true",
+      "SkillTarget": ",character=me&target=self",
+      "SkillOption": ",all=false&include_self=true",
+      "SkillPreprocess": ",none"
+    },
+    "localizationFields": {
+      "SkillDescription": "当这个随从成为法术的指定目标时，使该法术对施法者的1个随机随从再生效一次。"
+    }
+  }
+]

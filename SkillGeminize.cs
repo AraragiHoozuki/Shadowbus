@@ -101,6 +101,7 @@ namespace Shadowbus
             owner.NormalSkills.Complete();
             owner.EvolutionSkills.Complete();
             SetCurrentSkills(owner);
+            RegisterResidentSkills(owner, skillProcessor);
             HasSkillNecromanceField?.SetValue(owner, targetSnapshot.HasSkillNecromance);
             targetSnapshot.SkillApplyInformation.AttachedSkillsInfo.Clear();
             owner.SkillApplyInformation.Combine(targetSnapshot.SkillApplyInformation);
@@ -281,6 +282,26 @@ namespace Shadowbus
             }
 
             CurrentSkillsSetter?.Invoke(owner, new object[] { currentSkills });
+        }
+
+        internal static void RegisterResidentSkills(
+            BattleCardBase owner,
+            SkillProcessor skillProcessor)
+        {
+            if (owner == null || !owner.IsInplay || skillProcessor == null)
+            {
+                return;
+            }
+
+            owner.Skills.CreateAndRegisterWhenChangeInplayInfo(
+                new List<BattleCardBase> { owner },
+                skillProcessor,
+                new BattlePlayerReadOnlyInfoPair(
+                    owner.SelfBattlePlayer,
+                    owner.OpponentBattlePlayer),
+                true,
+                null,
+                null);
         }
     }
 
