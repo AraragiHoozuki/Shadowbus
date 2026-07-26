@@ -1,187 +1,421 @@
-﻿using Cute;
+using Cute;
 using HarmonyLib;
-using LitJson;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using UnityEngine;
 using Wizard;
 
 namespace Shadowbus
 {
+    internal sealed class CustomPracticeButtonLabelGuard : MonoBehaviour
+    {
+        private const string CustomLabelText = "自定义卡组";
+        private UILabel _label;
+
+        public void Initialize(UILabel label)
+        {
+            _label = label;
+            ApplyLabel();
+        }
+
+        private void LateUpdate()
+        {
+            if (_label != null && _label.text != CustomLabelText)
+            {
+                ApplyLabel();
+            }
+        }
+
+        private void ApplyLabel()
+        {
+            if (_label == null)
+            {
+                return;
+            }
+
+            _label.text = CustomLabelText;
+            _label.overflowMethod = UILabel.Overflow.ShrinkContent;
+        }
+    }
+
     public class AIManager
     {
-        [HarmonyPatch(typeof(DataMgr), nameof(DataMgr.SetCurrentEnemyDeckDataFromAIDeck), new Type[] { typeof(string) })]
-        [HarmonyPrefix]
-        public static bool DataMgr_SetCurrentEnemyDeckDataFromAIDeck_Patch(DataMgr __instance)
+        private const string CustomPracticeButtonName = "ShadowbusCustomPracticeButton";
+
+        internal sealed class CustomPracticeSettings
+        {
+            public DeckData Deck;
+            public int EnemyClassId;
+            public ClassCharacterMasterData Leader;
+            public PracticeAISettingData AIPreset;
+            public string LocalDeckCsvPath;
+            public string LocalStyleCsvPath;
+            public string LocalEmoteCsvPath;
+            public int LogicLevel;
+            public int MaxLife;
+        }
+
+        internal sealed class CustomPracticeDeckChoice
+        {
+            public DeckData Deck;
+            public int EnemyClassId;
+        }
+
+        [HarmonyPatch(typeof(ClassSelectionPage), "CreateClassButton")]
+        [HarmonyPostfix]
+        public static void ClassSelectionPage_CreateClassButton_Postfix(ClassSelectionPage __instance)
+        {
+            if (__instance.Mode != ClassSelectionPage.eMode.PracticeSelect ||
+                __instance._classButtonGrid == null ||
+                __instance._classButtonParts == null ||
+                __instance._classCharacterMasterDatas == null ||
+                __instance._classCharacterMasterDatas.Count == 0)
+            {
+                return;
+            }
+
+            Transform customButtonParent = __instance._classButtonGrid.transform.parent;
+            if (customButtonParent == null || customButtonParent.Find(CustomPracticeButtonName) != null)
+            {
+                return;
+            }
+
+            try
+            {
+                ResourcesManager resourcesManager = Toolbox.ResourcesManager;
+                GameObject buttonObject = NGUITools.AddChild(
+                    customButtonParent.gameObject,
+                    __instance._classButtonParts.gameObject);
+                buttonObject.name = CustomPracticeButtonName;
+                buttonObject.SetActive(true);
+
+                Transform topRightClassButton = __instance._classSelectionButtonList
+                    .Where(classButton => classButton != null)
+                    .Select(classButton => classButton.transform)
+                    .OrderByDescending(buttonTransform => buttonTransform.localPosition.x)
+                    .ThenByDescending(buttonTransform => buttonTransform.localPosition.y)
+                    .First();
+                Vector3 customGridPosition = topRightClassButton.localPosition +
+                    new Vector3(
+                        __instance._classButtonGrid.cellWidth,
+                        __instance._classButtonGrid.cellHeight,
+                        0f);
+                buttonObject.transform.position = __instance._classButtonGrid.transform.TransformPoint(customGridPosition);
+
+                ClassSelectionButton button = buttonObject.GetComponent<ClassSelectionButton>();
+                Texture texture = resourcesManager.LoadObject<Texture>(
+                    resourcesManager.GetAssetTypePath(
+                        ClassSelectionButton.CLASS_SELECT_BUTTON_EMPTY,
+                        ResourcesManager.AssetLoadPathType.ClassCharaButton,
+                        true),
+                    true,
+                    false);
+
+                button.Init(
+                    __instance._classCharacterMasterDatas[0],
+                    texture,
+                    delegate
+                    {
+                        GameMgr.GetIns().GetSoundMgr().PlaySe(Se.TYPE.SYS_TOGGLE_ON, false);
+                        ShowDeckSelection(__instance);
+                    },
+                    false,
+                    false,
+                    false);
+
+                button._texture.color = new Color(0.72f, 0.34f, 0.88f, 1f);
+                foreach (UILocalize usedLabelLocalize in button._usedLabel.GetComponents<UILocalize>())
+                {
+                    usedLabelLocalize.enabled = false;
+                    UnityEngine.Object.Destroy(usedLabelLocalize);
+                }
+                button._usedLabel.gameObject.SetActive(true);
+                button._button.isEnabled = true;
+                buttonObject.AddComponent<CustomPracticeButtonLabelGuard>().Initialize(button._usedLabel);
+
+                Plugin.Logger.LogInfo(
+                    $"[AIManager] Added the custom practice button outside the class grid: " +
+                    $"localPosition={buttonObject.transform.localPosition}.");
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogError($"[AIManager] Failed to add the custom practice button.\n{exception}");
+            }
+        }
+
+        private static void ShowDeckSelection(ClassSelectionPage page)
         {
             try
             {
-                if (!File.Exists(Plugin.AISettingsPath))
+                List<CustomPracticeDeckChoice> decks = GetUnlimitedDeckChoices();
+
+                if (decks == null || decks.Count == 0)
                 {
-                    return true;
+                    ShowMessage("自定义练习", "没有可用的无限制卡组。请先在无限制卡组列表中创建一副非空卡组。");
+                    return;
                 }
 
-                var json = File.ReadAllText(Plugin.AISettingsPath);
-                var data = JsonMapper.ToObject(json);
-                if (data == null || !data.IsObject || !data.Keys.Contains("deckName"))
-                {
-                    return true;
-                }
-                if (data["enable"].ToBoolean() != true)
-                {
-                    return true;
-                }
-                string deckName = data["deckName"]?.ToString();
-                if (string.IsNullOrEmpty(deckName))
-                {
-                    return true;
-                }
-                if (DeckListUtility.DeckGroupDataBase == null)
-                {
-                    Plugin.Logger.LogError("[AIManager] 游戏原版 DeckGroupDataBase 尚未初始化。");
-                    return true;
-                }
+                Plugin.Logger.LogInfo(
+                    $"[AIManager] Custom practice deck selector contains {decks.Count} non-empty Unlimited deck(s).");
 
-                DeckGroup deckGroup = DeckListUtility.DeckGroupDataBase.FirstOrDefault(d => d != null && d.DeckFormat == Format.Unlimited && d.AttributeType == DeckAttributeType.CustomDeck);
-                if (deckGroup == null || deckGroup.DeckDataList == null)
-                {
-                    Plugin.Logger.LogWarning("[AIManager] 无法在数据库中找到符合条件的无限模式自定义卡组列表。");
-                    return true;
-                }
-
-                var deck = deckGroup.DeckDataList.FirstOrDefault(d => d != null && d.GetDeckName() == deckName);
-                if (deck == null)
-                {
-                    Plugin.Logger.LogWarning($"[AIManager] 在本地无限卡组中找不到名为 '{deckName}' 的卡组，请检查拼写。");
-                    return true;
-                }
-
-                if (__instance._currentEnemyDeckData != null)
-                {
-                    __instance._currentEnemyDeckData.Clear();
-                    foreach (var cardId in deck.GetCardIdList())
-                    {
-                        __instance._currentEnemyDeckData.Add(cardId);
-                    }
-                }
-                else
-                {
-                    __instance._currentEnemyDeckData = deck.GetCardIdList().ToList();
-                }
-
-                Plugin.Logger.LogInfo($"[AIManager] 成功将敌人 AI 卡组替换为: {deckName}");
-                return false;
+                DialogBase dialog = UIManager.GetInstance().CreateDialogClose(false, false);
+                dialog.SetSize(DialogBase.Size.XL);
+                dialog.SetTitleLabel("自定义练习");
+                dialog.gameObject.AddComponent<CustomPracticeSetupWindow>().Initialize(dialog, page, decks);
             }
-            catch (Newtonsoft.Json.JsonException jsonEx)
+            catch (Exception exception)
             {
-                Plugin.Logger.LogError($"[DataMgr_Patch] JSON 解析失败，请检查配置文件格式: {jsonEx.Message}");
+                Plugin.Logger.LogError($"[AIManager] Failed to open the custom deck selector.\n{exception}");
+                ShowMessage("自定义练习", "读取无限制卡组失败，请查看 BepInEx 日志。");
             }
-            catch (IOException ioEx)
-            {
-                Plugin.Logger.LogError($"[DataMgr_Patch] 文件读取异常 (可能被其他程序占用): {ioEx.Message}");
-            }
-            catch (Exception ex)
-            {
-                Plugin.Logger.LogError($"[DataMgr_Patch] 发生未预料的严重错误:\n{ex.Message}\n{ex.StackTrace}");
-            }
-            return true;
         }
 
-        [HarmonyPatch(typeof(ClassSelectionPage), nameof(ClassSelectionPage.ShowSelectDifficultyDialog))]
-        [HarmonyPrefix]
-        public static bool ClassSelectionPage_ShowSelectDifficultyDialog_Prefix(ClassSelectionPage __instance)
+        private static List<CustomPracticeDeckChoice> GetUnlimitedDeckChoices()
         {
+            DeckGroup deckGroup = DeckListUtility.DeckGroupDataBase?.FirstOrDefault(group =>
+                group != null &&
+                group.DeckFormat == Format.Unlimited &&
+                group.AttributeType == DeckAttributeType.CustomDeck);
 
-            if (!File.Exists(Plugin.AISettingsPath))
-            {
-                return true;
-            }
-            var json = File.ReadAllText(Plugin.AISettingsPath);
-            var data = JsonMapper.ToObject(json);
-            if (data == null || !data.IsObject)
-            {
-                return true;
-            }
-            if (data["enable"].ToBoolean() != true)
-            {
-                return true;
-            }
-            int AIMaxLife = data["maxLife"]?.ToInt() ?? -1;
-            int AILogicLevel = data["logic"]?.ToInt() ?? -1;
-            int AIDifficulty = data["difficulty"]?.ToInt() ?? -1;
-
-            int enemyClassId = __instance._selectCharaMasterData.class_id;
-            List<PracticeData> practiceDataList = Data.PracticeDataMgr.GetClassDataList(enemyClassId);
-            if (practiceDataList.Count <= 0)
-            {
-                return false;
-            }
-
-            int num = -1;
-            List<string> list = new List<string>();
-            for (int i = 0; i < practiceDataList.Count; i++)
-            {
-                list.Add(practiceDataList[i].Text);
-                if (num < 0 && !practiceDataList[i].IsMaintenance)
+            return deckGroup?.DeckDataList?
+                .Where(deck =>
+                    deck != null &&
+                    deck.GetCardIdList() != null &&
+                    deck.GetCardIdList().Count > 0)
+                .Select(deck => new CustomPracticeDeckChoice
                 {
-                    num = i;
+                    Deck = deck,
+                    EnemyClassId = ResolveEnemyClassId(deck)
+                })
+                .ToList();
+        }
+
+        private static int ResolveEnemyClassId(DeckData deck)
+        {
+            int deckClassId = deck.GetDeckClassID();
+            if (deckClassId >= 1 && deckClassId <= 8)
+            {
+                return deckClassId;
+            }
+
+            try
+            {
+                CardMaster cardMaster = CardMaster.GetInstanceForBattle();
+                int inferredClassId = deck.GetCardIdList()
+                    .Select(cardId => cardMaster?.GetCardParameterFromId(cardId))
+                    .Where(card => card != null && (int)card.Clan >= 1 && (int)card.Clan <= 8)
+                    .GroupBy(card => (int)card.Clan)
+                    .OrderByDescending(group => group.Count())
+                    .Select(group => group.Key)
+                    .FirstOrDefault();
+                if (inferredClassId >= 1 && inferredClassId <= 8)
+                {
+                    Plugin.Logger.LogWarning(
+                        $"[AIManager] Deck '{deck.GetDeckName()}' has invalid class {deckClassId}; " +
+                        $"using inferred class {inferredClassId} for the AI opponent.");
+                    return inferredClassId;
                 }
             }
-            if (num < 0)
+            catch (Exception exception)
             {
-                num = 0;
+                Plugin.Logger.LogWarning(
+                    $"[AIManager] Failed to infer the class of deck '{deck.GetDeckName()}': {exception.Message}");
             }
-            DialogBase dia = null;
-            int selectIndex = num;
-            Action<int> action = delegate (int selectIdx)
-            {
-                selectIndex = selectIdx;
-                UIManager.SetObjectToGrey(dia.button1.gameObject, practiceDataList[selectIndex].IsMaintenance, null, null);
-            };
 
-            dia = DrumrollDialog.Create(list, num, action, null, null, "");
-            dia.SetTitleLabel(Data.SystemText.Get("Story_0022"));
-            dia.SetButtonLayout(DialogBase.ButtonLayout.DecisionBtn);
+            Plugin.Logger.LogWarning(
+                $"[AIManager] Deck '{deck.GetDeckName()}' has no usable class; using class 1 for the AI opponent.");
+            return 1;
+        }
 
-            dia.onPushButton1 = delegate
+        internal static void StartCustomPractice(ClassSelectionPage page, CustomPracticeSettings settings)
+        {
+            try
             {
+                int classId = settings.EnemyClassId;
+                List<int> deckCardIds = settings.Deck.GetCardIdList().ToList();
+                PracticeData practiceData = GetPracticeData(classId);
+                int fieldId = practiceData?.Battle3dFieldId ?? 1;
+
                 UIManager.GetInstance().createInSceneCenterLoading(false, false, true, null);
                 DataMgr dataMgr = GameMgr.GetIns().GetDataMgr();
                 dataMgr.Load();
-                dataMgr.SetEnemyCharaId(enemyClassId);
+                dataMgr.SetEnemyCharaId(settings.Leader.chara_id);
 
-                PracticeData practiceData = practiceDataList[selectIndex];
-                PracticeAISettingData settingData = Data.Master.PracticeAISettingList.GetSettingData(enemyClassId, practiceData.AIDeckLevel);
-                if (AIDifficulty >= 0) { settingData.Difficulty = AIDifficulty; }
-                if (AILogicLevel >= 0) { settingData.LogicLevel = AILogicLevel; }
-                if (AIMaxLife >= 0) { settingData.MaxLife = AIMaxLife; }
-
-                Data.Master.LoadAICsv(new AICsvLoadingInfo(settingData.DeckId, settingData.StyleId, settingData.EmoteId), delegate
-                {
-                    UIManager.GetInstance().closeInSceneCenterLoading(true, false);
-                    dataMgr.SetCurrentEnemyDeckDataFromAIDeck(enemyClassId, settingData.Difficulty, settingData.LogicLevel, settingData.MaxLife, settingData.DeckId, settingData.StyleId, settingData.EmoteId, true, -1, null);
-                    dataMgr.LoadEnemyClassData();
-                    dataMgr.PracticeDifficultyDegreeId = practiceData.DegreeId;
-                    dataMgr.SetSoroPlay3DFieldID(practiceData.Battle3dFieldId);
-                    GameMgr.GetIns().GetDataMgr().Practice3DfieldId = practiceData.Battle3dFieldId;
-                    dia.CloseWithoutSelect();
-                    PracticeStartTask practiceStartTask = new PracticeStartTask();
-                    __instance.StartCoroutine(Toolbox.NetworkManager.Connect(practiceStartTask, delegate (NetworkTask.ResultCode ret)
+                Data.Master.LoadAICsv(
+                    new AICsvLoadingInfo(
+                        settings.AIPreset.DeckId,
+                        settings.AIPreset.StyleId,
+                        settings.AIPreset.EmoteId),
+                    delegate
                     {
-                        UIManager.ChangeViewSceneParam changeViewSceneParam = new UIManager.ChangeViewSceneParam();
-                        changeViewSceneParam.IsShow_CardIntroduction = true;
-                        UIManager.GetInstance().ChangeViewScene(UIManager.ViewScene.Battle, changeViewSceneParam, null);
-                    }, null, null, true, false, true, true));
-                });
-            };
+                        try
+                        {
+                            string deckAIKey = RegisterLocalDeckCsv(settings.LocalDeckCsvPath) ??
+                                "ai/" + Data.Master.AIDeckFileNameList.GetFileName(settings.AIPreset.DeckId);
+                            string styleAIKey = RegisterLocalStyleCsv(settings.LocalStyleCsvPath) ??
+                                "ai/" + Data.Master.AIStyleFileNameList.GetFileName(settings.AIPreset.StyleId);
+                            string emoteAIKey = RegisterLocalEmoteCsv(settings.LocalEmoteCsvPath) ??
+                                "ai/" + Data.Master.AIEmoteFileNameList.GetFileName(settings.AIPreset.EmoteId);
 
-            dia.ClickSe_Btn1 = Se.TYPE.SYS_BTN_DECIDE_TRANS;
-            return false;
+                            dataMgr.RegisterAllAIData();
+                            dataMgr.SetEnemyAIDeckFromCustomDeck(
+                                classId,
+                                deckCardIds,
+                                -1,
+                                settings.LogicLevel,
+                                settings.MaxLife,
+                                settings.AIPreset.StyleId,
+                                settings.AIPreset.EmoteId,
+                                true,
+                                -1);
+                            dataMgr.m_AIDataLibrary.SaveBattleSetUpInfo(
+                                classId,
+                                GetLogicLevel(settings.LogicLevel),
+                                deckAIKey,
+                                styleAIKey,
+                                emoteAIKey,
+                                true,
+                                true,
+                                -1,
+                                null);
+                            dataMgr.LoadEnemyClassData();
+                            dataMgr.PracticeDifficultyDegreeId = practiceData?.DegreeId ?? 0;
+                            dataMgr.SetSoroPlay3DFieldID(fieldId);
+                            dataMgr.Practice3DfieldId = fieldId;
+                            UIManager.GetInstance().closeInSceneCenterLoading(true, false);
+
+                            Plugin.Logger.LogInfo(
+                                $"[AIManager] Starting custom practice: deck='{settings.Deck.GetDeckName()}', " +
+                                $"class={classId}, leader={settings.Leader.chara_id}, logic={settings.LogicLevel}, " +
+                                $"maxLife={settings.MaxLife}, deckAI='{deckAIKey}', styleAI='{styleAIKey}', " +
+                                $"emoteAI='{emoteAIKey}'.");
+
+                            PracticeStartTask practiceStartTask = new PracticeStartTask();
+                            page.StartCoroutine(Toolbox.NetworkManager.Connect(
+                                practiceStartTask,
+                                delegate(NetworkTask.ResultCode ret)
+                                {
+                                    UIManager.ChangeViewSceneParam sceneParam = new UIManager.ChangeViewSceneParam
+                                    {
+                                        IsShow_CardIntroduction = true
+                                    };
+                                    UIManager.GetInstance().ChangeViewScene(
+                                        UIManager.ViewScene.Battle,
+                                        sceneParam,
+                                        null);
+                                },
+                                null,
+                                null,
+                                true,
+                                false,
+                                true,
+                                true));
+                        }
+                        catch (Exception exception)
+                        {
+                            UIManager.GetInstance().closeInSceneCenterLoading(true, false);
+                            Plugin.Logger.LogError($"[AIManager] Failed to prepare the custom practice battle.\n{exception}");
+                            ShowMessage("自定义练习", "准备对战失败，请查看 BepInEx 日志。");
+                        }
+                    });
+            }
+            catch (Exception exception)
+            {
+                UIManager.GetInstance().closeInSceneCenterLoading(true, false);
+                Plugin.Logger.LogError($"[AIManager] Failed to start the custom practice battle.\n{exception}");
+                ShowMessage("自定义练习", "启动对战失败，请查看 BepInEx 日志。");
+            }
+        }
+
+        private static PracticeData GetPracticeData(int classId)
+        {
+            List<PracticeData> practiceData = Data.PracticeDataMgr.GetClassDataList(classId);
+            return practiceData?.FirstOrDefault(data => !data.IsMaintenance)
+                   ?? practiceData?.FirstOrDefault();
+        }
+
+        private static AI_LOGIC_LV GetLogicLevel(int logicLevel)
+        {
+            return logicLevel == 0
+                ? AI_LOGIC_LV.WEAK
+                : logicLevel == 1
+                    ? AI_LOGIC_LV.MIDDLE
+                    : AI_LOGIC_LV.STRONG;
+        }
+
+        private static string RegisterLocalDeckCsv(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return null;
+            }
+
+            string key = GetLocalAIKey("deck", path);
+            var data = new AICardDataAssetSet();
+            data.ConvertCsvTextToAsset(ReadCsv(path));
+            Data.Master.AIDeckDic ??= new Dictionary<string, AICardDataAssetSet>();
+            Data.Master.AIDeckDic[key] = data;
+            return key;
+        }
+
+        private static string RegisterLocalStyleCsv(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return null;
+            }
+
+            string key = GetLocalAIKey("style", path);
+            List<AIPolicyDataAsset> data = ReadCsv(path)
+                .Select(columns => new AIPolicyDataAsset(columns))
+                .ToList();
+            Data.Master.AIStyleDic ??= new Dictionary<string, List<AIPolicyDataAsset>>();
+            Data.Master.AIStyleDic[key] = data;
+            return key;
+        }
+
+        private static string RegisterLocalEmoteCsv(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return null;
+            }
+
+            string key = GetLocalAIKey("emote", path);
+            List<AIEmoteDataAsset> data = ReadCsv(path)
+                .Select(columns => new AIEmoteDataAsset(columns))
+                .ToList();
+            Data.Master.AIEmoteDic ??= new Dictionary<string, List<AIEmoteDataAsset>>();
+            Data.Master.AIEmoteDic[key] = data;
+            return key;
+        }
+
+        private static List<string[]> ReadCsv(string path)
+        {
+            List<string[]> csv = Utility.ConvertCSV_Array(File.ReadAllText(path), true);
+            if (csv == null || csv.Count == 0)
+            {
+                throw new InvalidDataException($"AI CSV is empty: {path}");
+            }
+
+            return csv;
+        }
+
+        private static string GetLocalAIKey(string type, string path)
+        {
+            return $"shadowbus/ai/{type}/{Path.GetFileNameWithoutExtension(path)}";
+        }
+
+        private static void ShowMessage(string title, string message)
+        {
+            DialogBase dialog = UIManager.GetInstance().CreateDialogClose(false, false);
+            dialog.SetSize(DialogBase.Size.M);
+            dialog.SetTitleLabel(title);
+            dialog.SetButtonLayout(DialogBase.ButtonLayout.OkBtn);
+            dialog.SetText(message, true);
         }
 
         [HarmonyPatch(typeof(Master), nameof(Master.StartLoadAIIndividualData))]
@@ -195,29 +429,6 @@ namespace Shadowbus
             File.WriteAllText(Path.Combine(PathHelper.AIDataPath, "ai_emote.json"), JsonConvert.SerializeObject(__instance.AIEmoteDic));
             File.WriteAllText(Path.Combine(PathHelper.AIDataPath, "ai_style.json"), JsonConvert.SerializeObject(__instance.AIStyleDic));
         }
-        [HarmonyPatch(typeof(Master), nameof(Master.StartLoadAIDeckData))]
-        [HarmonyPrefix]
-        public static bool Master_StartLoadAIDeckData_Prefix(Master __instance, ref int deckID)
-        {
-            var json = File.ReadAllText(Plugin.AISettingsPath);
-            var data = JsonMapper.ToObject(json);
-            if (data == null || !data.IsObject || !data.Keys.Contains("deckAI") || string.IsNullOrEmpty(data["deckAI"].ToString()))
-            {
-                return true;
-            }
-            string path = Path.Combine(PathHelper.AIDataPath, $"{data["deckAI"]}.json");
-            if (!File.Exists(path)) {
-                return true;
-            }
-            string aiEntriesJson = File.ReadAllText(path);
-            __instance.AIDeckDic ??= new Dictionary<string, AICardDataAssetSet>();
-            List<AICardDataAsset> entries = JsonConvert.DeserializeObject<List<AICardDataAsset>>(aiEntriesJson);
-            string text = "ai/" + __instance.AIDeckFileNameList.GetFileName(deckID);
-            __instance.LoadAIDeckData(text);
-            if (__instance.AIDeckDic.TryGetValue(text, out AICardDataAssetSet existingDeckAI)) {
-                existingDeckAI.Set.AddRange(entries);
-            }
-            return false;
-        }
+
     }
 }

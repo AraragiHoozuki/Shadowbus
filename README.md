@@ -7,7 +7,7 @@ Shadowverse 国际服的单机化与卡牌 Mod 工具，基于 BepInEx 6 开发�
 - 单机模式：支持主界面、无限制卡组编辑、CPU 对战和开包动画。
 - 默认解锁全部卡牌、主战者皮肤与卡背。
 - 无限制卡组：忽略职业、卡牌数量和卡组张数限制，也可以加入衍生卡。
-- 自定义 AI 卡组。
+- 自定义练习：可指定对手卡组、职业、主战者和 AI CSV。
 - 卡牌 Mod：修改或新增卡牌，并支持自定义卡图与文本。
 - 卡组列表热重载：进入卡组列表时重新加载 `CardMaster` 配置。
 - 主动技能：使用 `when_activate` 为场上随从添加“启动”按钮，可设置 PP 消费。
@@ -33,20 +33,24 @@ Shadowverse 国际服的单机化与卡牌 Mod 工具，基于 BepInEx 6 开发�
 Shadowverse/
 ├─ BepInEx/plugins/Shadowbus.dll
 └─ Mods/
-   ├─ AISettings.json
+   ├─ AIData/
+   │  ├─ deck/
+   │  ├─ style/
+   │  └─ emote/
    ├─ UnlimitedDecks/
    ├─ CardMaster/
    └─ CardImages/
 ```
 
-## 自定义 AI 卡组
+## 自定义练习
 
-编辑 `Mods/AISettings.json`：
+进入“单人 > 对战”，在对手职业选择页点击第九个“自定义卡组”图标。配置页可同时选择：
 
-- 将 `enable` 设置为 `true`。
-- 将 `deckName` 设置为需要使用的卡组名称。
+- 对手的本地无限制卡组、职业和已拥有主战者。
+- 原作 AI 预设、逻辑等级和生命上限。
+- 自定义 Deck、Style、Emote CSV。
 
-然后在游戏中选择“单人 > 对战”。
+自定义 CSV 分别放入 `Mods/AIData/deck/`、`style/` 和 `emote/`。文件需要保持原作对应 CSV 的列格式；配置项留为“使用原作预设”时，会使用当前职业所选预设的原始 AI 数据。配置页打开后新增文件，可点击“刷新 CSV”重新扫描。
 
 ## 卡牌 Mod
 
