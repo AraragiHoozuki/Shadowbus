@@ -79,7 +79,104 @@ CardID,UseCommon,CardName,CardNum,BattleBonus,PlayBonus,Priority,Tag1.Type,Tag1.
 
 上例表示：当模拟时当前剩余 PP 至少为 1，打出此卡额外获得 `2` 点 AI 评价。示例 ID 仅用于展示格式，实际文件应换成目标卡牌的正确 ID。
 
-### 2.4 常用 Type
+### 2.4 复杂条目示例
+
+下面的 `800000001` 到 `800000005` 都是便于阅读的占位卡牌 ID，使用时必须替换为 CardMaster 中真实存在的卡牌 ID。示例中的标签只负责让 AI **模拟并评价**真实效果，不会让卡牌实际获得伤害、强化、抽牌等能力；卡牌技能仍需在 CardMaster 中单独实现。
+
+每个示例行末的最后一个逗号都表示空的 `End` 列，不能删除。若将这些标签用于已有原作卡牌，还要先检查该卡从 Basic/Common AI 继承了哪些标签，避免同一效果被重复模拟。
+
+#### 示例一：根据连携数模拟不同的目标强化
+
+假设卡牌的真实效果是“使一个己方随从获得 `+2/+2`；连携达到 10 时改为 `+4/+4`”：
+
+```csv
+CardID,UseCommon,CardName,CardNum,BattleBonus,PlayBonus,Priority,Tag1.Type,Tag1.Arg,Tag1.Condition,Tag2.Type,Tag2.Arg,Tag2.Condition,End
+800000001,,示例：条件强化,3,0,0,0,playBuff,ALLY ; FOLLOWER ; IN_PLAY ; TARGET_SELECT ; 2 ; 2 ; PERM,RALLY_COUNT < 10,playBuff,ALLY ; FOLLOWER ; IN_PLAY ; TARGET_SELECT ; 4 ; 4 ; PERM,RALLY_COUNT > 9,
+```
+
+`playBuff` 的参数从左到右为：
+
+```text
+目标过滤条件 ; 选择方式 ; 攻击增量 ; 生命增量 ; TEMP/PERM
+```
+
+- `ALLY ; FOLLOWER ; IN_PLAY`：只考虑己方场上的随从。
+- `TARGET_SELECT`：使用游戏实际选择的目标；模拟阶段没有实际目标时，AI 会在合法候选中选择收益较高者。
+- `2 ; 2` 和 `4 ; 4`：分别模拟 `+2/+2` 与 `+4/+4`。
+- `PERM`：永久强化；只持续到本回合结束的强化应使用 `TEMP`。
+- 两个 `Condition` 互斥，因此一次模拟只会执行一个强化标签。
+
+#### 示例二：根据死灵术是否成功切换伤害
+
+假设真实效果是“对一个敌方随从造成 2 点伤害；死灵术（2）发动时改为 4 点”：
+
+```csv
+CardID,UseCommon,CardName,CardNum,BattleBonus,PlayBonus,Priority,Tag1.Type,Tag1.Arg,Tag1.Condition,Tag2.Type,Tag2.Arg,Tag2.Condition,Tag3.Type,Tag3.Arg,Tag3.Condition,End
+800000002,,示例：死灵术伤害,3,0,0,0,necromance,2 ; WHEN_PLAY,,playDamage,ENEMY ; FOLLOWER ; TARGET_SELECT ; 2 ; 1,NECROMANCE_COUNT <= 0,playDamage,ENEMY ; FOLLOWER ; TARGET_SELECT ; 4 ; 1,NECROMANCE_COUNT > 0,
+```
+
+- `necromance,2 ; WHEN_PLAY`：通知模拟器在打出时尝试消耗 2 个墓场。
+- `NECROMANCE_COUNT`：本次模拟中实际成功消耗的死灵术数量，不是当前墓场总数；当前墓场使用 `GRAVE_COUNT`。
+- `playDamage` 的末尾 `2 ; 1` 或 `4 ; 1` 表示“单次伤害量；执行次数”。
+- 墓场不足时 `NECROMANCE_COUNT` 为 `0`，执行 2 点伤害；成功消耗时执行 4 点伤害。
+
+`playDamage` 的通用参数顺序是：
+
+```text
+目标过滤条件 ; 选择方式 ; 单次伤害 ; 执行次数
+```
+
+#### 示例三：破坏目标，死灵术成功时再召唤衍生物
+
+假设真实效果是“破坏一个敌方随从；死灵术（4）：再召唤一个 ID 为 `900511030` 的衍生物”：
+
+```csv
+CardID,UseCommon,CardName,CardNum,BattleBonus,PlayBonus,Priority,Tag1.Type,Tag1.Arg,Tag1.Condition,Tag2.Type,Tag2.Arg,Tag2.Condition,Tag3.Type,Tag3.Arg,Tag3.Condition,End
+800000003,,示例：破坏并召唤,3,0,0,0,necromance,4 ; WHEN_PLAY,,playDestroy,ENEMY ; FOLLOWER ; TARGET_SELECT,,playToken,@900511030 ; 1,NECROMANCE_COUNT > 0,
+```
+
+- `playDestroy` 让 AI 从虚拟场面移除实际选中的敌方随从，从而正确评价破坏收益。
+- `playDestroy` 还可以在选择方式后追加目标数，例如 `ENEMY ; FOLLOWER ; RANDOM_SELECT ; 2` 表示随机破坏两个敌方随从。
+- `playToken` 中 `@900511030` 是衍生卡 ID，`1` 是召唤数量。省略选择方式和阵营时，解析器分别使用 `ALL_SELECT` 和 `ALLY`。
+- `playToken` 的条件确保只有死灵术成功时才模拟召唤。自定义衍生物应将 `@900511030` 换成自己的真实衍生卡 ID。
+
+#### 示例四：同时模拟全体伤害并增加动态评价
+
+假设真实效果是“对所有敌方随从造成 1 点伤害”，并希望 AI 在第 5 回合后进一步按当前场面提高使用意愿：
+
+```csv
+CardID,UseCommon,CardName,CardNum,BattleBonus,PlayBonus,Priority,Tag1.Type,Tag1.Arg,Tag1.Condition,Tag2.Type,Tag2.Arg,Tag2.Condition,End
+800000004,,示例：全体伤害,3,0,0,0,playDamage,ENEMY ; FOLLOWER ; ALL_SELECT ; 1 ; 1,,playBonus,"2 + EVAL_ALL_DAMAGE ( ENEMY , FOLLOWER , 1 )",NOW_TURN >= 5,
+```
+
+- `ALL_SELECT` 使 `playDamage` 对所有符合 `ENEMY ; FOLLOWER` 的目标各执行一次。
+- `EVAL_ALL_DAMAGE ( ENEMY , FOLLOWER , 1 )` 估算当前场面对敌方全体随从造成 1 点伤害的收益。
+- `playBonus` 在第 5 回合后额外加入固定 `2` 点和动态场面收益；它只修改评分，不修改虚拟场面。
+- `playBonus` 的 `Arg` 含有逗号，因此 CSV 中必须用双引号包住整个字段。`playDamage` 才是负责修改虚拟场面状态的标签，两者用途不同。
+
+#### 示例五：按进化状态模拟回合结束效果
+
+假设场上随从的真实效果是“自己的回合结束时，未进化则回复自身 5 点生命，已进化则回复 7 点”：
+
+```csv
+CardID,UseCommon,CardName,CardNum,BattleBonus,PlayBonus,Priority,Tag1.Type,Tag1.Arg,Tag1.Condition,Tag2.Type,Tag2.Arg,Tag2.Condition,End
+800000005,,示例：回合结束回复,3,0,3,0,turnEndHeal,SELF ; ALL_SELECT ; 5 ; ALLY,IS_EVOLVED == 0,turnEndHeal,SELF ; ALL_SELECT ; 7 ; ALLY,IS_EVOLVED,
+```
+
+`turnEndHeal` 的参数从左到右为：
+
+```text
+目标过滤条件 ; 选择方式 ; 回复量 ; ALLY/ENEMY
+```
+
+- `SELF ; ALL_SELECT`：效果只作用于标签持有者自身。
+- 最后的 `ALLY` 表示在标签持有者一方的回合结束时触发；这里不是目标阵营过滤器。
+- `IS_EVOLVED == 0` 与 `IS_EVOLVED` 把未进化和已进化状态分开模拟。
+- 此类常驻标签只有在卡牌仍处于 AI 虚拟场面时才会继续生效。
+
+复杂条目通常由多个标签共同描述一个真实技能。建议先确认每个标签单独产生的模拟结果，再添加条件分支和额外评分，避免把“模拟效果”和“评分修正”重复计算。
+
+### 2.5 常用 Type
 
 | Type | 含义 |
 | --- | --- |
@@ -128,7 +225,7 @@ CardID,UseCommon,CardName,CardNum,BattleBonus,PlayBonus,Priority,Tag1.Type,Tag1.
 
 `Arg` 没有统一格式：`playBonus` 可直接使用一个表达式，而 `playDamage`、`fanfareSelect`、`*AttachTag` 等类型会创建各自的专用参数解析器。不要根据标签名猜测复杂参数顺序。实际制作复杂 AI 时，最可靠的流程是从 `Mods/AIData/ai_deck.json` 中找到效果相近的原作卡牌，复制其 `Type/Arg/Condition` 后再修改 ID、数值和过滤条件。
 
-### 2.5 完整 Type 关键词
+### 2.6 完整 Type 关键词
 
 以下是当前游戏解析器接受的全部 `Tag.Type` 字符串。缩写和拼写均按原作保留，例如 `allyPlayB`、`memBattleB`、`playoutAtkB`，不能擅自改成长名称。
 

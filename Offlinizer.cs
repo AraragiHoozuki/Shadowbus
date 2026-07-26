@@ -122,11 +122,202 @@ namespace Shadowbus
             __instance.IsAcquired = true;
         }
         #endregion
+
+        #region MyPageBackground
+        private sealed class LocalMyPageBackgroundSettings
+        {
+            [JsonProperty("select_type")]
+            public int SelectType { get; set; }
+
+            [JsonProperty("mypage_id")]
+            public string MyPageId { get; set; } = string.Empty;
+
+            [JsonProperty("mypage_id_list")]
+            public List<string> MyPageIdList { get; set; } = new List<string>();
+        }
+
+        [HarmonyPatch(typeof(Master), nameof(Master.StartLoadMyPageCustomBG))]
+        [HarmonyPostfix]
+        public static void Master_StartLoadMyPageCustomBG_Postfix(Master __instance)
+        {
+            UnlockAllMyPageBackgrounds(Data.Load?.data, __instance?.MyPageCustomBGMasterList);
+        }
+
+        [HarmonyPatch(typeof(MyPageBGCustomDialog), nameof(MyPageBGCustomDialog.Create))]
+        [HarmonyPrefix]
+        public static void MyPageBGCustomDialog_Create_Prefix()
+        {
+            UnlockAllMyPageBackgrounds(Data.Load?.data, Data.Master?.MyPageCustomBGMasterList);
+        }
+
+        [HarmonyPatch(typeof(MyPageSettingUpdateTask), nameof(MyPageSettingUpdateTask.SetParameter))]
+        [HarmonyPostfix]
+        public static void MyPageSettingUpdateTask_SetParameter_Postfix(
+            MyPageDetail.BGType type,
+            string id,
+            List<string> randomList)
+        {
+            SaveMyPageBackgroundSettings(type, id, randomList);
+        }
+
+        [HarmonyPatch(typeof(MyPageTask), "Parse")]
+        [HarmonyPostfix]
+        public static void MyPageTask_Parse_Postfix(int __result)
+        {
+            if (__result == 1)
+            {
+                ApplySavedMyPageBackgroundSettings();
+            }
+        }
+
+        [HarmonyPatch(typeof(MyPageItemHome), nameof(MyPageItemHome.DecideRandomBG))]
+        [HarmonyPrefix]
+        public static bool MyPageItemHome_DecideRandomBG_Prefix(List<string> randomIdList, ref string __result)
+        {
+            if (randomIdList != null && randomIdList.Count > 0)
+            {
+                return true;
+            }
+
+            List<string> allBackgroundIds = GetAllMyPageBackgroundIds();
+            if (allBackgroundIds.Count == 0)
+            {
+                Plugin.Logger.LogWarning("[Offlinizer] Cannot select a random My Page background: the master list is empty.");
+                __result = string.Empty;
+                return false;
+            }
+
+            __result = allBackgroundIds[new System.Random().Next(0, allBackgroundIds.Count)];
+            return false;
+        }
+
+        private static void UnlockAllMyPageBackgrounds(
+            LoadDetail loadDetail,
+            IEnumerable<MyPageCustomBGMasterData> masterBackgrounds = null)
+        {
+            if (loadDetail?.AcquiredMyPageBGList == null)
+            {
+                return;
+            }
+
+            List<string> allBackgroundIds = (masterBackgrounds ?? Data.Master?.MyPageCustomBGMasterList)
+                ?.Where(background => background != null && !string.IsNullOrEmpty(background.Id))
+                .Select(background => background.Id)
+                .Distinct()
+                .ToList();
+
+            if (allBackgroundIds == null || allBackgroundIds.Count == 0)
+            {
+                return;
+            }
+
+            bool changed = loadDetail.AcquiredMyPageBGList.Count != allBackgroundIds.Count ||
+                !loadDetail.AcquiredMyPageBGList.SequenceEqual(allBackgroundIds);
+            loadDetail.AcquiredMyPageBGList.Clear();
+            loadDetail.AcquiredMyPageBGList.AddRange(allBackgroundIds);
+            if (changed)
+            {
+                Plugin.Logger.LogInfo($"[Offlinizer] Unlocked {allBackgroundIds.Count} My Page backgrounds.");
+            }
+        }
+
+        private static List<string> GetAllMyPageBackgroundIds()
+        {
+            return Data.Master?.MyPageCustomBGMasterList?
+                .Where(background => background != null && !string.IsNullOrEmpty(background.Id))
+                .Select(background => background.Id)
+                .Distinct()
+                .ToList() ?? new List<string>();
+        }
+
+        private static void SaveMyPageBackgroundSettings(
+            MyPageDetail.BGType type,
+            string id,
+            IEnumerable<string> randomList)
+        {
+            try
+            {
+                LocalMyPageBackgroundSettings settings = new LocalMyPageBackgroundSettings
+                {
+                    SelectType = (int)type,
+                    MyPageId = type == MyPageDetail.BGType.CustomBG ? id ?? string.Empty : string.Empty,
+                    MyPageIdList = randomList?
+                        .Where(backgroundId => !string.IsNullOrEmpty(backgroundId))
+                        .Distinct()
+                        .ToList() ?? new List<string>()
+                };
+
+                string json = JsonConvert.SerializeObject(settings, Newtonsoft.Json.Formatting.Indented);
+                File.WriteAllText(PathHelper.MyPageBackgroundSettingsPath, json, Encoding.UTF8);
+                Plugin.Logger.LogInfo(
+                    $"[Offlinizer] Saved My Page background: type={settings.SelectType}, " +
+                    $"id='{settings.MyPageId}', randomCount={settings.MyPageIdList.Count}.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError($"[Offlinizer] Failed to save My Page background settings: {ex.Message}");
+            }
+        }
+
+        private static void ApplySavedMyPageBackgroundSettings()
+        {
+            if (Data.MyPage?.data == null || !File.Exists(PathHelper.MyPageBackgroundSettingsPath))
+            {
+                return;
+            }
+
+            try
+            {
+                LocalMyPageBackgroundSettings settings = JsonConvert.DeserializeObject<LocalMyPageBackgroundSettings>(
+                    File.ReadAllText(PathHelper.MyPageBackgroundSettingsPath, Encoding.UTF8));
+                if (settings == null || !Enum.IsDefined(typeof(MyPageDetail.BGType), settings.SelectType))
+                {
+                    Plugin.Logger.LogWarning("[Offlinizer] Ignored invalid My Page background settings.");
+                    return;
+                }
+
+                List<string> allBackgroundIds = GetAllMyPageBackgroundIds();
+                HashSet<string> validBackgroundIds = new HashSet<string>(allBackgroundIds, StringComparer.Ordinal);
+                MyPageDetail.BGType type = (MyPageDetail.BGType)settings.SelectType;
+                if (type == MyPageDetail.BGType.CustomBG && !validBackgroundIds.Contains(settings.MyPageId ?? string.Empty))
+                {
+                    Plugin.Logger.LogWarning(
+                        $"[Offlinizer] Saved My Page background '{settings.MyPageId}' no longer exists; using the offline response setting.");
+                    return;
+                }
+
+                List<string> randomIds = (settings.MyPageIdList ?? new List<string>())
+                    .Where(validBackgroundIds.Contains)
+                    .Distinct()
+                    .ToList();
+                if (type == MyPageDetail.BGType.RandomBG && randomIds.Count == 0)
+                {
+                    randomIds.AddRange(allBackgroundIds);
+                }
+
+                Data.MyPage.data.BGInfo = new MyPageBGInfo
+                {
+                    BGType = type,
+                    Id = type == MyPageDetail.BGType.CustomBG ? settings.MyPageId : string.Empty,
+                    RandomIdList = randomIds
+                };
+                Plugin.Logger.LogInfo(
+                    $"[Offlinizer] Restored My Page background: type={(int)type}, " +
+                    $"id='{Data.MyPage.data.BGInfo.Id}', randomCount={randomIds.Count}.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError($"[Offlinizer] Failed to load My Page background settings: {ex.Message}");
+            }
+        }
+        #endregion
+
         [HarmonyPatch(typeof(LoadDetail), nameof(LoadDetail.ConvertJsonData))]
         [HarmonyPostfix]
         public static void LoadDetail_ConvertJsonData_Postfix(LoadDetail __instance)
         {
             LoadLocalUnlimitedDecks(__instance);
+            UnlockAllMyPageBackgrounds(__instance);
         }
 
         public static void LoadLocalUnlimitedDecks(LoadDetail __instance)

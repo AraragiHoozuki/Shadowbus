@@ -57,7 +57,8 @@ namespace Shadowbus
         }
         private static bool IsTaskOfflinized(string taskName)
         {
-            return File.Exists((Path.Combine("Mods", "OfflinizedTasks", $"{taskName}.json")));
+            return StoryOfflineData.CanHandle(taskName) ||
+                File.Exists((Path.Combine("Mods", "OfflinizedTasks", $"{taskName}.json")));
         }
         private static IEnumerator ProcessSkipTask(NetworkManager __instance, NetworkTask task)
         {
@@ -101,28 +102,34 @@ namespace Shadowbus
             try
             {
                 string filePath = Path.Combine("Mods", "OfflinizedTasks", $"{taskName}.json");
+                JsonData data;
 
-                if (File.Exists(filePath))
+                if (StoryOfflineData.TryCreateResponse(task, out data))
+                {
+                    Plugin.Logger.LogInfo($"[Offlinizer] Injecting generated local data for {taskName}...");
+                }
+                else if (File.Exists(filePath))
                 {
                     string jsonText = File.ReadAllText(filePath);
-                    var data = JsonMapper.ToObject(jsonText);
-                    data["data_headers"]["servertime"] = (long)TimeNativePlugin.GetDeviceOperatingTime();
-                    task.SetResponseData(data);
-                    if (task is CheckSpecialTitleTask specialTitleTask)
-                    {
-                        specialTitleTask.ParseTitleCheckData();
-                    }
-                    else
-                    {
-                        task.CheckResultCodeToPopupCreate_ReturnStatus(0);
-                    }
-
-                    Plugin.Logger.LogInfo($"[Offlinizer] Successfully injected local data for {taskName}");
+                    data = JsonMapper.ToObject(jsonText);
                 }
                 else
                 {
-                    Plugin.Logger.LogError($"[Offlinizer] Local data file not found: {filePath}");
+                    throw new FileNotFoundException("Local offline task data was not found.", filePath);
                 }
+
+                data["data_headers"]["servertime"] = (long)TimeNativePlugin.GetDeviceOperatingTime();
+                task.SetResponseData(data);
+                if (task is CheckSpecialTitleTask specialTitleTask)
+                {
+                    specialTitleTask.ParseTitleCheckData();
+                }
+                else
+                {
+                    task.CheckResultCodeToPopupCreate_ReturnStatus(0);
+                }
+
+                Plugin.Logger.LogInfo($"[Offlinizer] Successfully injected local data for {taskName}");
             }
             catch (Exception ex)
             {

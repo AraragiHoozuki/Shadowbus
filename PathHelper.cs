@@ -17,6 +17,7 @@ namespace Shadowbus
         public static readonly string AIDeckPath = Path.Combine(AIDataPath, "deck");
         public static readonly string AIStylePath = Path.Combine(AIDataPath, "style");
         public static readonly string AIEmotePath = Path.Combine(AIDataPath, "emote");
+        public static readonly string MyPageBackgroundSettingsPath = Path.Combine(ModPath, "MyPageBackground.json");
 
         static PathHelper()
         {

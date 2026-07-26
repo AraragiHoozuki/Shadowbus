@@ -43,6 +43,7 @@ public class Plugin : BaseUnityPlugin
             Harmony.CreateAndPatchAll(typeof(AcquireSkillsSkillPatcher));
             Harmony.CreateAndPatchAll(typeof(MirrorSkillPatcher));
             Harmony.CreateAndPatchAll(typeof(MirrorResidentEffectPatcher));
+            Harmony.CreateAndPatchAll(typeof(StoryOfflinePatches));
 
         }
         catch (System.Exception exception)
