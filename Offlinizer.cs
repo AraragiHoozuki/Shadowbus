@@ -16,6 +16,12 @@ namespace Shadowbus
 {
     public class Offlinizer
     {
+        private static bool ForceLocalPracticeDeckDialog;
+        private static bool ForceLocalPracticeDeckUi;
+        private static bool BuildLocalPracticeDeckPages;
+        private static readonly HashSet<int> LocalPracticeDeckUiIds = new HashSet<int>();
+        private static List<int> LocalPracticeRetryEnemyDeck;
+
         #region GameStart
         [HarmonyPatch(typeof(AssetManager), nameof(AssetManager.InitializeManifest))]
         [HarmonyPrefix]
@@ -376,6 +382,301 @@ namespace Shadowbus
             {
                 DeckListUtility.SetDeckListDataWithLodeIndex();
             }
+        }
+
+        [HarmonyPatch(typeof(PracticeDeckSelectConfirmDialog), "StartBattleAgain")]
+        [HarmonyPrefix]
+        public static void PracticeDeckSelectConfirmDialog_StartBattleAgain_Prefix()
+        {
+            DataMgr dataMgr = GameMgr.GetIns().GetDataMgr();
+            IList<int> playerDeck = dataMgr.GetCurrentDeckData();
+            if (playerDeck != null && playerDeck.Count > 0 && playerDeck.Count < 6)
+            {
+                int originalCount = playerDeck.Count;
+                List<int> paddedDeck = playerDeck.ToList();
+                for (int index = originalCount; index < 6; index++)
+                {
+                    paddedDeck.Add(playerDeck[index % originalCount]);
+                }
+
+                dataMgr.SetCurrentDeckData(paddedDeck);
+                Plugin.Logger.LogWarning(
+                    $"[Offlinizer] Padded the selected practice retry deck from {originalCount} to " +
+                    "6 cards so the opening mulligan can be created.");
+            }
+
+            if (dataMgr.m_EnemyAIDeckId != int.MinValue)
+            {
+                return;
+            }
+
+            IList<int> enemyDeck = dataMgr.GetCurrentEnemyDeckData();
+            if (enemyDeck == null || enemyDeck.Count == 0)
+            {
+                LocalPracticeRetryEnemyDeck = null;
+                Plugin.Logger.LogError(
+                    "[Offlinizer] Could not preserve the custom enemy deck before practice retry.");
+                return;
+            }
+
+            LocalPracticeRetryEnemyDeck = enemyDeck.ToList();
+            Plugin.Logger.LogInfo(
+                $"[Offlinizer] Preserved {LocalPracticeRetryEnemyDeck.Count} custom enemy cards " +
+                "for practice retry.");
+        }
+
+        [HarmonyPatch(
+            typeof(DataMgr),
+            nameof(DataMgr.SetCurrentEnemyDeckDataFromAIDeck),
+            [
+                typeof(int),
+                typeof(int),
+                typeof(int),
+                typeof(int),
+                typeof(int),
+                typeof(int),
+                typeof(int),
+                typeof(bool),
+                typeof(int),
+                typeof(List<int>)
+            ])]
+        [HarmonyPrefix]
+        public static bool DataMgr_SetCurrentEnemyDeckDataFromAIDeck_Prefix(
+            DataMgr __instance,
+            int deckId)
+        {
+            if (deckId != int.MinValue)
+            {
+                return true;
+            }
+
+            if (LocalPracticeRetryEnemyDeck == null || LocalPracticeRetryEnemyDeck.Count == 0)
+            {
+                Plugin.Logger.LogError(
+                    "[Offlinizer] The custom enemy deck snapshot is unavailable during practice retry.");
+                return true;
+            }
+
+            __instance.SetCurrentEnemyDeckData(LocalPracticeRetryEnemyDeck.ToList());
+            Plugin.Logger.LogInfo(
+                $"[Offlinizer] Restored {LocalPracticeRetryEnemyDeck.Count} custom enemy cards " +
+                "for practice retry without resolving an invalid AI deck ID.");
+            return false;
+        }
+
+        [HarmonyPatch(typeof(PracticeDeckInfoTask), nameof(PracticeDeckInfoTask.Parse))]
+        [HarmonyPrefix]
+        public static void PracticeDeckInfoTask_Parse_Prefix(PracticeDeckInfoTask __instance)
+        {
+            try
+            {
+                LoadDetail loadDetail = Data.Load?.data;
+                JsonData responseData = __instance.ResponseData;
+                if (loadDetail == null || responseData == null || !responseData.IsObject ||
+                    !responseData.Keys.Contains("data"))
+                {
+                    Plugin.Logger.LogWarning(
+                        "[Offlinizer] Could not inject local decks into the practice retry deck list.");
+                    return;
+                }
+
+                LoadLocalUnlimitedDecks(loadDetail);
+                responseData["data"]["user_deck_unlimited"] = loadDetail.UserDeckListUnlimited;
+                Plugin.Logger.LogInfo(
+                    $"[Offlinizer] Injected {loadDetail.UserDeckListUnlimited.Count} local decks " +
+                    "into the practice retry deck list.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError(
+                    $"[Offlinizer] Failed to inject local decks into the practice retry deck list: {ex}");
+            }
+        }
+
+        [HarmonyPatch(typeof(PracticeDeckInfoTask), nameof(PracticeDeckInfoTask.Parse))]
+        [HarmonyPostfix]
+        public static void PracticeDeckInfoTask_Parse_Postfix(
+            PracticeDeckInfoTask __instance,
+            int __result)
+        {
+            if (__result != 1 || Data.Load?.data == null || __instance.DeckGroupListData == null)
+            {
+                return;
+            }
+
+            try
+            {
+                DeckGroup localUnlimitedGroup = DeckListUtility.CreateDeckGroup(
+                    Data.Load.data.UserDeckListUnlimited,
+                    Format.Unlimited,
+                    DeckAttributeType.CustomDeck);
+                List<DeckGroup> mergedGroups = __instance.DeckGroupListData.DeckGroupList
+                    .Where(group => group.DeckFormat != Format.Unlimited ||
+                        group.AttributeType != DeckAttributeType.CustomDeck)
+                    .Select(group => group.Clone())
+                    .ToList();
+                mergedGroups.Insert(0, localUnlimitedGroup);
+
+                DeckGroupListData mergedDeckList = new DeckGroupListData(mergedGroups);
+                __instance.DeckGroupListData = mergedDeckList;
+                GameMgr.GetIns().GetDataMgr().CurrentDeckListParamData = mergedDeckList;
+                ForceLocalPracticeDeckDialog = true;
+
+                int nonEmptyDeckCount = localUnlimitedGroup.DeckDataList.Count(deck => !deck.IsNoCard());
+                Plugin.Logger.LogInfo(
+                    $"[Offlinizer] Practice retry deck list rebuilt: " +
+                    $"unlimited={localUnlimitedGroup.DeckDataList.Count}, " +
+                    $"nonEmpty={nonEmptyDeckCount}, groups={mergedGroups.Count}.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError(
+                    $"[Offlinizer] Failed to rebuild the practice retry deck list: {ex}");
+            }
+        }
+
+        [HarmonyPatch(typeof(DeckSelectUIDialog), nameof(DeckSelectUIDialog.Create))]
+        [HarmonyPrefix]
+        public static void DeckSelectUIDialog_Create_Prefix(
+            ref DeckGroupListData deckGroupListData,
+            ref Format defaultFormat,
+            ref DeckSelectUIDialog.eFormatChangeUIType formatChangeUIType)
+        {
+            if (!ForceLocalPracticeDeckDialog)
+            {
+                return;
+            }
+            ForceLocalPracticeDeckDialog = false;
+
+            try
+            {
+                LoadDetail loadDetail = Data.Load?.data;
+                if (loadDetail == null)
+                {
+                    Plugin.Logger.LogWarning(
+                        "[Offlinizer] Could not prepare the local practice deck dialog.");
+                    return;
+                }
+
+                DeckGroup localUnlimitedGroup = DeckListUtility.CreateDeckGroup(
+                    loadDetail.UserDeckListUnlimited,
+                    Format.Unlimited,
+                    DeckAttributeType.CustomDeck);
+                deckGroupListData = new DeckGroupListData(localUnlimitedGroup);
+                defaultFormat = Format.Unlimited;
+                formatChangeUIType = DeckSelectUIDialog.eFormatChangeUIType.SingleFormat;
+                ForceLocalPracticeDeckUi = true;
+
+                Plugin.Logger.LogInfo(
+                    $"[Offlinizer] Opening local-only practice deck dialog with " +
+                    $"{localUnlimitedGroup.DeckDataList.Count} Unlimited decks.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError(
+                    $"[Offlinizer] Failed to prepare the local practice deck dialog: {ex}");
+            }
+        }
+
+        [HarmonyPatch(typeof(DeckSelectUI), nameof(DeckSelectUI.Initialize))]
+        [HarmonyPrefix]
+        public static void DeckSelectUI_Initialize_Prefix(
+            DeckSelectUI __instance,
+            ref List<DeckGroup> deckGroupList,
+            ref Format format)
+        {
+            if (!ForceLocalPracticeDeckUi)
+            {
+                return;
+            }
+            ForceLocalPracticeDeckUi = false;
+
+            DeckGroup localUnlimitedGroup = DeckListUtility.CreateDeckGroup(
+                Data.Load.data.UserDeckListUnlimited,
+                Format.Unlimited,
+                DeckAttributeType.CustomDeck);
+            deckGroupList = new List<DeckGroup> { localUnlimitedGroup };
+            format = Format.Unlimited;
+            LocalPracticeDeckUiIds.Add(__instance.GetInstanceID());
+
+            Plugin.Logger.LogInfo(
+                $"[Offlinizer] Local practice DeckSelectUI initialized with " +
+                $"{localUnlimitedGroup.DeckDataList.Count} decks.");
+        }
+
+        [HarmonyPatch(typeof(DeckSelectUI), "CreateDeckGroupPages")]
+        [HarmonyPrefix]
+        public static void DeckSelectUI_CreateDeckGroupPages_Prefix(
+            DeckSelectUI __instance,
+            ref List<DeckGroup> deckGroupList,
+            ref Format format)
+        {
+            if (!LocalPracticeDeckUiIds.Contains(__instance.GetInstanceID()))
+            {
+                return;
+            }
+
+            DeckGroup localUnlimitedGroup = DeckListUtility.CreateDeckGroup(
+                Data.Load.data.UserDeckListUnlimited,
+                Format.Unlimited,
+                DeckAttributeType.CustomDeck);
+            deckGroupList = new List<DeckGroup> { localUnlimitedGroup };
+            format = Format.Unlimited;
+            BuildLocalPracticeDeckPages = true;
+        }
+
+        [HarmonyPatch(typeof(DeckSelectUI.PageData), nameof(DeckSelectUI.PageData.CreatePageList))]
+        [HarmonyPrefix]
+        public static bool DeckSelectUI_PageData_CreatePageList_Prefix(
+            List<DeckGroup> deckGroupList,
+            ref List<DeckSelectUI.PageData> __result)
+        {
+            if (!BuildLocalPracticeDeckPages)
+            {
+                return true;
+            }
+            BuildLocalPracticeDeckPages = false;
+
+            List<DeckData> localDecks = deckGroupList
+                .Where(group => group.DeckFormat == Format.Unlimited &&
+                    group.AttributeType == DeckAttributeType.CustomDeck)
+                .SelectMany(group => group.DeckDataList)
+                .Where(deck => !deck.IsNoCard())
+                .ToList();
+            List<DeckSelectUI.PageData> pages = new List<DeckSelectUI.PageData>();
+            for (int offset = 0; offset < localDecks.Count; offset += 9)
+            {
+                List<DeckUI.DeckViewData> deckViews = localDecks
+                    .Skip(offset)
+                    .Take(9)
+                    .Select(deck => new DeckUI.DeckViewData(DeckUI.eViewType.Normal, deck))
+                    .ToList();
+                pages.Add(new DeckSelectUI.PageData(
+                    deckViews,
+                    Format.Unlimited,
+                    DeckAttributeType.CustomDeck,
+                    DeckListUtility.DeckListHeader(DeckAttributeType.CustomDeck, pages.Count + 1)));
+            }
+
+            __result = pages;
+            Plugin.Logger.LogInfo(
+                $"[Offlinizer] Built {pages.Count} local practice deck page(s) " +
+                $"containing {localDecks.Count} deck(s).");
+            return false;
+        }
+
+        [HarmonyPatch(typeof(DeckSelectUI), "CreateDeckGroupPages")]
+        [HarmonyPostfix]
+        public static void DeckSelectUI_CreateDeckGroupPages_Postfix(DeckSelectUI __instance)
+        {
+            if (!LocalPracticeDeckUiIds.Remove(__instance.GetInstanceID()))
+            {
+                return;
+            }
+
+            Plugin.Logger.LogInfo(
+                $"[Offlinizer] Local practice DeckSelectUI finished with " +
+                $"{__instance._pageList.Count} page(s).");
         }
 
         #region DeckEdit
