@@ -8,11 +8,11 @@
       "SkillTiming": ",when_change_inplay",
       "SkillCondition": ",character=me&target=self&is_inplay=true",
       "SkillTarget": ",character=me&target=self",
-      "SkillOption": ",all=false&include_self=true",
+      "SkillOption": ",all=false&include_self=true&ability=true",
       "SkillPreprocess": ",none"
     },
     "localizationFields": {
-      "SkillDescription": "当这个随从成为法术的指定目标时，使该法术对施法者的1个随机随从再生效一次。"
+      "SkillDescription": "当这个随从成为法术或能力的指定目标时，使该效果对使用者的1个随机随从再生效一次。随机和群体效果不会触发。"
     }
   }
 ]

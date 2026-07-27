@@ -27,6 +27,10 @@ namespace Shadowbus
             SkillFilterCreator.ContentKeyword.include_self,
             true);
 
+        public bool MirrorAbilities => GetBooleanOption(
+            SkillFilterCreator.ContentKeyword.ability,
+            false);
+
         private bool GetBooleanOption(
             SkillFilterCreator.ContentKeyword keyword,
             bool defaultValue)
@@ -81,18 +85,18 @@ namespace Shadowbus
             out MirrorCallState __state)
         {
             __state = null;
-            BattleCardBase spell = __instance?.SkillPrm?.ownerCard;
+            BattleCardBase sourceCard = __instance?.SkillPrm?.ownerCard;
             if (callType != SkillProcessor.ProcessCallType.Start ||
-                spell == null ||
-                !spell.IsSpell ||
+                sourceCard == null ||
                 !IsMirrorableEffect(__instance) ||
-                checkerOption?.SelectedCards == null)
+                checkerOption?.SelectedCards == null ||
+                checkerOption.SelectedCards.Count == 0)
             {
                 return;
             }
 
             List<BattleCardBase> mirrorTargets = checkerOption.SelectedCards
-                .Where(selected => IsSelectedTargetForSkill(__instance, selected))
+                .Where(selected => IsExplicitTargetForSkill(__instance, selected))
                 .Select(selected => selected.SelectCard)
                 .Where(HasActiveMirror)
                 .Distinct()
@@ -107,6 +111,10 @@ namespace Shadowbus
             {
                 Skill_mirror mirrorSkill = GetActiveMirrorSkill(mirrorTarget);
                 if (mirrorSkill == null)
+                {
+                    continue;
+                }
+                if (!sourceCard.IsSpell && !mirrorSkill.MirrorAbilities)
                 {
                     continue;
                 }
@@ -145,8 +153,8 @@ namespace Shadowbus
                 return;
             }
 
-            BattleCardBase spell = __instance.SkillPrm.ownerCard;
-            BattleManagerBase battleManager = spell.SelfBattlePlayer?.BattleMgr;
+            BattleCardBase sourceCard = __instance.SkillPrm.ownerCard;
+            BattleManagerBase battleManager = sourceCard.SelfBattlePlayer?.BattleMgr;
             if (battleManager == null || battleManager.IsBattleEnd)
             {
                 return;
@@ -157,7 +165,7 @@ namespace Shadowbus
 
             foreach (MirrorTrigger trigger in triggeredMirrors)
             {
-                List<BattleCardBase> candidates = spell.SelfBattlePlayer.InPlayCards
+                List<BattleCardBase> candidates = sourceCard.SelfBattlePlayer.InPlayCards
                     .Where(card => card != null && card.IsUnit && !card.IsDead)
                     .Where(card => trigger.IncludeSelf ||
                                    !SameCard(card, trigger.Card))
@@ -192,7 +200,7 @@ namespace Shadowbus
                 catch (Exception exception)
                 {
                     Plugin.Logger.LogError(
-                        $"[Mirror] Failed to repeat spell skill '{__instance.GetType().Name}': " +
+                        $"[Mirror] Failed to repeat targeted effect '{__instance.GetType().Name}': " +
                         exception);
                 }
             }
@@ -200,11 +208,15 @@ namespace Shadowbus
             __result = sequence;
         }
 
-        private static bool IsSelectedTargetForSkill(
+        private static bool IsExplicitTargetForSkill(
             SkillBase skill,
             SkillConditionCheckerOption.SkillAndSelectTarget selected)
         {
             if (selected?.SelectCard == null)
+            {
+                return false;
+            }
+            if (HasRandomTargetSelection(skill))
             {
                 return false;
             }
@@ -216,8 +228,45 @@ namespace Shadowbus
             {
                 return true;
             }
-            return skill.ApplyingTargetFilter is SkillTargetSelectedCardsFilter ||
-                   skill.ApplyingTargetFilter is SkillTargetLastTargetFilter;
+            return UsesOnlyExplicitTargetFilters(skill);
+        }
+
+        private static bool UsesOnlyExplicitTargetFilters(SkillBase skill)
+        {
+            List<ISkillTargetFilter> filters = skill.ApplyAndFilter != null &&
+                                                skill.ApplyAndFilter.Count > 0
+                ? skill.ApplyAndFilter
+                    .Select(collection => collection?.TargetFilter)
+                    .Where(filter => filter != null)
+                    .ToList()
+                : new List<ISkillTargetFilter> { skill.ApplyingTargetFilter };
+
+            return filters.Count > 0 && filters.All(filter =>
+                filter is SkillTargetSelectedCardsFilter ||
+                filter is SkillTargetLastTargetFilter);
+        }
+
+        private static bool HasRandomTargetSelection(SkillBase skill)
+        {
+            if (IsRandomFilter(skill.ApplySelectFilter) ||
+                skill.ApplyCustomSelectFilterList.Any(IsRandomFilter))
+            {
+                return true;
+            }
+
+            return skill.ApplyAndFilter != null && skill.ApplyAndFilter.Any(collection =>
+                collection != null &&
+                (IsRandomFilter(collection.ApplySelectFilter) ||
+                 IsRandomFilter(collection.SelectFilter) ||
+                 collection.ApplyCustomSelectFilterList.Any(IsRandomFilter)));
+        }
+
+        private static bool IsRandomFilter(object filter)
+        {
+            return filter != null &&
+                   filter.GetType().Name.IndexOf(
+                       "Random",
+                       StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static bool IsMirrorableEffect(SkillBase skill)
