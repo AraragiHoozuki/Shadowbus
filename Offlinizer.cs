@@ -121,6 +121,20 @@ namespace Shadowbus
         {
             __instance.IsAcquired = true;
         }
+
+        [HarmonyPatch(typeof(Degree), MethodType.Constructor, [typeof(string[])])]
+        [HarmonyPostfix]
+        public static void Degree_Constructor_Postfix(Degree __instance)
+        {
+            __instance.IsAcquired = true;
+        }
+
+        [HarmonyPatch(typeof(ClassCharacterMasterData), MethodType.Constructor, [typeof(string[])])]
+        [HarmonyPostfix]
+        public static void ClassCharacterMasterData_Constructor_Postfix(ClassCharacterMasterData __instance)
+        {
+            __instance.IsAcquired = true;
+        }
         #endregion
 
         #region MyPageBackground
@@ -316,6 +330,7 @@ namespace Shadowbus
         [HarmonyPostfix]
         public static void LoadDetail_ConvertJsonData_Postfix(LoadDetail __instance)
         {
+            ProfileOfflineData.ApplyAfterLoad(__instance);
             LoadLocalUnlimitedDecks(__instance);
             UnlockAllMyPageBackgrounds(__instance);
         }

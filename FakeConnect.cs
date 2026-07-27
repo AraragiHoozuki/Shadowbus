@@ -57,7 +57,8 @@ namespace Shadowbus
         }
         private static bool IsTaskOfflinized(string taskName)
         {
-            return StoryOfflineData.CanHandle(taskName) ||
+            return ProfileOfflineData.CanHandle(taskName) ||
+                StoryOfflineData.CanHandle(taskName) ||
                 File.Exists((Path.Combine("Mods", "OfflinizedTasks", $"{taskName}.json")));
         }
         private static IEnumerator ProcessSkipTask(NetworkManager __instance, NetworkTask task)
@@ -104,7 +105,11 @@ namespace Shadowbus
                 string filePath = Path.Combine("Mods", "OfflinizedTasks", $"{taskName}.json");
                 JsonData data;
 
-                if (StoryOfflineData.TryCreateResponse(task, out data))
+                if (ProfileOfflineData.TryCreateResponse(task, out data))
+                {
+                    Plugin.Logger.LogInfo($"[Offlinizer] Injecting generated local profile data for {taskName}...");
+                }
+                else if (StoryOfflineData.TryCreateResponse(task, out data))
                 {
                     Plugin.Logger.LogInfo($"[Offlinizer] Injecting generated local data for {taskName}...");
                 }
