@@ -19,6 +19,7 @@ namespace Shadowbus
         public static readonly string AIEmotePath = Path.Combine(AIDataPath, "emote");
         public static readonly string MyPageBackgroundSettingsPath = Path.Combine(ModPath, "MyPageBackground.json");
         public static readonly string ProfileSettingsPath = Path.Combine(ModPath, "Profile.json");
+        public static readonly string P2PIdentityPath = Path.Combine(ModPath, "P2PIdentity.json");
 
         static PathHelper()
         {

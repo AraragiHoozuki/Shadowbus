@@ -86,8 +86,11 @@ namespace Shadowbus
         [HarmonyPrefix]
         public static bool Certification_Login_Prefix(Certification __instance, ref IEnumerator __result)
         {
-            if (Certification.ViewerId == 0)
-            { Certification.ViewerId = 1; }
+            int viewerId = P2PIdentity.ViewerId;
+            if (Certification.ViewerId != viewerId)
+            {
+                Certification.ViewerId = viewerId;
+            }
             return true;
         }
 
@@ -344,6 +347,7 @@ namespace Shadowbus
         public static void LoadLocalUnlimitedDecks(LoadDetail __instance)
         {
             JsonData unlimitedDeckList = new JsonData();
+            List<JsonData> loadedDecks = new List<JsonData>();
             HashSet<int> existingDeckNos = new HashSet<int>();
             bool hasEmptyDecks = false;
             Directory.GetFiles(Plugin.UnlimitedDeckPath, "*.json").ToList().ForEach(file =>
@@ -352,7 +356,7 @@ namespace Shadowbus
                 {
                     var json = File.ReadAllText(file);
                     var data = JsonMapper.ToObject(json);
-                    unlimitedDeckList.Add(data);
+                    loadedDecks.Add(data);
                     existingDeckNos.Add(data["deck_no"].ToInt());
                     var cards = data["card_id_array"];
                     if (cards.IsArray && cards.Count == 0)
@@ -375,12 +379,129 @@ namespace Shadowbus
                 string json = $"{{\r\n  \"deck_no\": {smallestMissingDeckNo},\r\n  \"class_id\": 1,\r\n  \"sleeve_id\": 3000011,\r\n  \"leader_skin_id\": 0,\r\n  \"deck_name\": \"\",\r\n  \"card_id_array\": [],\r\n  \"is_complete_deck\": 0,\r\n  \"restricted_card_exists\": false,\r\n  \"is_available_deck\": 1,\r\n  \"maintenance_card_ids\": [],\r\n  \"is_include_un_possession_card\": false,\r\n  \"is_random_leader_skin\": 0,\r\n  \"leader_skin_id_list\": [0],\r\n  \"order_num\": 0,\r\n  \"create_deck_time\": null\r\n}}";
                 File.WriteAllText(Path.Combine(Plugin.UnlimitedDeckPath, $"deck_{smallestMissingDeckNo}.json"), json);
                 var emptyDeck = JsonMapper.ToObject(json);
-                unlimitedDeckList.Add(emptyDeck);
+                loadedDecks.Add(emptyDeck);
+            }
+
+            // DeckSelectUI discards a whole group when its first entry is an empty slot.
+            // Filesystem enumeration is not ordered, so normalize usable decks before empties.
+            foreach (JsonData deck in loadedDecks
+                .OrderBy(deck => deck["card_id_array"].Count == 0 ? 1 : 0)
+                .ThenBy(deck => deck["deck_no"].ToInt()))
+            {
+                unlimitedDeckList.Add(deck);
             }
             __instance.UserDeckListUnlimited = unlimitedDeckList;
             if (Data.Master.isMasterDataLoaded)
             {
                 DeckListUtility.SetDeckListDataWithLodeIndex();
+            }
+        }
+
+        [HarmonyPatch(typeof(DeckInfoTask), nameof(DeckInfoTask.Parse))]
+        [HarmonyPrefix]
+        public static void DeckInfoTask_Parse_Prefix(DeckInfoTask __instance)
+        {
+            try
+            {
+                LoadDetail loadDetail = Data.Load?.data;
+                JsonData responseData = __instance.ResponseData;
+                if (loadDetail == null || responseData == null || !responseData.IsObject ||
+                    !responseData.Keys.Contains("data"))
+                {
+                    return;
+                }
+
+                LoadLocalUnlimitedDecks(loadDetail);
+                JsonData data = responseData["data"];
+                if (__instance._format == Format.All)
+                {
+                    SetDeckListIfAvailable(data, "user_deck_rotation", loadDetail.UserDeckListRotation);
+                    SetDeckListIfAvailable(data, "user_deck_unlimited", loadDetail.UserDeckListUnlimited);
+                    SetDeckListIfAvailable(data, "user_deck_pre_rotation", loadDetail.UserDeckListPreRotation);
+                    SetDeckListIfAvailable(data, "user_deck_crossover", loadDetail.UserDeckListCrossover);
+                    SetDeckListIfAvailable(data, "user_deck_my_rotation", loadDetail.UserDeckListMyRotation);
+                    return;
+                }
+
+                JsonData localDecks = GetLocalDeckList(loadDetail, __instance._format);
+                if (localDecks == null)
+                {
+                    return;
+                }
+
+                // Single-format DeckInfo responses are parsed from user_deck_list.
+                data["user_deck_list"] = localDecks;
+                int selectableCount = localDecks.Cast<JsonData>()
+                    .Count(deck => deck.Keys.Contains("card_id_array") &&
+                        deck["card_id_array"].IsArray && deck["card_id_array"].Count > 0);
+                Plugin.Logger.LogInfo(
+                    $"[Offlinizer] Injected {selectableCount} local player deck(s) into " +
+                    $"the {__instance._format} DeckInfo response.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError(
+                    $"[Offlinizer] Failed to inject local decks into DeckInfoTask: {ex}");
+            }
+        }
+
+        [HarmonyPatch(typeof(DeckInfoTask), nameof(DeckInfoTask.Parse))]
+        [HarmonyPostfix]
+        public static void DeckInfoTask_Parse_Postfix(
+            DeckInfoTask __instance,
+            int __result)
+        {
+            if (!P2PRuntime.IsActive || __result != 1 || Data.Load?.data == null)
+            {
+                return;
+            }
+
+            try
+            {
+                Format format = ResolveP2PDeckFormat(__instance._format);
+                __instance.DeckGroupListData = MergeLocalCustomDeckGroup(
+                    __instance.DeckGroupListData,
+                    format,
+                    out DeckGroup localGroup);
+                GameMgr.GetIns().GetDataMgr().CurrentDeckListParamData =
+                    __instance.DeckGroupListData;
+
+                LogP2PDeckGroups(
+                    "DeckInfoTask.Parse",
+                    __instance.DeckGroupListData,
+                    localGroup);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError(
+                    $"[P2P] Failed to rebuild the parsed room deck list: {ex}");
+            }
+        }
+
+        private static JsonData GetLocalDeckList(LoadDetail loadDetail, Format format)
+        {
+            switch (format)
+            {
+                case Format.Rotation:
+                    return loadDetail.UserDeckListRotation;
+                case Format.Unlimited:
+                    return loadDetail.UserDeckListUnlimited;
+                case Format.PreRotation:
+                    return loadDetail.UserDeckListPreRotation;
+                case Format.Crossover:
+                    return loadDetail.UserDeckListCrossover;
+                case Format.MyRotation:
+                    return loadDetail.UserDeckListMyRotation;
+                default:
+                    return null;
+            }
+        }
+
+        private static void SetDeckListIfAvailable(JsonData data, string key, JsonData decks)
+        {
+            if (decks != null)
+            {
+                data[key] = decks;
             }
         }
 
@@ -540,13 +661,19 @@ namespace Shadowbus
         public static void DeckSelectUIDialog_Create_Prefix(
             ref DeckGroupListData deckGroupListData,
             ref Format defaultFormat,
-            ref DeckSelectUIDialog.eFormatChangeUIType formatChangeUIType)
+            ref DeckSelectUIDialog.eFormatChangeUIType formatChangeUIType,
+            ref DeckSelectUI.InitOptions initOptions)
         {
-            if (!ForceLocalPracticeDeckDialog)
+            bool isLocalPractice = ForceLocalPracticeDeckDialog;
+            bool isP2PRoom = P2PRuntime.IsActive;
+            if (!isLocalPractice && !isP2PRoom)
             {
                 return;
             }
-            ForceLocalPracticeDeckDialog = false;
+            if (isLocalPractice)
+            {
+                ForceLocalPracticeDeckDialog = false;
+            }
 
             try
             {
@@ -554,28 +681,119 @@ namespace Shadowbus
                 if (loadDetail == null)
                 {
                     Plugin.Logger.LogWarning(
-                        "[Offlinizer] Could not prepare the local practice deck dialog.");
+                        isP2PRoom
+                            ? "[P2P] Could not prepare the local room deck dialog."
+                            : "[Offlinizer] Could not prepare the local practice deck dialog.");
                     return;
                 }
 
-                DeckGroup localUnlimitedGroup = DeckListUtility.CreateDeckGroup(
-                    loadDetail.UserDeckListUnlimited,
-                    Format.Unlimited,
-                    DeckAttributeType.CustomDeck);
-                deckGroupListData = new DeckGroupListData(localUnlimitedGroup);
-                defaultFormat = Format.Unlimited;
-                formatChangeUIType = DeckSelectUIDialog.eFormatChangeUIType.SingleFormat;
-                ForceLocalPracticeDeckUi = true;
+                if (isP2PRoom)
+                {
+                    Format format = ResolveP2PDeckFormat(defaultFormat);
+                    deckGroupListData = MergeLocalCustomDeckGroup(
+                        deckGroupListData,
+                        format,
+                        out DeckGroup localGroup);
+                    defaultFormat = format;
+                    GameMgr.GetIns().GetDataMgr().CurrentDeckListParamData = deckGroupListData;
+                    DeckData primaryLocalDeck = localGroup.DeckDataList
+                        .FirstOrDefault(deck => !deck.IsNoCard());
+                    if (primaryLocalDeck != null)
+                    {
+                        initOptions = initOptions ?? new DeckSelectUI.InitOptions();
+                        initOptions.PrimaryFirstDisplayDeck = primaryLocalDeck;
+                    }
+                    LogP2PDeckGroups(
+                        "DeckSelectUIDialog.Create",
+                        deckGroupListData,
+                        localGroup);
+                    Plugin.Logger.LogInfo(
+                        $"[P2P] Room deck dialog primary page anchored to " +
+                        $"'{primaryLocalDeck?.GetDeckName() ?? "<none>"}'.");
+                }
+                else
+                {
+                    LoadLocalUnlimitedDecks(loadDetail);
+                    DeckGroup localUnlimitedGroup = DeckListUtility.CreateDeckGroup(
+                        loadDetail.UserDeckListUnlimited,
+                        Format.Unlimited,
+                        DeckAttributeType.CustomDeck);
+                    deckGroupListData = new DeckGroupListData(localUnlimitedGroup);
+                    defaultFormat = Format.Unlimited;
+                    formatChangeUIType = DeckSelectUIDialog.eFormatChangeUIType.SingleFormat;
+                    ForceLocalPracticeDeckUi = true;
 
-                Plugin.Logger.LogInfo(
-                    $"[Offlinizer] Opening local-only practice deck dialog with " +
-                    $"{localUnlimitedGroup.DeckDataList.Count} Unlimited decks.");
+                    Plugin.Logger.LogInfo(
+                        $"[Offlinizer] Opening local-only practice deck dialog with " +
+                        $"{localUnlimitedGroup.DeckDataList.Count} Unlimited decks.");
+                }
             }
             catch (Exception ex)
             {
                 Plugin.Logger.LogError(
-                    $"[Offlinizer] Failed to prepare the local practice deck dialog: {ex}");
+                    isP2PRoom
+                        ? $"[P2P] Failed to prepare the local room deck dialog: {ex}"
+                        : $"[Offlinizer] Failed to prepare the local practice deck dialog: {ex}");
             }
+        }
+
+        private static DeckGroupListData MergeLocalCustomDeckGroup(
+            DeckGroupListData existing,
+            Format format,
+            out DeckGroup localGroup)
+        {
+            LoadDetail loadDetail = Data.Load.data;
+            LoadLocalUnlimitedDecks(loadDetail);
+            JsonData localDecks = GetLocalDeckList(loadDetail, format);
+            if (localDecks == null)
+            {
+                throw new InvalidOperationException(
+                    $"No local deck source is available for room format {format}.");
+            }
+
+            localGroup = DeckListUtility.CreateDeckGroup(
+                localDecks,
+                format,
+                DeckAttributeType.CustomDeck);
+            List<DeckGroup> groups = existing?.DeckGroupList?
+                .Where(group => group.DeckFormat != format ||
+                    group.AttributeType != DeckAttributeType.CustomDeck)
+                .Select(group => group.Clone())
+                .ToList() ?? new List<DeckGroup>();
+            groups.Insert(0, localGroup);
+            return new DeckGroupListData(groups);
+        }
+
+        private static Format ResolveP2PDeckFormat(Format candidate)
+        {
+            if (candidate != Format.All && candidate != Format.Max)
+            {
+                return candidate;
+            }
+
+            if (P2PRuntime.Rules != null)
+            {
+                Format ruleFormat = Data.ParseApiFormat(P2PRuntime.Rules.DeckFormat);
+                if (ruleFormat != Format.All && ruleFormat != Format.Max)
+                {
+                    return ruleFormat;
+                }
+            }
+            return Format.Unlimited;
+        }
+
+        private static void LogP2PDeckGroups(
+            string stage,
+            DeckGroupListData listData,
+            DeckGroup localGroup)
+        {
+            string localDeckNames = string.Join(", ", localGroup.DeckDataList
+                .Where(deck => !deck.IsNoCard())
+                .Select(deck => $"'{deck.GetDeckName()}'({deck.GetCardIdList().Count})"));
+            string groups = string.Join(", ", listData.DeckGroupList.Select(group =>
+                $"{group.DeckFormat}/{group.AttributeType}:{group.DeckDataList.Count}"));
+            Plugin.Logger.LogInfo(
+                $"[P2P] {stage} received local decks [{localDeckNames}]; final groups [{groups}].");
         }
 
         [HarmonyPatch(typeof(DeckSelectUI), nameof(DeckSelectUI.Initialize))]
@@ -669,6 +887,18 @@ namespace Shadowbus
         [HarmonyPostfix]
         public static void DeckSelectUI_CreateDeckGroupPages_Postfix(DeckSelectUI __instance)
         {
+            if (P2PRuntime.IsActive)
+            {
+                string pages = string.Join(", ", __instance._pageList.Select((page, index) =>
+                    $"{index}:{page.Format}/{page.AttributeType}[" +
+                    string.Join(", ", page.DeckViewList
+                        .Where(view => view.ViewType != DeckUI.eViewType.Empty)
+                        .Select(view => $"'{view.Deck.GetDeckName()}'")) + "]"));
+                Plugin.Logger.LogInfo(
+                    $"[P2P] Room deck pages built; selected={__instance._currentPageIndex}; " +
+                    $"pages=[{pages}].");
+            }
+
             if (!LocalPracticeDeckUiIds.Remove(__instance.GetInstanceID()))
             {
                 return;

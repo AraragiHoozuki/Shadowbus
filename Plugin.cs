@@ -1,4 +1,5 @@
 ﻿using BepInEx;
+using BepInEx.Configuration;
 using BepInEx.Logging;
 using BepInEx.Unity.Mono;
 using HarmonyLib;
@@ -18,12 +19,36 @@ public class Plugin : BaseUnityPlugin
 
     public BattleCardBase SelectedCard { get; set; }
 
+    private ConfigEntry<string> p2pBindAddress;
+    private ConfigEntry<string> p2pAdvertisedAddress;
+    private ConfigEntry<int> p2pPort;
+
     private void Awake()
     {
         Instance = this;
         // Plugin startup logic
         Logger = base.Logger;
         Logger.LogInfo($"Plugin Shadowbus is loaded!");
+
+        p2pBindAddress = Config.Bind(
+            "P2P",
+            "BindAddress",
+            "0.0.0.0",
+            "Local address used by the room host TCP listener.");
+        p2pAdvertisedAddress = Config.Bind(
+            "P2P",
+            "AdvertisedAddress",
+            string.Empty,
+            "IP address embedded in the room password. Empty uses a concrete BindAddress or selects a same-family local address.");
+        p2pPort = Config.Bind(
+            "P2P",
+            "Port",
+            29600,
+            "TCP port used by P2P room hosting. Use 0 for an automatically assigned port.");
+        P2PRuntime.Configure(
+            p2pBindAddress.Value,
+            p2pAdvertisedAddress.Value,
+            p2pPort.Value);
 
         try
         {
@@ -44,11 +69,23 @@ public class Plugin : BaseUnityPlugin
             Harmony.CreateAndPatchAll(typeof(MirrorSkillPatcher));
             Harmony.CreateAndPatchAll(typeof(MirrorResidentEffectPatcher));
             Harmony.CreateAndPatchAll(typeof(StoryOfflinePatches));
+            Harmony.CreateAndPatchAll(typeof(LanguageVoicePatches));
+            Harmony.CreateAndPatchAll(typeof(P2PPatches));
 
         }
         catch (System.Exception exception)
         {
             Logger.LogError($"Harmony - FAILED to Apply Patch(s): {exception}");
         }
+    }
+
+    private void Update()
+    {
+        P2PRuntime.Update();
+    }
+
+    private void OnDestroy()
+    {
+        P2PRuntime.Shutdown();
     }
 }

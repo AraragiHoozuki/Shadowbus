@@ -45,5 +45,6 @@
   <ItemGroup>
     <Folder Include="Mods\RotationDecks\" />
     <Folder Include="UIs\" />
+    <Compile Remove="Tests\**\*.cs" />
   </ItemGroup>
 </Project>

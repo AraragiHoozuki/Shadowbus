@@ -149,31 +149,61 @@ namespace Shadowbus
             }
 
             ApplyMaxProfileStats(loadDetail);
+            LocalProfileSettings settings = LoadSettings();
+            ApplySettings(loadDetail, settings);
+
+            Plugin.Logger.LogInfo(
+                $"[ProfileOffline] Applied full profile data and local settings for '{loadDetail._userInfo.name}'.");
+        }
+
+        internal static P2PProfile CreateP2PProfile(int viewerId)
+        {
+            P2PProfile profile = new P2PProfile
+            {
+                ViewerId = viewerId,
+                UserName = "Player",
+                CountryCode = string.Empty
+            };
+
+            try
+            {
+                profile.UserName = PlayerStaticData.UserName ?? "Player";
+                profile.Rank = PlayerStaticData.UserRankHighAllFormat();
+                profile.BattlePoint = PlayerStaticData.UserBattlePointHighFormat();
+                profile.MasterPoint = PlayerStaticData.UserMasterPointHighAllFormat();
+                profile.DegreeId = PlayerStaticData.UserDegreeID;
+                profile.EmblemId = PlayerStaticData.UserEmblemID;
+                profile.CountryCode = PlayerStaticData.UserCountryCode ?? string.Empty;
+                profile.IsOfficial = PlayerStaticData.IsOfficialUserDisplay;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning(
+                    "[ProfileOffline] Some live profile fields were unavailable for P2P: " + ex.Message);
+            }
 
             LocalProfileSettings settings = LoadSettings();
             if (settings.Name != null)
             {
-                loadDetail._userInfo.name = settings.Name;
+                profile.UserName = settings.Name;
             }
             if (settings.EmblemId.HasValue)
             {
-                loadDetail._userInfo.selected_emblem_id = settings.EmblemId.Value;
+                profile.EmblemId = settings.EmblemId.Value;
             }
             if (settings.DegreeId.HasValue)
             {
-                loadDetail._userInfo.selected_degree_id = settings.DegreeId.Value;
+                profile.DegreeId = settings.DegreeId.Value;
             }
             if (settings.CountryCode != null)
             {
-                loadDetail._userInfo.country_code = settings.CountryCode;
+                profile.CountryCode = settings.CountryCode;
             }
             if (settings.IsOfficialMarkDisplayed.HasValue)
             {
-                PlayerStaticData.IsOfficialUserDisplay = settings.IsOfficialMarkDisplayed.Value;
+                profile.IsOfficial = settings.IsOfficialMarkDisplayed.Value;
             }
-
-            Plugin.Logger.LogInfo(
-                $"[ProfileOffline] Applied full profile data and local settings for '{loadDetail._userInfo.name}'.");
+            return profile;
         }
 
         private static object CreateProfileData()
@@ -452,8 +482,37 @@ namespace Shadowbus
                 update(settings);
                 string json = JsonConvert.SerializeObject(settings, Formatting.Indented);
                 File.WriteAllText(PathHelper.ProfileSettingsPath, json, Encoding.UTF8);
+                ApplySettings(Data.Load?.data, settings);
                 Plugin.Logger.LogInfo(
                     $"[ProfileOffline] Saved local profile settings to {PathHelper.ProfileSettingsPath}.");
+            }
+        }
+
+        private static void ApplySettings(LoadDetail loadDetail, LocalProfileSettings settings)
+        {
+            if (loadDetail?._userInfo == null || settings == null)
+            {
+                return;
+            }
+            if (settings.Name != null)
+            {
+                loadDetail._userInfo.name = settings.Name;
+            }
+            if (settings.EmblemId.HasValue)
+            {
+                loadDetail._userInfo.selected_emblem_id = settings.EmblemId.Value;
+            }
+            if (settings.DegreeId.HasValue)
+            {
+                loadDetail._userInfo.selected_degree_id = settings.DegreeId.Value;
+            }
+            if (settings.CountryCode != null)
+            {
+                loadDetail._userInfo.country_code = settings.CountryCode;
+            }
+            if (settings.IsOfficialMarkDisplayed.HasValue)
+            {
+                PlayerStaticData.IsOfficialUserDisplay = settings.IsOfficialMarkDisplayed.Value;
             }
         }
 

@@ -31,12 +31,17 @@ namespace Shadowbus
             
             NetworkTask currentTask = __instance.lastRequestTask;
             string taskTypeName = currentTask.GetType().Name;
-            if (IsTaskSkipped(taskTypeName))
+            if (P2PTaskRouter.CanHandle(currentTask))
+            {
+                Plugin.Logger.LogInfo($"[P2P] Intercepted room task: {taskTypeName}");
+                yield return P2PTaskRouter.Process(__instance, currentTask);
+            }
+            else if (IsTaskSkipped(taskTypeName))
             {
                 Plugin.Logger.LogInfo($"[Offlinizer] Skipped Task: {taskTypeName}");
                 yield return ProcessSkipTask(__instance, currentTask);
-            } else
-            if (IsTaskOfflinized(taskTypeName))
+            }
+            else if (IsTaskOfflinized(taskTypeName))
             {
                 Plugin.Logger.LogInfo($"[Offlinizer] Intercepted Task: {taskTypeName}. Reading local data...");
                 yield return ProcessOfflineTask(__instance, currentTask, taskTypeName);
