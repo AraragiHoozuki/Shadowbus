@@ -10,15 +10,15 @@
 
   <ItemGroup>
     <Compile Include="Program.cs" />
-    <Compile Include="..\..\P2PBattleResult.cs" Link="P2PBattleResult.cs" />
-    <Compile Include="..\..\P2PBattleProtocol.cs" Link="P2PBattleProtocol.cs" />
-    <Compile Include="..\..\P2PConnectionCode.cs" Link="P2PConnectionCode.cs" />
-    <Compile Include="..\..\P2PDealState.cs" Link="P2PDealState.cs" />
-    <Compile Include="..\..\P2PDisconnectPolicy.cs" Link="P2PDisconnectPolicy.cs" />
-    <Compile Include="..\..\P2PDeliverySequence.cs" Link="P2PDeliverySequence.cs" />
-    <Compile Include="..\..\P2PModels.cs" Link="P2PModels.cs" />
-    <Compile Include="..\..\P2PRoomRoundState.cs" Link="P2PRoomRoundState.cs" />
-    <Compile Include="..\..\P2PTransport.cs" Link="P2PTransport.cs" />
+    <Compile Include="..\..\P2P\P2PBattleResult.cs" Link="P2PBattleResult.cs" />
+    <Compile Include="..\..\P2P\P2PBattleProtocol.cs" Link="P2PBattleProtocol.cs" />
+    <Compile Include="..\..\P2P\P2PConnectionCode.cs" Link="P2PConnectionCode.cs" />
+    <Compile Include="..\..\P2P\P2PDealState.cs" Link="P2PDealState.cs" />
+    <Compile Include="..\..\P2P\P2PDisconnectPolicy.cs" Link="P2PDisconnectPolicy.cs" />
+    <Compile Include="..\..\P2P\P2PDeliverySequence.cs" Link="P2PDeliverySequence.cs" />
+    <Compile Include="..\..\P2P\P2PModels.cs" Link="P2PModels.cs" />
+    <Compile Include="..\..\P2P\P2PRoomRoundState.cs" Link="P2PRoomRoundState.cs" />
+    <Compile Include="..\..\P2P\P2PTransport.cs" Link="P2PTransport.cs" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
   </ItemGroup>
 </Project>
