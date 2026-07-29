@@ -3,7 +3,7 @@ namespace Shadowbus
     internal enum P2PDisconnectAction
     {
         None,
-        BattleVictory,
+        BattleResult,
         RoomRelease,
         ForceRoomExit
     }
@@ -28,7 +28,7 @@ namespace Shadowbus
             {
                 return finishResultSent
                     ? P2PDisconnectAction.None
-                    : P2PDisconnectAction.BattleVictory;
+                    : P2PDisconnectAction.BattleResult;
             }
             if (roomExitHandled || isBattleScene || !hasInitializedRoom)
             {

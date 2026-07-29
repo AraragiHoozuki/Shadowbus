@@ -63,11 +63,20 @@ namespace Shadowbus
 
     internal sealed class P2PRoomRules
     {
+        internal const int DefaultInitialMaxLife = 20;
+        internal const int MinimumInitialMaxLife = 20;
+        internal const int MaximumInitialMaxLife = 200;
+
+        private int initialMaxLife = DefaultInitialMaxLife;
+
         [JsonProperty("battleType")]
         public int BattleType { get; set; }
 
         [JsonProperty("deckFormat")]
         public int DeckFormat { get; set; }
+
+        [JsonProperty("customFormatId")]
+        public string CustomFormatId { get; set; } = "unlimited";
 
         [JsonProperty("twoPickType")]
         public int TwoPickType { get; set; }
@@ -77,6 +86,26 @@ namespace Shadowbus
 
         [JsonProperty("isDeckOpen")]
         public bool IsDeckOpen { get; set; }
+
+        [JsonProperty("initialMaxLife")]
+        public int InitialMaxLife
+        {
+            get => initialMaxLife;
+            set => initialMaxLife = ClampInitialMaxLife(value);
+        }
+
+        internal static int ClampInitialMaxLife(int value)
+        {
+            if (value < MinimumInitialMaxLife)
+            {
+                return MinimumInitialMaxLife;
+            }
+            if (value > MaximumInitialMaxLife)
+            {
+                return MaximumInitialMaxLife;
+            }
+            return value;
+        }
     }
 
     internal sealed class P2PWireMessage
@@ -195,6 +224,7 @@ namespace Shadowbus
             Dictionary<string, object> source)
         {
             Dictionary<string, object> result = FlipPerspective(source);
+            NormalizeOpponentKeyActions(result);
             if (result.TryGetValue("targetList", out object targets))
             {
                 // The client emits targetList, but live opponent messages use
@@ -203,6 +233,53 @@ namespace Shadowbus
                 result["oppoTargetList"] = targets;
             }
             return result;
+        }
+
+        private static void NormalizeOpponentKeyActions(
+            Dictionary<string, object> message)
+        {
+            if (!message.TryGetValue("keyAction", out object rawKeyActions) ||
+                !(rawKeyActions is List<object> keyActions))
+            {
+                return;
+            }
+
+            const int ChoiceKeyAction = 1;
+            const int HaveBeforeSkillChoiceKeyAction = 5;
+            const int BurialRiteKeyAction = 6;
+            const int ChoiceEvolutionKeyAction = 7;
+            const int ChoiceBraveKeyAction = 8;
+            foreach (object rawKeyAction in keyActions)
+            {
+                if (!(rawKeyAction is Dictionary<string, object> keyAction) ||
+                    !TryConvertInt(keyAction.TryGetValue("type", out object rawType)
+                        ? rawType : null, out int type) ||
+                    !keyAction.TryGetValue("selectCard", out object rawSelection) ||
+                    !(rawSelection is Dictionary<string, object> selection))
+                {
+                    continue;
+                }
+
+                if (type == BurialRiteKeyAction &&
+                    !keyAction.ContainsKey("cardIdx") &&
+                    selection.TryGetValue("cardIdx", out object selectedIndices))
+                {
+                    // SendKeyActionDataManager emits selectCard.cardIdx, while the live
+                    // battle receiver expects the server response at keyAction.cardIdx.
+                    keyAction["cardIdx"] = selectedIndices;
+                }
+
+                if ((type == ChoiceKeyAction ||
+                        type == HaveBeforeSkillChoiceKeyAction ||
+                        type == ChoiceEvolutionKeyAction ||
+                        type == ChoiceBraveKeyAction) &&
+                    selection.TryGetValue("cardId", out object selectedCardIds))
+                {
+                    // Choice requests wrap the selected IDs in selectCard.cardId. The
+                    // server flattens that wrapper before NetworkBattleReceiver sees it.
+                    keyAction["selectCard"] = selectedCardIds;
+                }
+            }
         }
 
         private static void FlipDictionary(Dictionary<string, object> dictionary)
@@ -273,6 +350,20 @@ namespace Shadowbus
             {
             }
             return value;
+        }
+
+        private static bool TryConvertInt(object value, out int result)
+        {
+            try
+            {
+                result = Convert.ToInt32(value, CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch (Exception)
+            {
+                result = 0;
+                return false;
+            }
         }
     }
 }

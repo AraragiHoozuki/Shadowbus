@@ -62,9 +62,16 @@ namespace Shadowbus
         }
         private static bool IsTaskOfflinized(string taskName)
         {
-            return ProfileOfflineData.CanHandle(taskName) ||
+            return IsLocalDeckListTask(taskName) ||
+                ProfileOfflineData.CanHandle(taskName) ||
                 StoryOfflineData.CanHandle(taskName) ||
                 File.Exists((Path.Combine("Mods", "OfflinizedTasks", $"{taskName}.json")));
+        }
+
+        private static bool IsLocalDeckListTask(string taskName)
+        {
+            return taskName == nameof(DeckDeleteTask) ||
+                taskName == nameof(DeckOrderTask);
         }
         private static IEnumerator ProcessSkipTask(NetworkManager __instance, NetworkTask task)
         {
@@ -110,7 +117,11 @@ namespace Shadowbus
                 string filePath = Path.Combine("Mods", "OfflinizedTasks", $"{taskName}.json");
                 JsonData data;
 
-                if (ProfileOfflineData.TryCreateResponse(task, out data))
+                if (TryCreateLocalDeckListResponse(task, out data))
+                {
+                    Plugin.Logger.LogInfo($"[CustomFormats] Creating local deck-list response for {taskName}...");
+                }
+                else if (ProfileOfflineData.TryCreateResponse(task, out data))
                 {
                     Plugin.Logger.LogInfo($"[Offlinizer] Injecting generated local profile data for {taskName}...");
                 }
@@ -128,6 +139,7 @@ namespace Shadowbus
                     throw new FileNotFoundException("Local offline task data was not found.", filePath);
                 }
 
+                ProfileOfflineData.ApplyToResponse(task, data);
                 data["data_headers"]["servertime"] = (long)TimeNativePlugin.GetDeviceOperatingTime();
                 task.SetResponseData(data);
                 if (task is CheckSpecialTitleTask specialTitleTask)
@@ -138,6 +150,7 @@ namespace Shadowbus
                 {
                     task.CheckResultCodeToPopupCreate_ReturnStatus(0);
                 }
+                ProfileOfflineData.ReapplyCurrentSettings();
 
                 Plugin.Logger.LogInfo($"[Offlinizer] Successfully injected local data for {taskName}");
             }
@@ -148,6 +161,21 @@ namespace Shadowbus
 
             __instance.ClearLastRequestTask();
             __instance.isConnect = false;
+        }
+
+        private static bool TryCreateLocalDeckListResponse(NetworkTask task, out JsonData data)
+        {
+            if (!(task is DeckDeleteTask) && !(task is DeckOrderTask))
+            {
+                data = null;
+                return false;
+            }
+
+            data = JsonMapper.ToObject(
+                "{\"data_headers\":{\"short_udid\":0,\"viewer_id\":0," +
+                "\"sid\":\"\",\"servertime\":0,\"result_code\":1}," +
+                "\"data\":{\"user_deck_list\":[]}}");
+            return true;
         }
 
         private static IEnumerator ProcessOnlineTask(NetworkManager __instance, NetworkTask task, bool showErrorDialog)

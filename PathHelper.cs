@@ -12,6 +12,7 @@ namespace Shadowbus
     {
         public static readonly string ModPath = Path.Combine(Paths.GameRootPath, "Mods");
         public static readonly string UnlimitedDeckPath = Path.Combine(ModPath, "UnlimitedDecks");
+        public static readonly string CustomFormatPath = Path.Combine(ModPath, "CustomFormats");
         public static readonly string CardMasterPath = Path.Combine(ModPath, "CardMaster");
         public static readonly string AIDataPath = Path.Combine(ModPath, "AIData");
         public static readonly string AIDeckPath = Path.Combine(AIDataPath, "deck");
@@ -25,6 +26,7 @@ namespace Shadowbus
         {
             Directory.CreateDirectory(ModPath);
             Directory.CreateDirectory(UnlimitedDeckPath);
+            Directory.CreateDirectory(CustomFormatPath);
             Directory.CreateDirectory(CardMasterPath);
             Directory.CreateDirectory(AIDataPath);
             Directory.CreateDirectory(AIDeckPath);

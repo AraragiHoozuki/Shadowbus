@@ -150,10 +150,59 @@ namespace Shadowbus
 
             ApplyMaxProfileStats(loadDetail);
             LocalProfileSettings settings = LoadSettings();
-            ApplySettings(loadDetail, settings);
+            ApplySettings(loadDetail, settings, false);
 
             Plugin.Logger.LogInfo(
                 $"[ProfileOffline] Applied full profile data and local settings for '{loadDetail._userInfo.name}'.");
+        }
+
+        internal static void ApplyToResponse(NetworkTask task, JsonData response)
+        {
+            if (task == null || response == null || !response.IsObject ||
+                !response.Keys.Contains("data"))
+            {
+                return;
+            }
+
+            JsonData data = response["data"];
+            if (data == null || !data.IsObject || !data.Keys.Contains("user_info"))
+            {
+                return;
+            }
+
+            JsonData userInfo = data["user_info"];
+            if (userInfo == null || !userInfo.IsObject)
+            {
+                return;
+            }
+
+            LocalProfileSettings settings = LoadSettings();
+            if (settings.Name != null)
+            {
+                userInfo["name"] = settings.Name;
+            }
+            if (settings.EmblemId.HasValue)
+            {
+                userInfo["selected_emblem_id"] = settings.EmblemId.Value;
+            }
+            if (settings.DegreeId.HasValue)
+            {
+                userInfo["selected_degree_id"] = settings.DegreeId.Value;
+            }
+            if (settings.CountryCode != null)
+            {
+                userInfo["country_code"] = settings.CountryCode;
+            }
+            if (settings.IsOfficialMarkDisplayed.HasValue)
+            {
+                userInfo["is_official_mark_displayed"] =
+                    settings.IsOfficialMarkDisplayed.Value ? 1 : 0;
+            }
+        }
+
+        internal static void ReapplyCurrentSettings()
+        {
+            ApplySettings(Data.Load?.data, LoadSettings(), true);
         }
 
         internal static P2PProfile CreateP2PProfile(int viewerId)
@@ -211,6 +260,7 @@ namespace Shadowbus
             LoadDetail loadDetail = Data.Load?.data;
             ApplyMaxProfileStats(loadDetail);
             LocalProfileSettings settings = LoadSettings();
+            ApplySettings(loadDetail, settings, true);
             IDictionary<int, ClassCharaPrm> classParameters =
                 GameMgr.GetIns().GetDataMgr().GetClassPrmDictionary();
             List<Dictionary<string, object>> classList = new List<Dictionary<string, object>>();
@@ -482,37 +532,100 @@ namespace Shadowbus
                 update(settings);
                 string json = JsonConvert.SerializeObject(settings, Formatting.Indented);
                 File.WriteAllText(PathHelper.ProfileSettingsPath, json, Encoding.UTF8);
-                ApplySettings(Data.Load?.data, settings);
+                ApplySettings(Data.Load?.data, settings, true);
                 Plugin.Logger.LogInfo(
                     $"[ProfileOffline] Saved local profile settings to {PathHelper.ProfileSettingsPath}.");
             }
         }
 
-        private static void ApplySettings(LoadDetail loadDetail, LocalProfileSettings settings)
+        private static void ApplySettings(
+            LoadDetail loadDetail,
+            LocalProfileSettings settings,
+            bool refreshCachedResources)
         {
-            if (loadDetail?._userInfo == null || settings == null)
+            if (settings == null)
             {
                 return;
             }
-            if (settings.Name != null)
+
+            if (loadDetail?._userInfo != null)
             {
-                loadDetail._userInfo.name = settings.Name;
-            }
-            if (settings.EmblemId.HasValue)
-            {
-                loadDetail._userInfo.selected_emblem_id = settings.EmblemId.Value;
-            }
-            if (settings.DegreeId.HasValue)
-            {
-                loadDetail._userInfo.selected_degree_id = settings.DegreeId.Value;
-            }
-            if (settings.CountryCode != null)
-            {
-                loadDetail._userInfo.country_code = settings.CountryCode;
+                if (settings.Name != null)
+                {
+                    loadDetail._userInfo.name = settings.Name;
+                }
+                if (settings.EmblemId.HasValue)
+                {
+                    if (refreshCachedResources)
+                    {
+                        PlayerStaticData.UserEmblemID = settings.EmblemId.Value;
+                    }
+                    else
+                    {
+                        loadDetail._userInfo.selected_emblem_id = settings.EmblemId.Value;
+                    }
+                }
+                if (settings.DegreeId.HasValue)
+                {
+                    loadDetail._userInfo.selected_degree_id = settings.DegreeId.Value;
+                }
+                if (settings.CountryCode != null)
+                {
+                    if (refreshCachedResources)
+                    {
+                        PlayerStaticData.UserCountryCode = settings.CountryCode;
+                    }
+                    else
+                    {
+                        loadDetail._userInfo.country_code = settings.CountryCode;
+                    }
+                }
             }
             if (settings.IsOfficialMarkDisplayed.HasValue)
             {
                 PlayerStaticData.IsOfficialUserDisplay = settings.IsOfficialMarkDisplayed.Value;
+            }
+
+            ApplyLeaderSkinSettings(settings);
+        }
+
+        private static void ApplyLeaderSkinSettings(LocalProfileSettings settings)
+        {
+            if (settings?.LeaderSkins == null || settings.LeaderSkins.Count == 0)
+            {
+                return;
+            }
+
+            IDictionary<int, ClassCharaPrm> classParameters;
+            try
+            {
+                classParameters = GameMgr.GetIns().GetDataMgr().GetClassPrmDictionary();
+            }
+            catch
+            {
+                return;
+            }
+
+            foreach (KeyValuePair<int, LocalLeaderSkinSetting> pair in settings.LeaderSkins)
+            {
+                LocalLeaderSkinSetting leaderSetting = pair.Value;
+                if (leaderSetting == null ||
+                    !classParameters.TryGetValue(pair.Key, out ClassCharaPrm classParameter))
+                {
+                    continue;
+                }
+
+                if (leaderSetting.CurrentCharaId > 0)
+                {
+                    classParameter.SetCurrentCharaId(leaderSetting.CurrentCharaId);
+                }
+                classParameter.IsRandomLeaderSkin = leaderSetting.IsRandom;
+                classParameter.LeaderSkinIdList.Clear();
+                if (leaderSetting.SkinIds != null)
+                {
+                    classParameter.LeaderSkinIdList.AddRange(
+                        leaderSetting.SkinIds.Where(id => id > 0).Distinct());
+                }
             }
         }
 

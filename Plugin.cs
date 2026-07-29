@@ -49,6 +49,7 @@ public class Plugin : BaseUnityPlugin
             p2pBindAddress.Value,
             p2pAdvertisedAddress.Value,
             p2pPort.Value);
+        CustomFormats.Initialize();
 
         try
         {
@@ -70,6 +71,7 @@ public class Plugin : BaseUnityPlugin
             Harmony.CreateAndPatchAll(typeof(MirrorResidentEffectPatcher));
             Harmony.CreateAndPatchAll(typeof(StoryOfflinePatches));
             Harmony.CreateAndPatchAll(typeof(LanguageVoicePatches));
+            Harmony.CreateAndPatchAll(typeof(ModernDeckMenuUI));
             Harmony.CreateAndPatchAll(typeof(P2PPatches));
 
         }

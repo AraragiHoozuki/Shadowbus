@@ -62,13 +62,14 @@ namespace Shadowbus
                     return;
                 }
 
-                Directory.CreateDirectory(Plugin.UnlimitedDeckPath);
+                CustomFormatDefinition definition = CustomFormatContext.DeckListFormat;
+                Directory.CreateDirectory(definition.DeckDirectory);
                 int fileCountBefore = Directory.GetFiles(
-                    Plugin.UnlimitedDeckPath,
+                    definition.DeckDirectory,
                     "*.json",
                     SearchOption.TopDirectoryOnly).Length;
 
-                Offlinizer.LoadLocalUnlimitedDecks(Data.Load.data);
+                Offlinizer.LoadLocalDecks(Data.Load.data, definition);
 
                 var deckGroups = DeckListUtility.DeckGroupDataBaseClone();
                 var unlimitedGroup = deckGroups.FirstOrDefault(group =>
@@ -84,12 +85,13 @@ namespace Shadowbus
                 }
 
                 int fileCountAfter = Directory.GetFiles(
-                    Plugin.UnlimitedDeckPath,
+                    definition.DeckDirectory,
                     "*.json",
                     SearchOption.TopDirectoryOnly).Length;
                 Plugin.Logger.LogInfo(
-                    $"[DeckListHotReload] Deck data refreshed: files={fileCountBefore}->{fileCountAfter}, " +
-                    $"unlimitedDecks={deckCount}, emptyDecks={emptyDeckCount}.");
+                    $"[DeckListHotReload] {definition.Id} deck data refreshed: " +
+                    $"files={fileCountBefore}->{fileCountAfter}, " +
+                    $"decks={deckCount}, emptyDecks={emptyDeckCount}.");
             }
             catch (Exception exception)
             {

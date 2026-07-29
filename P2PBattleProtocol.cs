@@ -18,6 +18,7 @@ namespace Shadowbus
         internal const string PlayActionsUri = "PlayActions";
         internal const string TurnEndActionsUri = "TurnEndActions";
         internal const string TurnEndUri = "TurnEnd";
+        internal const string TurnEndFinalUri = "TurnEndFinal";
         internal const string TurnStartUri = "TurnStart";
         internal const string JudgeUri = "Judge";
         internal const string EchoUri = "Echo";
@@ -43,6 +44,14 @@ namespace Shadowbus
                 string.Equals(uri, TurnStartUri, StringComparison.Ordinal) ||
                 string.Equals(uri, JudgeUri, StringComparison.Ordinal);
         }
+
+        internal static bool CarriesBattleStateCheckpoint(string uri)
+        {
+            return string.Equals(uri, TurnEndActionsUri, StringComparison.Ordinal) ||
+                string.Equals(uri, TurnEndUri, StringComparison.Ordinal) ||
+                string.Equals(uri, TurnEndFinalUri, StringComparison.Ordinal) ||
+                string.Equals(uri, TurnStartUri, StringComparison.Ordinal);
+        }
     }
 
     internal sealed class P2PBattleSelectionTracker
@@ -57,14 +66,18 @@ namespace Shadowbus
             new List<SelectionTarget>();
         private readonly List<int> announcedSkillIndexes = new List<int>();
         private int playIndex = -1;
+        private bool isSelectionActive;
         private bool isBurialRite;
+        private bool isEvolutionSelection;
 
         internal void Reset()
         {
             burialTargets.Clear();
             announcedSkillIndexes.Clear();
             playIndex = -1;
+            isSelectionActive = false;
             isBurialRite = false;
+            isEvolutionSelection = false;
         }
 
         internal bool RecordHandData(
@@ -83,37 +96,41 @@ namespace Shadowbus
 
             if (operation == CancelSelectOperation)
             {
-                bool hadBurialRite = isBurialRite;
+                bool hadSelection = isSelectionActive;
                 Reset();
-                summary = hadBurialRite ? "cancelled" : string.Empty;
-                return hadBurialRite;
+                summary = hadSelection ? "cancelled" : string.Empty;
+                return hadSelection;
             }
 
             if (operation == StartSelectOperation)
             {
                 Reset();
-                if (!burialRite || parameters.Count < 4 ||
+                if (parameters.Count < 4 ||
+                    !TryConvertBool(parameters[1], out isEvolutionSelection) ||
                     !TryConvertInt(parameters[3], out playIndex))
                 {
                     return false;
                 }
 
-                isBurialRite = true;
+                isSelectionActive = true;
+                isBurialRite = burialRite;
                 CaptureAnnouncedSkillIndexes(parameters);
-                summary = $"started playIdx={playIndex}, " +
+                summary = $"started kind={(isBurialRite ? "burial-rite" : "skill")}, " +
+                    $"playIdx={playIndex}, evolve={(isEvolutionSelection ? 1 : 0)}, " +
                     $"skills=[{string.Join(",", announcedSkillIndexes)}]";
                 return true;
             }
 
             if ((operation != SelectCardOperation &&
                     operation != CompleteSelectOperation) ||
-                (!burialRite && !isBurialRite) || parameters.Count < 4 ||
+                (!isSelectionActive && !burialRite) || parameters.Count < 4 ||
                 !TryParseTarget(parameters[3], out SelectionTarget target))
             {
                 return false;
             }
 
-            isBurialRite = true;
+            isSelectionActive = true;
+            isBurialRite |= burialRite;
             if (!burialTargets.Any(existing => existing.Index == target.Index &&
                     existing.IsSelf == target.IsSelf))
             {
@@ -130,7 +147,7 @@ namespace Shadowbus
             out string summary)
         {
             summary = string.Empty;
-            if (!isBurialRite || burialTargets.Count == 0 || data == null ||
+            if (!isSelectionActive || burialTargets.Count == 0 || data == null ||
                 !data.TryGetValue("uri", out object rawUri) ||
                 !string.Equals(rawUri?.ToString(), P2PBattleProtocol.PlayActionsUri,
                     StringComparison.Ordinal) ||
@@ -148,7 +165,8 @@ namespace Shadowbus
             }
 
             List<int> skillIndexes = ResolveSkillIndexes(
-                outgoingPlayIndex, data, burialSkillResolver);
+                outgoingPlayIndex, data,
+                isBurialRite ? burialSkillResolver : null);
             List<object> existingTargets = ToObjectList(
                 data.TryGetValue("targetList", out object rawTargets)
                     ? rawTargets : null);
@@ -184,8 +202,9 @@ namespace Shadowbus
             }
 
             data["targetList"] = completedTargets;
-            data["type"] = 31;
-            summary = $"playIdx={outgoingPlayIndex}, " +
+            data["type"] = isEvolutionSelection ? 21 : 31;
+            summary = $"kind={(isBurialRite ? "burial-rite" : "skill")}, " +
+                $"playIdx={outgoingPlayIndex}, " +
                 $"targets=[{string.Join(",", burialTargets.Select(target => target.Index))}], " +
                 $"skills=[{string.Join(",", skillIndexes)}]";
             Reset();
@@ -372,11 +391,21 @@ namespace Shadowbus
     {
         private readonly Dictionary<int, int> hostCards = new Dictionary<int, int>();
         private readonly Dictionary<int, int> guestCards = new Dictionary<int, int>();
+        private readonly Dictionary<int, int> hostCardCosts = new Dictionary<int, int>();
+        private readonly Dictionary<int, int> guestCardCosts = new Dictionary<int, int>();
+        private readonly Dictionary<int, CardMutation> hostCardMutations =
+            new Dictionary<int, CardMutation>();
+        private readonly Dictionary<int, CardMutation> guestCardMutations =
+            new Dictionary<int, CardMutation>();
 
         internal void Reset(IList<int> hostDeck, IList<int> guestDeck)
         {
             hostCards.Clear();
             guestCards.Clear();
+            hostCardCosts.Clear();
+            guestCardCosts.Clear();
+            hostCardMutations.Clear();
+            guestCardMutations.Clear();
             RegisterDeck(hostCards, hostDeck);
             RegisterDeck(guestCards, guestDeck);
         }
@@ -385,6 +414,64 @@ namespace Shadowbus
         {
             hostCards.Clear();
             guestCards.Clear();
+            hostCardCosts.Clear();
+            guestCardCosts.Clear();
+            hostCardMutations.Clear();
+            guestCardMutations.Clear();
+        }
+
+        internal void RememberSourceCard(
+            bool sourceIsHost,
+            int index,
+            int cardId,
+            int cost)
+        {
+            if (index < 0 || cardId <= 0)
+            {
+                return;
+            }
+
+            GetCards(sourceIsHost)[index] = cardId;
+            if (cost >= 0)
+            {
+                GetCardCosts(sourceIsHost)[index] = cost;
+            }
+        }
+
+        internal bool RememberSourceCardMutation(
+            bool sourceIsHost,
+            int index,
+            int originalCardId,
+            int originalCost,
+            int mutationCardId,
+            int mutationCost,
+            int keyActionType)
+        {
+            const int Accelerated = 2;
+            const int Crystallize = 3;
+            if (index < 0 || originalCardId <= 0 || mutationCardId <= 0 ||
+                originalCardId == mutationCardId || mutationCost < 0 ||
+                (keyActionType != Accelerated && keyActionType != Crystallize))
+            {
+                return false;
+            }
+
+            Dictionary<int, CardMutation> mutations =
+                GetCardMutations(sourceIsHost);
+            if (mutations.TryGetValue(index, out CardMutation existing) &&
+                existing.OriginalCardId == originalCardId &&
+                existing.OriginalCost == originalCost &&
+                existing.CardId == mutationCardId &&
+                existing.Cost == mutationCost &&
+                existing.KeyActionType == keyActionType)
+            {
+                return false;
+            }
+
+            mutations[index] = new CardMutation(
+                originalCardId, originalCost, mutationCardId, mutationCost,
+                keyActionType);
+            return true;
         }
 
         internal bool PrepareOutgoingAction(
@@ -393,7 +480,8 @@ namespace Shadowbus
             out int playIndex,
             out int cardId,
             Func<int, int> sourceCardIdResolver = null,
-            Func<int, int> sourceCardCostResolver = null)
+            Func<int, int> sourceCardCostResolver = null,
+            Action<string> diagnosticLogger = null)
         {
             playIndex = -1;
             cardId = 0;
@@ -406,15 +494,23 @@ namespace Shadowbus
             ObserveKnownCards(sourceIsHost, data, "uList");
             ObserveOrderList(sourceIsHost, data);
             RevealPublicMoves(sourceIsHost, data,
-                sourceCardIdResolver, sourceCardCostResolver);
+                sourceCardIdResolver, sourceCardCostResolver, diagnosticLogger);
             RevealFusionIngredients(sourceIsHost, data,
-                sourceCardIdResolver, sourceCardCostResolver);
+                sourceCardIdResolver, sourceCardCostResolver, diagnosticLogger);
             RevealOpenedHandCards(sourceIsHost, data,
-                sourceCardIdResolver, sourceCardCostResolver);
+                sourceCardIdResolver, sourceCardCostResolver, diagnosticLogger);
 
             if (!TryGetInt(data, "playIdx", out playIndex) || playIndex < 0)
             {
                 return false;
+            }
+
+            if (TryRevealCardMutation(sourceIsHost, data, playIndex,
+                    sourceCardIdResolver, sourceCardCostResolver,
+                    diagnosticLogger, out cardId))
+            {
+                PlaceMutationKnownListAfterKeyAction(data);
+                return true;
             }
 
             if (!TryResolveSourceCardId(sourceIsHost, playIndex,
@@ -423,9 +519,167 @@ namespace Shadowbus
                 return false;
             }
 
-            int? cost = ResolveSourceCardCost(playIndex, sourceCardCostResolver);
+            int? cost = ResolveSourceCardCost(
+                sourceIsHost, playIndex, sourceCardCostResolver);
             RevealKnownCard(data, playIndex, cardId, true, cost);
             return true;
+        }
+
+        private bool TryRevealCardMutation(
+            bool sourceIsHost,
+            Dictionary<string, object> data,
+            int playIndex,
+            Func<int, int> sourceCardIdResolver,
+            Func<int, int> sourceCardCostResolver,
+            Action<string> diagnosticLogger,
+            out int cardId)
+        {
+            cardId = 0;
+            if (!TryGetMutationKeyAction(data, out int keyActionType,
+                    out int originalCardId))
+            {
+                return false;
+            }
+
+            if (GetCardMutations(sourceIsHost).TryGetValue(
+                    playIndex, out CardMutation mutation) &&
+                mutation.KeyActionType == keyActionType &&
+                (originalCardId <= 0 || mutation.OriginalCardId == originalCardId))
+            {
+                cardId = mutation.CardId;
+                RememberSourceCard(
+                    sourceIsHost, playIndex, mutation.CardId, mutation.Cost);
+                RevealKnownCard(data, playIndex, mutation.CardId, true,
+                    mutation.OriginalCost, null, null, true);
+                return true;
+            }
+
+            if (TryGetKnownCardState(data, playIndex, true,
+                    out int knownCardId, out int? knownCost) &&
+                knownCardId > 0 && knownCardId != originalCardId)
+            {
+                cardId = knownCardId;
+                RememberSourceCard(
+                    sourceIsHost, playIndex, knownCardId, knownCost ?? -1);
+                RevealKnownCard(data, playIndex, knownCardId, true,
+                    knownCost, null, null, true);
+                return true;
+            }
+
+            if (TryResolveSourceCardId(sourceIsHost, playIndex,
+                    sourceCardIdResolver, out int resolvedCardId) &&
+                resolvedCardId != originalCardId)
+            {
+                int? resolvedCost = ResolveSourceCardCost(
+                    sourceIsHost, playIndex, sourceCardCostResolver);
+                cardId = resolvedCardId;
+                RevealKnownCard(data, playIndex, resolvedCardId, true,
+                    resolvedCost, null, null, true);
+                return true;
+            }
+
+            diagnosticLogger?.Invoke(
+                $"could not resolve mutation card idx={playIndex}, " +
+                $"keyActionType={keyActionType}, originalCardId={originalCardId}");
+            return false;
+        }
+
+        private static void PlaceMutationKnownListAfterKeyAction(
+            Dictionary<string, object> data)
+        {
+            if (!data.TryGetValue("keyAction", out object keyActions) ||
+                !data.TryGetValue("knownList", out object knownList))
+            {
+                return;
+            }
+
+            List<KeyValuePair<string, object>> fields = data.ToList();
+            data.Clear();
+            bool insertedKnownList = false;
+            foreach (KeyValuePair<string, object> field in fields)
+            {
+                if (string.Equals(field.Key, "knownList", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                data[field.Key] = field.Value;
+                if (!insertedKnownList &&
+                    string.Equals(field.Key, "keyAction", StringComparison.Ordinal))
+                {
+                    data["knownList"] = knownList;
+                    insertedKnownList = true;
+                }
+            }
+
+            if (!insertedKnownList)
+            {
+                data["keyAction"] = keyActions;
+                data["knownList"] = knownList;
+            }
+        }
+
+        private static bool TryGetMutationKeyAction(
+            Dictionary<string, object> data,
+            out int keyActionType,
+            out int originalCardId)
+        {
+            const int Accelerated = 2;
+            const int Crystallize = 3;
+            keyActionType = 0;
+            originalCardId = 0;
+            if (!data.TryGetValue("keyAction", out object rawKeyActions))
+            {
+                return false;
+            }
+
+            foreach (object item in Enumerate(rawKeyActions))
+            {
+                if (!(item is Dictionary<string, object> keyAction) ||
+                    !TryGetInt(keyAction, "type", out int type) ||
+                    (type != Accelerated && type != Crystallize))
+                {
+                    continue;
+                }
+
+                keyActionType = type;
+                TryGetInt(keyAction, "cardId", out originalCardId);
+                return true;
+            }
+            return false;
+        }
+
+        private static bool TryGetKnownCardState(
+            Dictionary<string, object> data,
+            int index,
+            bool isSelf,
+            out int cardId,
+            out int? cost)
+        {
+            cardId = 0;
+            cost = null;
+            if (!data.TryGetValue("knownList", out object rawKnownList))
+            {
+                return false;
+            }
+
+            foreach (object item in Enumerate(rawKnownList))
+            {
+                if (!(item is Dictionary<string, object> known) ||
+                    IsSelf(known) != isSelf ||
+                    !GetIndices(known).Contains(index) ||
+                    !TryGetInt(known, "cardId", out cardId))
+                {
+                    continue;
+                }
+
+                if (TryGetInt(known, "cost", out int knownCost))
+                {
+                    cost = knownCost;
+                }
+                return true;
+            }
+            return false;
         }
 
         private static void RegisterDeck(Dictionary<int, int> cards, IList<int> deck)
@@ -493,7 +747,8 @@ namespace Shadowbus
             bool sourceIsHost,
             Dictionary<string, object> data,
             Func<int, int> sourceCardIdResolver,
-            Func<int, int> sourceCardCostResolver)
+            Func<int, int> sourceCardCostResolver,
+            Action<string> diagnosticLogger)
         {
             if (data.TryGetValue("orderList", out object rawOrderList))
             {
@@ -504,7 +759,8 @@ namespace Shadowbus
                     {
                         RevealPublicMove(sourceIsHost, data,
                             rawMove as Dictionary<string, object>,
-                            sourceCardIdResolver, sourceCardCostResolver);
+                            sourceCardIdResolver, sourceCardCostResolver,
+                            diagnosticLogger);
                     }
                 }
             }
@@ -514,7 +770,8 @@ namespace Shadowbus
                 {
                     RevealPublicMove(sourceIsHost, data,
                         item as Dictionary<string, object>,
-                        sourceCardIdResolver, sourceCardCostResolver);
+                        sourceCardIdResolver, sourceCardCostResolver,
+                        diagnosticLogger);
                 }
             }
         }
@@ -523,7 +780,8 @@ namespace Shadowbus
             bool sourceIsHost,
             Dictionary<string, object> data,
             Func<int, int> sourceCardIdResolver,
-            Func<int, int> sourceCardCostResolver)
+            Func<int, int> sourceCardCostResolver,
+            Action<string> diagnosticLogger)
         {
             if (!data.TryGetValue("orderList", out object rawOrderList))
             {
@@ -546,8 +804,13 @@ namespace Shadowbus
                             sourceCardIdResolver, out int cardId))
                     {
                         int? cost = ResolveSourceCardCost(
-                            index, sourceCardCostResolver);
+                            sourceIsHost, index, sourceCardCostResolver);
                         RevealKnownCard(data, index, cardId, true, cost);
+                    }
+                    else
+                    {
+                        diagnosticLogger?.Invoke(
+                            $"could not reveal opened hand card idx={index}");
                     }
                 }
             }
@@ -557,7 +820,8 @@ namespace Shadowbus
             bool sourceIsHost,
             Dictionary<string, object> data,
             Func<int, int> sourceCardIdResolver,
-            Func<int, int> sourceCardCostResolver)
+            Func<int, int> sourceCardCostResolver,
+            Action<string> diagnosticLogger)
         {
             if (!data.TryGetValue("orderList", out object rawOrderList))
             {
@@ -583,7 +847,8 @@ namespace Shadowbus
                         continue;
                     }
 
-                    int? cost = ResolveSourceCardCost(index, sourceCardCostResolver);
+                    int? cost = ResolveSourceCardCost(
+                        sourceIsHost, index, sourceCardCostResolver);
                     RevealKnownCard(data, index, cardId, true, cost, 10, 60);
                 }
             }
@@ -594,7 +859,8 @@ namespace Shadowbus
             Dictionary<string, object> data,
             Dictionary<string, object> move,
             Func<int, int> sourceCardIdResolver,
-            Func<int, int> sourceCardCostResolver)
+            Func<int, int> sourceCardCostResolver,
+            Action<string> diagnosticLogger)
         {
             if (move == null || !TryGetInt(move, "from", out int from) ||
                 !TryGetInt(move, "to", out int to) ||
@@ -622,8 +888,14 @@ namespace Shadowbus
                 if (TryResolveSourceCardId(sourceIsHost, index,
                         sourceCardIdResolver, out int cardId))
                 {
-                    int? cost = ResolveSourceCardCost(index, sourceCardCostResolver);
+                    int? cost = ResolveSourceCardCost(
+                        sourceIsHost, index, sourceCardCostResolver);
                     RevealKnownCard(data, index, cardId, true, cost, from, to);
+                }
+                else
+                {
+                    diagnosticLogger?.Invoke(
+                        $"could not reveal public card idx={index}, from={from}, to={to}");
                 }
             }
         }
@@ -677,12 +949,14 @@ namespace Shadowbus
             bool isSelf,
             int? cost = null,
             int? from = null,
-            int? to = null)
+            int? to = null,
+            bool prioritize = false)
         {
             List<object> knownList = GetOrCreateObjectList(data, "knownList");
-            foreach (object item in knownList)
+            for (int i = 0; i < knownList.Count; i++)
             {
-                Dictionary<string, object> known = item as Dictionary<string, object>;
+                Dictionary<string, object> known =
+                    knownList[i] as Dictionary<string, object>;
                 if (known == null || IsSelf(known) != isSelf ||
                     !GetIndices(known).Contains(index))
                 {
@@ -691,6 +965,11 @@ namespace Shadowbus
                 known["cardId"] = cardId;
                 known["is_open"] = 1;
                 AddKnownCardState(known, cost, from, to);
+                if (prioritize && i > 0)
+                {
+                    knownList.RemoveAt(i);
+                    knownList.Insert(0, known);
+                }
                 return;
             }
             Dictionary<string, object> revealed = new Dictionary<string, object>
@@ -701,7 +980,14 @@ namespace Shadowbus
                 ["is_open"] = 1
             };
             AddKnownCardState(revealed, cost, from, to);
-            knownList.Add(revealed);
+            if (prioritize)
+            {
+                knownList.Insert(0, revealed);
+            }
+            else
+            {
+                knownList.Add(revealed);
+            }
         }
 
         private static void AddKnownCardState(
@@ -776,6 +1062,16 @@ namespace Shadowbus
             return ownerIsHost ? hostCards : guestCards;
         }
 
+        private Dictionary<int, int> GetCardCosts(bool ownerIsHost)
+        {
+            return ownerIsHost ? hostCardCosts : guestCardCosts;
+        }
+
+        private Dictionary<int, CardMutation> GetCardMutations(bool ownerIsHost)
+        {
+            return ownerIsHost ? hostCardMutations : guestCardMutations;
+        }
+
         private bool TryResolveSourceCardId(
             bool sourceIsHost,
             int index,
@@ -801,23 +1097,29 @@ namespace Shadowbus
             return sourceCards.TryGetValue(index, out cardId) && cardId > 0;
         }
 
-        private static int? ResolveSourceCardCost(
+        private int? ResolveSourceCardCost(
+            bool sourceIsHost,
             int index,
             Func<int, int> sourceCardCostResolver)
         {
-            if (sourceCardCostResolver == null)
+            if (sourceCardCostResolver != null)
             {
-                return null;
+                try
+                {
+                    int resolved = sourceCardCostResolver(index);
+                    if (resolved >= 0)
+                    {
+                        GetCardCosts(sourceIsHost)[index] = resolved;
+                        return resolved;
+                    }
+                }
+                catch (Exception)
+                {
+                }
             }
-            try
-            {
-                int cost = sourceCardCostResolver(index);
-                return cost >= 0 ? (int?)cost : null;
-            }
-            catch (Exception)
-            {
-                return null;
-            }
+            return GetCardCosts(sourceIsHost).TryGetValue(index, out int cached)
+                ? (int?)cached
+                : null;
         }
 
         private static List<object> GetOrCreateObjectList(
@@ -899,6 +1201,192 @@ namespace Shadowbus
             {
                 result = 0;
                 return false;
+            }
+        }
+
+        private sealed class CardMutation
+        {
+            internal CardMutation(
+                int originalCardId,
+                int originalCost,
+                int cardId,
+                int cost,
+                int keyActionType)
+            {
+                OriginalCardId = originalCardId;
+                OriginalCost = originalCost;
+                CardId = cardId;
+                Cost = cost;
+                KeyActionType = keyActionType;
+            }
+
+            internal int OriginalCardId { get; }
+            internal int OriginalCost { get; }
+            internal int CardId { get; }
+            internal int Cost { get; }
+            internal int KeyActionType { get; }
+        }
+    }
+
+    internal static class P2PBattleStateDiagnostics
+    {
+        internal const string StateKey = "p2pState";
+
+        internal static IReadOnlyList<string> Compare(
+            Dictionary<string, object> expected,
+            Dictionary<string, object> actual)
+        {
+            Dictionary<string, string> expectedValues = Flatten(expected);
+            Dictionary<string, string> actualValues = Flatten(actual);
+            SortedSet<string> keys = new SortedSet<string>(expectedValues.Keys,
+                StringComparer.Ordinal);
+            keys.UnionWith(actualValues.Keys);
+
+            List<string> differences = new List<string>();
+            foreach (string key in keys)
+            {
+                bool hasExpected = expectedValues.TryGetValue(key, out string expectedValue);
+                bool hasActual = actualValues.TryGetValue(key, out string actualValue);
+                if (!hasExpected || !hasActual ||
+                    !string.Equals(expectedValue, actualValue, StringComparison.Ordinal))
+                {
+                    differences.Add(
+                        $"{key}: expected={(hasExpected ? expectedValue : "<missing>")}, " +
+                        $"actual={(hasActual ? actualValue : "<missing>")}");
+                }
+            }
+            return differences;
+        }
+
+        internal static string DescribeBattleMessage(Dictionary<string, object> data)
+        {
+            if (data == null)
+            {
+                return "<null>";
+            }
+
+            string uri = Read(data, "uri", "?");
+            string playIndex = Read(data, "playIdx", "-");
+            string type = Read(data, "type", "-");
+            int targets = Count(data, "targetList") + Count(data, "oppoTargetList");
+            int known = Count(data, "knownList");
+            int orders = Count(data, "orderList");
+            List<string> moves = new List<string>();
+            if (data.TryGetValue("orderList", out object rawOrders))
+            {
+                foreach (object item in Enumerate(rawOrders))
+                {
+                    if (!(item is Dictionary<string, object> order) ||
+                        !order.TryGetValue("move", out object rawMove) ||
+                        !(rawMove is Dictionary<string, object> move))
+                    {
+                        continue;
+                    }
+                    moves.Add(
+                        $"{Read(move, "from", "?")}->{Read(move, "to", "?")}" +
+                        $"[{ReadIndices(move)}]/self={Read(move, "isSelf", "?")}");
+                }
+            }
+            return $"uri={uri}, playIdx={playIndex}, type={type}, " +
+                $"targets={targets}, known={known}, orders={orders}, " +
+                $"moves=[{string.Join(";", moves)}]";
+        }
+
+        private static Dictionary<string, string> Flatten(
+            Dictionary<string, object> source)
+        {
+            Dictionary<string, string> result =
+                new Dictionary<string, string>(StringComparer.Ordinal);
+            FlattenValue(string.Empty, source, result);
+            return result;
+        }
+
+        private static void FlattenValue(
+            string path,
+            object value,
+            Dictionary<string, string> result)
+        {
+            if (value is Dictionary<string, object> dictionary)
+            {
+                foreach (string key in dictionary.Keys.OrderBy(key => key,
+                    StringComparer.Ordinal))
+                {
+                    FlattenValue(string.IsNullOrEmpty(path) ? key : path + "." + key,
+                        dictionary[key], result);
+                }
+                return;
+            }
+
+            if (!(value is string) && value is IEnumerable enumerable)
+            {
+                List<string> items = new List<string>();
+                foreach (object item in enumerable)
+                {
+                    items.Add(FormatValue(item));
+                }
+                result[path] = "[" + string.Join(",", items) + "]";
+                return;
+            }
+
+            result[path] = FormatValue(value);
+        }
+
+        private static string FormatValue(object value)
+        {
+            if (value == null)
+            {
+                return "null";
+            }
+            if (value is bool boolean)
+            {
+                return boolean ? "true" : "false";
+            }
+            return Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
+        }
+
+        private static string Read(
+            Dictionary<string, object> data,
+            string key,
+            string fallback)
+        {
+            return data.TryGetValue(key, out object value)
+                ? FormatValue(value)
+                : fallback;
+        }
+
+        private static int Count(Dictionary<string, object> data, string key)
+        {
+            return data.TryGetValue(key, out object value)
+                ? Enumerate(value).Count()
+                : 0;
+        }
+
+        private static string ReadIndices(Dictionary<string, object> data)
+        {
+            if (!data.TryGetValue("idx", out object value) &&
+                !data.TryGetValue("idxList", out value))
+            {
+                return string.Empty;
+            }
+            if (value is string || !(value is IEnumerable))
+            {
+                return FormatValue(value);
+            }
+            return string.Join(",", Enumerate(value).Select(FormatValue));
+        }
+
+        private static IEnumerable<object> Enumerate(object value)
+        {
+            if (value is string || value == null)
+            {
+                yield break;
+            }
+            if (value is IEnumerable enumerable)
+            {
+                foreach (object item in enumerable)
+                {
+                    yield return item;
+                }
             }
         }
     }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
@@ -14,9 +15,11 @@ namespace Shadowbus
             {
                 TestConnectionCodes();
                 TestJsonConversion();
+                TestRoomRules();
                 TestPerspectiveTransform();
                 TestBattleResults();
                 TestBattleProtocol();
+                TestBattleStateDiagnostics();
                 TestDealState();
                 TestDeliverySequence();
                 TestDisconnectPolicy();
@@ -77,7 +80,12 @@ namespace Shadowbus
             P2PWireMessage source = new P2PWireMessage
             {
                 Type = "probe",
-                Rules = new P2PRoomRules { IsDeckOpen = true },
+                Rules = new P2PRoomRules
+                {
+                    IsDeckOpen = true,
+                    CustomFormatId = "modern",
+                    InitialMaxLife = 137
+                },
                 Data = new Dictionary<string, object>
                 {
                     ["number"] = 42,
@@ -89,10 +97,43 @@ namespace Shadowbus
             Assert(decoded.Type == "probe", "The wire-message type was not preserved.");
             Assert(decoded.Rules != null && decoded.Rules.IsDeckOpen,
                 "The open-deck room rule was not preserved.");
+            Assert(decoded.Rules.InitialMaxLife == 137,
+                "The initial maximum life room rule was not preserved.");
+            Assert(decoded.Rules.CustomFormatId == "modern",
+                "The custom room format ID was not preserved.");
             Assert(decoded.Data["number"] is int number && number == 42,
                 "A small JSON integer was not converted to Int32.");
             Assert(decoded.Data["items"] is List<object> items && items.Count == 3,
                 "A JSON array was not converted to the expected list type.");
+        }
+
+        private static void TestRoomRules()
+        {
+            P2PRoomRules rules = new P2PRoomRules();
+            Assert(rules.InitialMaxLife == P2PRoomRules.DefaultInitialMaxLife,
+                "The initial maximum life default is incorrect.");
+            Assert(rules.CustomFormatId == "unlimited",
+                "The custom room format default is incorrect.");
+
+            P2PWireMessage legacy = P2PJson.DeserializeMessage(
+                "{\"type\":\"probe\",\"rules\":{\"isDeckOpen\":true}}");
+            Assert(legacy.Rules.InitialMaxLife == P2PRoomRules.DefaultInitialMaxLife,
+                "A legacy room message did not use the initial life default.");
+            Assert(legacy.Rules.CustomFormatId == "unlimited",
+                "A legacy room message did not use the Unlimited custom format default.");
+
+            rules.InitialMaxLife = 19;
+            Assert(rules.InitialMaxLife == 20,
+                "Initial maximum life was not clamped to the lower limit.");
+            rules.InitialMaxLife = 20;
+            Assert(rules.InitialMaxLife == 20,
+                "The lower initial maximum life limit was changed.");
+            rules.InitialMaxLife = 200;
+            Assert(rules.InitialMaxLife == 200,
+                "The upper initial maximum life limit was changed.");
+            rules.InitialMaxLife = 201;
+            Assert(rules.InitialMaxLife == 200,
+                "Initial maximum life was not clamped to the upper limit.");
         }
 
         private static void TestTransportRejectsThenAccepts()
@@ -295,8 +336,8 @@ namespace Shadowbus
         {
             Assert(P2PDisconnectPolicy.Evaluate(
                     true, false, false, true, true, false, false, false) ==
-                P2PDisconnectAction.BattleVictory,
-                "A battle disconnect did not award the connected player a victory.");
+                P2PDisconnectAction.BattleResult,
+                "A battle disconnect did not request a final battle result.");
             Assert(P2PDisconnectPolicy.Evaluate(
                     true, false, false, false, false, true, true, false) ==
                 P2PDisconnectAction.ForceRoomExit,
@@ -373,6 +414,11 @@ namespace Shadowbus
             Assert(hostLifeWin.Host == 102 && hostLifeWin.Guest == 101,
                 "A host life win was not converted to each client's opponent result.");
 
+            P2PBattleResultPair guestLifeWin =
+                P2PBattleResult.FromLocalResult(false, 101);
+            Assert(guestLifeWin.Host == 101 && guestLifeWin.Guest == 102,
+                "A guest life win was not converted from the reporting side.");
+
             P2PBattleResultPair hostRetired = P2PBattleResult.FromHostLocalResult(106);
             Assert(hostRetired.Host == 105 && hostRetired.Guest == 106,
                 "A host retirement produced the wrong winner.");
@@ -385,6 +431,16 @@ namespace Shadowbus
                 "A peer disconnect was not converted to a local victory result.");
             Assert(P2PBattleResult.Invert(1) == 1,
                 "A non-paired result code was unexpectedly changed.");
+            Assert(P2PBattleResult.IsPairedResult(108) &&
+                P2PBattleResult.IsPairedResult(208) &&
+                !P2PBattleResult.IsPairedResult(0),
+                "Final paired battle result validation is incorrect.");
+            Assert(P2PBattleResult.ResolveLocalResultAfterDisconnect(true, 0) == 106,
+                "A locally retired player was awarded a disconnect victory.");
+            Assert(P2PBattleResult.ResolveLocalResultAfterDisconnect(false, 102) == 102,
+                "A known local defeat was overwritten after disconnect.");
+            Assert(P2PBattleResult.ResolveLocalResultAfterDisconnect(false, 0) == 201,
+                "An unresolved peer disconnect did not award the connected player.");
         }
 
         private static void TestBattleProtocol()
@@ -398,6 +454,12 @@ namespace Shadowbus
             Assert(P2PBattleProtocol.RequiresActiveTurnState("TurnEnd") &&
                 P2PBattleProtocol.RequiresActiveTurnState("TurnStart"),
                 "Turn transition messages did not activate the runtime turn state.");
+            Assert(P2PBattleProtocol.CarriesBattleStateCheckpoint("TurnEndActions") &&
+                P2PBattleProtocol.CarriesBattleStateCheckpoint("TurnEnd") &&
+                P2PBattleProtocol.CarriesBattleStateCheckpoint("TurnEndFinal") &&
+                P2PBattleProtocol.CarriesBattleStateCheckpoint("TurnStart") &&
+                !P2PBattleProtocol.CarriesBattleStateCheckpoint("PlayActions"),
+                "Battle-state checkpoints do not cover the complete turn transition.");
 
             P2PBattleSelectionTracker selectionTracker =
                 new P2PBattleSelectionTracker();
@@ -501,6 +563,141 @@ namespace Shadowbus
                 Convert.ToInt32(receivedSelectedBurialMaterial["isSelf"]) == 0,
                 "Burial action targets and revealed cards used the wrong perspectives.");
 
+            selectedBurialPlay["keyAction"] = new List<object>
+            {
+                new Dictionary<string, object>
+                {
+                    ["type"] = 6,
+                    ["selectCard"] = new Dictionary<string, object>
+                    {
+                        ["cardIdx"] = new List<object> { 3 },
+                        ["open"] = 1
+                    }
+                }
+            };
+            receivedSelectedBurial =
+                P2PMessageTransform.PrepareOpponentBattleMessage(
+                    selectedBurialPlay);
+            Dictionary<string, object> receivedBurialKeyAction =
+                (Dictionary<string, object>)
+                ((List<object>)receivedSelectedBurial["keyAction"])[0];
+            Assert(receivedBurialKeyAction.TryGetValue("cardIdx", out object rawBurialIndexes) &&
+                ((List<object>)rawBurialIndexes).Count == 1 &&
+                Convert.ToInt32(((List<object>)rawBurialIndexes)[0]) == 3,
+                "The burial key action was not normalized for the battle receiver.");
+
+            foreach (int choiceType in new[] { 1, 5, 7, 8 })
+            {
+                Dictionary<string, object> choicePlay =
+                    new Dictionary<string, object>
+                    {
+                        ["uri"] = "PlayActions",
+                        ["keyAction"] = new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["type"] = choiceType,
+                                ["cardId"] = 123456,
+                                ["selectCard"] = new Dictionary<string, object>
+                                {
+                                    ["cardId"] = new List<object> { 654321 },
+                                    ["open"] = 0
+                                }
+                            }
+                        }
+                    };
+
+                Dictionary<string, object> receivedChoice =
+                    P2PMessageTransform.PrepareOpponentBattleMessage(choicePlay);
+                Dictionary<string, object> receivedChoiceKeyAction =
+                    (Dictionary<string, object>)
+                    ((List<object>)receivedChoice["keyAction"])[0];
+                Assert(receivedChoiceKeyAction["selectCard"] is List<object> selectedChoiceIds &&
+                    selectedChoiceIds.Count == 1 &&
+                    Convert.ToInt32(selectedChoiceIds[0]) == 654321,
+                    $"Choice key action type {choiceType} was not normalized for the battle receiver.");
+                Assert(Convert.ToInt32(receivedChoiceKeyAction["cardId"]) == 123456,
+                    $"Choice key action type {choiceType} lost its source card ID.");
+            }
+
+            P2PBattleSelectionTracker discardSelectionTracker =
+                new P2PBattleSelectionTracker();
+            Assert(discardSelectionTracker.RecordHandData(
+                    2,
+                    new List<object>
+                    {
+                        0, false, false, "12", "0", new List<int> { 6 }
+                    },
+                    out _),
+                "A non-burial discard selection was not recorded.");
+            Assert(discardSelectionTracker.RecordHandData(
+                    2,
+                    new List<object> { 7, false, false, "1008" },
+                    out _),
+                "A selected discard target was not recorded.");
+            Dictionary<string, object> discardPlay =
+                new Dictionary<string, object>
+                {
+                    ["uri"] = "PlayActions",
+                    ["playIdx"] = 12,
+                    ["type"] = 30,
+                    ["orderList"] = new List<object>
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["move"] = new Dictionary<string, object>
+                            {
+                                ["idx"] = new List<object> { 8 },
+                                ["from"] = 10,
+                                ["to"] = 30,
+                                ["isSelf"] = 1
+                            }
+                        }
+                    }
+                };
+            Assert(discardSelectionTracker.PrepareOutgoingAction(
+                    discardPlay, null, out _),
+                "A non-burial discard target was not attached to PlayActions.");
+            Dictionary<string, object> discardTarget =
+                (Dictionary<string, object>)
+                ((List<object>)discardPlay["targetList"])[0];
+            Assert(Convert.ToInt32(discardPlay["type"]) == 31 &&
+                Convert.ToInt32(discardTarget["targetIdx"]) == 8 &&
+                ((List<int>)discardTarget["selectSkillIndex"])[0] == 6,
+                "The selected discard target or skill index was not preserved.");
+
+            P2PBattleSelectionTracker evolutionSelectionTracker =
+                new P2PBattleSelectionTracker();
+            evolutionSelectionTracker.RecordHandData(2,
+                new List<object> { 0, true, false, "5" }, out _);
+            evolutionSelectionTracker.RecordHandData(2,
+                new List<object> { 7, true, false, "0004" }, out _);
+            Dictionary<string, object> evolution = new Dictionary<string, object>
+            {
+                ["uri"] = "PlayActions",
+                ["playIdx"] = 5,
+                ["type"] = 20
+            };
+            Assert(evolutionSelectionTracker.PrepareOutgoingAction(
+                    evolution, null, out _) &&
+                Convert.ToInt32(evolution["type"]) == 21,
+                "A repaired evolution selection was assigned the play-card action type.");
+
+            P2PBattleCardTracker cachedDiscardTracker =
+                new P2PBattleCardTracker();
+            cachedDiscardTracker.Reset(new List<int>(), new List<int>());
+            cachedDiscardTracker.RememberSourceCard(true, 8, 808, 3);
+            cachedDiscardTracker.PrepareOutgoingAction(
+                true, discardPlay, out _, out _);
+            Dictionary<string, object> discardedKnownCard =
+                (Dictionary<string, object>)
+                ((List<object>)discardPlay["knownList"])[0];
+            Assert(Convert.ToInt32(discardedKnownCard["cardId"]) == 808 &&
+                Convert.ToInt32(discardedKnownCard["cost"]) == 3 &&
+                Convert.ToInt32(discardedKnownCard["from"]) == 10 &&
+                Convert.ToInt32(discardedKnownCard["to"]) == 30,
+                "A discarded card could not be revealed from the pre-action cache.");
+
             P2PBattleCardTracker tracker = new P2PBattleCardTracker();
             tracker.Reset(
                 new List<int> { 101, 102, 103 },
@@ -520,6 +717,167 @@ namespace Shadowbus
                 Convert.ToInt32(revealed["cardId"]) == 102 &&
                 Convert.ToInt32(revealed["isSelf"]) == 1,
                 "The generated known-card entry has the wrong identity or perspective.");
+
+            foreach (int mutationType in new[] { 2, 3 })
+            {
+                int originalCardId = mutationType == 2 ? 100001 : 200001;
+                int mutationCardId = mutationType == 2 ? 100002 : 200002;
+                int mutationCost = mutationType == 2 ? 2 : 1;
+                P2PBattleCardTracker mutationTracker =
+                    new P2PBattleCardTracker();
+                mutationTracker.Reset(new List<int>(), new List<int>());
+                mutationTracker.RememberSourceCard(
+                    true, 42, originalCardId, 9);
+                mutationTracker.RememberSourceCardMutation(
+                    true,
+                    42,
+                    originalCardId,
+                    9,
+                    mutationCardId,
+                    mutationCost,
+                    mutationType);
+                Dictionary<string, object> mutationPlay =
+                    new Dictionary<string, object>
+                    {
+                        ["uri"] = "PlayActions",
+                        ["playIdx"] = 42,
+                        ["type"] = 30,
+                        ["keyAction"] = new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["type"] = mutationType,
+                                ["cardId"] = originalCardId
+                            }
+                        },
+                        ["orderList"] = new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["move"] = new Dictionary<string, object>
+                                {
+                                    ["idx"] = new List<object> { 43 },
+                                    ["from"] = 10,
+                                    ["to"] = 30,
+                                    ["isSelf"] = 1
+                                }
+                            }
+                        },
+                        ["uList"] = new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["idxList"] = new List<object> { 43 },
+                                ["cardId"] = 300043,
+                                ["cost"] = 3,
+                                ["from"] = 10,
+                                ["to"] = 30,
+                                ["isSelf"] = 1,
+                                ["skill"] = "43|1|0"
+                            }
+                        },
+                        ["knownList"] = new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["idx"] = 99,
+                                ["cardId"] = 999999,
+                                ["isSelf"] = 1
+                            }
+                        }
+                    };
+
+                Assert(mutationTracker.PrepareOutgoingAction(
+                        true,
+                        mutationPlay,
+                        out int mutationPlayIndex,
+                        out int revealedMutationCardId,
+                        cardIndex => cardIndex == 42
+                            ? originalCardId
+                            : cardIndex == 43 ? 300043 : 0,
+                        cardIndex => cardIndex == 42
+                            ? 9
+                            : cardIndex == 43 ? 3 : -1) &&
+                    mutationPlayIndex == 42 &&
+                    revealedMutationCardId == mutationCardId,
+                    $"Mutation key action type {mutationType} did not reveal its changed card.");
+                Dictionary<string, object> mutationKeyAction =
+                    (Dictionary<string, object>)
+                    ((List<object>)mutationPlay["keyAction"])[0];
+                Dictionary<string, object> mutationKnownCard =
+                    (Dictionary<string, object>)
+                    ((List<object>)mutationPlay["knownList"])[0];
+                Assert(Convert.ToInt32(mutationKeyAction["cardId"]) == originalCardId,
+                    $"Mutation key action type {mutationType} lost the original card ID.");
+                Assert(Convert.ToInt32(mutationKnownCard["idx"]) == 42 &&
+                    Convert.ToInt32(mutationKnownCard["cardId"]) == mutationCardId &&
+                    Convert.ToInt32(mutationKnownCard["cost"]) == 9,
+                    $"Mutation key action type {mutationType} did not put its changed " +
+                    "card ID and original card cost first in knownList.");
+                List<string> mutationKeys = mutationPlay.Keys.ToList();
+                int keyActionPosition = mutationKeys.IndexOf("keyAction");
+                int knownListPosition = mutationKeys.IndexOf("knownList");
+                Assert(knownListPosition == keyActionPosition + 1 &&
+                    knownListPosition < mutationKeys.IndexOf("orderList") &&
+                    knownListPosition < mutationKeys.IndexOf("uList"),
+                    $"Mutation key action type {mutationType} did not place knownList " +
+                    "immediately after keyAction and before card-bearing action lists.");
+                Dictionary<string, object> discardedEffectCard =
+                    ((List<object>)mutationPlay["knownList"])
+                    .Cast<Dictionary<string, object>>()
+                    .Single(card => Convert.ToInt32(card["idx"]) == 43);
+                Assert(Convert.ToInt32(discardedEffectCard["cardId"]) == 300043,
+                    $"Mutation key action type {mutationType} overwrote the identity " +
+                    "of a card with an on-discard effect.");
+
+                Assert(mutationTracker.PrepareOutgoingAction(
+                        true, mutationPlay, out _, out revealedMutationCardId) &&
+                    revealedMutationCardId == mutationCardId &&
+                    Convert.ToInt32(((Dictionary<string, object>)
+                        ((List<object>)mutationPlay["knownList"])[0])["cardId"]) ==
+                        mutationCardId,
+                    $"Mutation key action type {mutationType} was overwritten during " +
+                    "the host's second outgoing preparation.");
+                mutationKeys = mutationPlay.Keys.ToList();
+                Assert(mutationKeys.IndexOf("knownList") ==
+                        mutationKeys.IndexOf("keyAction") + 1,
+                    $"Mutation key action type {mutationType} lost its field ordering " +
+                    "during the host's second outgoing preparation.");
+
+                P2PBattleCardTracker relayTracker =
+                    new P2PBattleCardTracker();
+                relayTracker.Reset(new List<int>(), new List<int>());
+                Assert(relayTracker.PrepareOutgoingAction(
+                        true, mutationPlay, out _, out revealedMutationCardId) &&
+                    revealedMutationCardId == mutationCardId,
+                    $"Mutation key action type {mutationType} was overwritten while " +
+                    "being relayed by the remote host.");
+
+                Dictionary<string, object> receivedMutation =
+                    P2PMessageTransform.PrepareOpponentBattleMessage(mutationPlay);
+                Dictionary<string, object> receivedMutationKeyAction =
+                    (Dictionary<string, object>)
+                    ((List<object>)receivedMutation["keyAction"])[0];
+                Dictionary<string, object> receivedMutationKnownCard =
+                    (Dictionary<string, object>)
+                    ((List<object>)receivedMutation["knownList"])[0];
+                List<string> receivedMutationKeys = receivedMutation.Keys.ToList();
+                Assert(Convert.ToInt32(receivedMutationKeyAction["cardId"]) ==
+                        originalCardId &&
+                    Convert.ToInt32(receivedMutationKnownCard["cardId"]) ==
+                        mutationCardId &&
+                    Convert.ToInt32(receivedMutationKnownCard["cost"]) ==
+                        9 &&
+                    Convert.ToInt32(receivedMutationKnownCard["isSelf"]) == 0,
+                    $"Mutation key action type {mutationType} lost its mutation data " +
+                    "or perspective on the receiving client.");
+                Assert(receivedMutationKeys.IndexOf("knownList") ==
+                        receivedMutationKeys.IndexOf("keyAction") + 1 &&
+                    receivedMutationKeys.IndexOf("knownList") <
+                        receivedMutationKeys.IndexOf("uList"),
+                    $"Mutation key action type {mutationType} lost its field ordering " +
+                    "during the receiving-client perspective transform.");
+            }
 
             Dictionary<string, object> tokenCreation = new Dictionary<string, object>
             {
@@ -865,6 +1223,39 @@ namespace Shadowbus
                 Convert.ToInt32(secondIngredient["cardId"]) == 103 &&
                 Convert.ToInt32(secondIngredient["cost"]) == 5,
                 "Fusion ingredients retained dummy identities or stale costs.");
+        }
+
+        private static void TestBattleStateDiagnostics()
+        {
+            Dictionary<string, object> expected = new Dictionary<string, object>
+            {
+                ["turn"] = 6,
+                ["host"] = new Dictionary<string, object>
+                {
+                    ["life"] = 20,
+                    ["hand"] = "1,4,8",
+                    ["cemetery"] = "3:103"
+                },
+                ["guest"] = new Dictionary<string, object>
+                {
+                    ["life"] = 17,
+                    ["hand"] = "2,5"
+                }
+            };
+            Dictionary<string, object> actual = P2PJson.CloneDictionary(expected);
+            ((Dictionary<string, object>)actual["host"])["cemetery"] =
+                "3:103,8:808";
+            ((Dictionary<string, object>)actual["guest"])["life"] = 14;
+
+            IReadOnlyList<string> differences =
+                P2PBattleStateDiagnostics.Compare(expected, actual);
+            Assert(differences.Count == 2 &&
+                differences.Any(value => value.StartsWith("guest.life:")) &&
+                differences.Any(value => value.StartsWith("host.cemetery:")),
+                "Battle-state diagnostics did not identify the differing fields.");
+            Assert(P2PBattleStateDiagnostics.Compare(expected,
+                    P2PJson.CloneDictionary(expected)).Count == 0,
+                "Equal battle states were reported as desynchronized.");
         }
 
         private static void Wait(ManualResetEventSlim signal, string error)

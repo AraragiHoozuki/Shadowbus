@@ -162,31 +162,26 @@ namespace Shadowbus
                 throw new NotSupportedException(
                     "P2P rooms currently support normal constructed Open Room battles only.");
             }
-            if (!IsSupportedConstructedFormat(parameters.deck_format))
+            Format deckFormat = Data.ParseApiFormat(parameters.deck_format);
+            if (deckFormat != Format.Unlimited)
             {
                 throw new NotSupportedException(
-                    "This deck format requires room APIs that P2P mode does not support.");
+                    $"P2P rooms currently support Unlimited format only " +
+                    $"(received api={parameters.deck_format}, format={deckFormat}).");
             }
 
             P2PRuntime.StartHosting(new P2PRoomRules
             {
                 BattleType = parameters.battle_type,
                 DeckFormat = parameters.deck_format,
+                CustomFormatId = CustomFormatContext.RoomFormatId,
                 TwoPickType = parameters.two_pick_type,
                 BattleRule = parameters.battle_rule,
+                InitialMaxLife = P2PRoomRules.DefaultInitialMaxLife,
                 IsDeckOpen = task._room != null &&
                     task._room.BattleParameterInstance != null &&
                     task._room.BattleParameterInstance.IsOpenDeckRoom
             });
-        }
-
-        private static bool IsSupportedConstructedFormat(int deckFormat)
-        {
-            return deckFormat == 1 ||
-                deckFormat == 2 ||
-                deckFormat == 3 ||
-                deckFormat == 4 ||
-                deckFormat == 5;
         }
 
         private static void StartJoin(OpenRoomBattleEnterRoomTask task)

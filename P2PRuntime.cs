@@ -13,6 +13,8 @@ namespace Shadowbus
 {
     internal static class P2PRuntime
     {
+        private const int BattleStateCheckTimeoutSeconds = 15;
+
         private static readonly ConcurrentQueue<Action> MainThreadActions =
             new ConcurrentQueue<Action>();
         private static readonly P2PRoomRoundState RoomRoundState =
@@ -24,6 +26,8 @@ namespace Shadowbus
             new Queue<Dictionary<string, object>>();
         private static readonly P2PBattleSelectionTracker BattleSelectionTracker =
             new P2PBattleSelectionTracker();
+        private static readonly Queue<PendingBattleStateCheck> PendingBattleStateChecks =
+            new Queue<PendingBattleStateCheck>();
 
         private static P2PTransport transport;
         private static string bindAddress = "0.0.0.0";
@@ -40,6 +44,7 @@ namespace Shadowbus
         private static bool battleStartSent;
         private static bool finishResultSent;
         private static bool? retiringHost;
+        private static bool localRetired;
         private static List<int> shuffledHostDeck;
         private static List<int> shuffledGuestDeck;
         private static readonly P2PBattleCardTracker BattleCardTracker =
@@ -69,6 +74,14 @@ namespace Shadowbus
         internal static P2PDeckSnapshot LocalDeck { get; private set; }
         internal static P2PDeckSnapshot RemoteDeck { get; private set; }
         internal static P2PRoomRules Rules { get; private set; }
+        internal static int InitialMaxLife =>
+            Rules?.InitialMaxLife ?? P2PRoomRules.DefaultInitialMaxLife;
+        internal static bool CanEditRoomRules =>
+            IsActive &&
+            Role == P2PRole.Host &&
+            !RoomRoundState.HostReady &&
+            !RoomRoundState.GuestReady &&
+            !RoomRoundState.ReadySent;
         internal static bool JoinFinished { get; private set; }
         internal static bool JoinSucceeded { get; private set; }
         internal static string LastError { get; private set; }
@@ -82,6 +95,7 @@ namespace Shadowbus
 
         internal static void Update()
         {
+            CacheLocalBattleCardIdentities();
             int count = 0;
             while (count++ < 128 && MainThreadActions.TryDequeue(out Action action))
             {
@@ -95,6 +109,7 @@ namespace Shadowbus
                 }
             }
             TrySynchronizeOpponentRoomState();
+            TryCheckPendingBattleStates();
             if (!peerDisconnected)
             {
                 return;
@@ -112,9 +127,9 @@ namespace Shadowbus
                 room != null && room.IsInitializeDone,
                 room != null && room.IsRoomReadyComplete,
                 currentAgent != null && IsRoomAgentReady());
-            if (disconnectAction == P2PDisconnectAction.BattleVictory)
+            if (disconnectAction == P2PDisconnectAction.BattleResult)
             {
-                InjectPeerDisconnectVictory();
+                InjectPeerDisconnectResult();
             }
             else if (disconnectAction == P2PDisconnectAction.RoomRelease)
             {
@@ -132,6 +147,8 @@ namespace Shadowbus
             Role = P2PRole.Host;
             IsActive = true;
             Rules = rules ?? new P2PRoomRules();
+            Rules.CustomFormatId = CustomFormats.Get(Rules.CustomFormatId).Id;
+            CustomFormatContext.RoomFormatId = Rules.CustomFormatId;
             LocalProfile = CreateLocalProfile();
             RoomId = CreateNumericId();
             BattleId = CreateNumericId();
@@ -159,7 +176,35 @@ namespace Shadowbus
             ConnectionCode = P2PConnectionCode.Create(advertised, transport.BoundPort, token);
             Plugin.Logger.LogInfo(
                 $"[P2P] Hosting room on {bind}:{transport.BoundPort}; advertised as {advertised}; " +
-                $"openDeck={Rules.IsDeckOpen}.");
+                $"format={Rules.CustomFormatId}; openDeck={Rules.IsDeckOpen}; " +
+                $"initialMaxLife={Rules.InitialMaxLife}.");
+        }
+
+        internal static bool TrySetInitialMaxLife(int value)
+        {
+            if (!CanEditRoomRules || Rules == null)
+            {
+                return false;
+            }
+
+            int clamped = P2PRoomRules.ClampInitialMaxLife(value);
+            if (Rules.InitialMaxLife == clamped)
+            {
+                return true;
+            }
+
+            Rules.InitialMaxLife = clamped;
+            if (RemoteProfile != null)
+            {
+                SendWire(new P2PWireMessage
+                {
+                    Type = "rules_update",
+                    Rules = Rules
+                });
+            }
+            Plugin.Logger.LogInfo(
+                $"[P2P] Host set both players' initial maximum life to {clamped}.");
+            return true;
         }
 
         internal static void BeginJoin(P2PConnectionInfo info)
@@ -238,10 +283,41 @@ namespace Shadowbus
             {
                 return;
             }
+            CacheLocalBattleCardIdentities();
             Dictionary<string, object> messageData = P2PJson.CloneDictionary(data);
             messageData["uri"] = uri;
             messageData["viewerId"] = LocalProfile?.ViewerId ?? P2PIdentity.ViewerId;
             messageData["bid"] = BattleId ?? string.Empty;
+
+            if (P2PBattleProtocol.CarriesBattleStateCheckpoint(uri))
+            {
+                // A local checkpoint means the battle has advanced beyond any peer
+                // snapshot still waiting for the shared VFX queue to become idle.
+                PendingBattleStateChecks.Clear();
+                Dictionary<string, object> state = CaptureBattleState();
+                if (state != null)
+                {
+                    messageData[P2PBattleStateDiagnostics.StateKey] = state;
+                }
+            }
+
+            if (string.Equals(
+                    uri,
+                    NetworkBattleDefine.NetworkBattleURI.Retire.ToString(),
+                    StringComparison.Ordinal))
+            {
+                localRetired = true;
+            }
+            else if (string.Equals(
+                    uri,
+                    NetworkBattleDefine.NetworkBattleURI.JudgeResult.ToString(),
+                    StringComparison.Ordinal))
+            {
+                int localResult = GetLocalFinishResult();
+                messageData["p2pLocalResult"] = localResult;
+                Plugin.Logger.LogInfo(
+                    $"[P2P] Reporting local battle result {localResult} with JudgeResult.");
+            }
 
             bool attachedBurialSelection =
                 BattleSelectionTracker.PrepareOutgoingAction(
@@ -251,13 +327,13 @@ namespace Shadowbus
             if (attachedBurialSelection)
             {
                 Plugin.Logger.LogInfo(
-                    "[P2P] Attached burial-rite selection to outgoing action: " +
+                    "[P2P] Attached skill selection to outgoing action: " +
                     selectionSummary + ".");
             }
             else if (!string.IsNullOrEmpty(selectionSummary))
             {
                 Plugin.Logger.LogWarning(
-                    "[P2P] Did not attach burial-rite selection: " +
+                    "[P2P] Did not attach skill selection: " +
                     selectionSummary + ".");
             }
 
@@ -266,7 +342,9 @@ namespace Shadowbus
             {
                 BattleCardTracker.PrepareOutgoingAction(
                     Role == P2PRole.Host, messageData, out _, out _,
-                    ResolveLocalCardId, ResolveLocalCardCost);
+                    ResolveLocalCardId, ResolveLocalCardCost,
+                    warning => Plugin.Logger.LogWarning(
+                        "[P2P] Hidden-card synchronization: " + warning + "."));
             }
 
             if (Role == P2PRole.Host)
@@ -295,11 +373,12 @@ namespace Shadowbus
                 return;
             }
 
+            CacheLocalBattleCardIdentities();
             if (BattleSelectionTracker.RecordHandData(
                     (int)uri, parameters, out string selectionSummary))
             {
                 Plugin.Logger.LogInfo(
-                    "[P2P] Recorded burial-rite selection: " +
+                    "[P2P] Recorded skill selection: " +
                     selectionSummary + ".");
             }
 
@@ -394,10 +473,12 @@ namespace Shadowbus
             battleStartSent = false;
             finishResultSent = false;
             retiringHost = null;
+            localRetired = false;
             shuffledHostDeck = null;
             shuffledGuestDeck = null;
             BattleCardTracker.Clear();
             BattleSelectionTracker.Reset();
+            PendingBattleStateChecks.Clear();
             hostMulliganHand = null;
             guestMulliganHand = null;
             hostSwapped = false;
@@ -465,6 +546,39 @@ namespace Shadowbus
             }
         }
 
+        internal static void RememberLocalCardMutation(
+            int playIndex,
+            int originalCardId,
+            int originalCost,
+            int mutationCardId,
+            int mutationCost,
+            int keyActionType)
+        {
+            if (!IsActive)
+            {
+                return;
+            }
+
+            bool recorded = BattleCardTracker.RememberSourceCardMutation(
+                Role == P2PRole.Host,
+                playIndex,
+                originalCardId,
+                originalCost,
+                mutationCardId,
+                mutationCost,
+                keyActionType);
+            if (!recorded)
+            {
+                return;
+            }
+
+            Plugin.Logger.LogInfo(
+                $"[P2P] Recorded card mutation: playIdx={playIndex}, " +
+                $"type={keyActionType}, originalCardId={originalCardId}, " +
+                $"originalCost={originalCost}, mutationCardId={mutationCardId}, " +
+                $"mutationCost={mutationCost}.");
+        }
+
         private static void OnTransportDisconnected(string error)
         {
             LastError = error;
@@ -526,6 +640,9 @@ namespace Shadowbus
                     RemoteProfile = message.Profile;
                     pendingOpponentSync = true;
                     Rules = message.Rules ?? new P2PRoomRules();
+                    Rules.CustomFormatId = CustomFormats.Get(Rules.CustomFormatId).Id;
+                    CustomFormatContext.RoomFormatId = Rules.CustomFormatId;
+                    CustomFormatContext.SelectionFormatId = Rules.CustomFormatId;
                     BattleId = message.BattleId;
                     RoomId = message.Data != null && message.Data.TryGetValue("roomId", out object roomId)
                         ? roomId?.ToString() : BattleId;
@@ -533,7 +650,20 @@ namespace Shadowbus
                     JoinSucceeded = true;
                     Plugin.Logger.LogInfo(
                         $"[P2P] Joined room hosted by '{RemoteProfile.UserName}' " +
-                        $"(openDeck={Rules.IsDeckOpen}).");
+                        $"(format={Rules.CustomFormatId}, openDeck={Rules.IsDeckOpen}, " +
+                        $"initialMaxLife={Rules.InitialMaxLife}).");
+                    break;
+                case "rules_update":
+                    if (Role != P2PRole.Guest || message.Rules == null)
+                    {
+                        return;
+                    }
+                    Rules = message.Rules;
+                    Rules.CustomFormatId = CustomFormats.Get(Rules.CustomFormatId).Id;
+                    CustomFormatContext.RoomFormatId = Rules.CustomFormatId;
+                    Plugin.Logger.LogInfo(
+                        $"[P2P] Received room rule update: " +
+                        $"format={Rules.CustomFormatId}; initialMaxLife={Rules.InitialMaxLife}.");
                     break;
                 case "join_reject":
                     LastError = message.Error ?? "The room host rejected the connection.";
@@ -563,6 +693,13 @@ namespace Shadowbus
                                 Convert.ToInt32(playSequence));
                         }
                         Inject(message.Data);
+                    }
+                    break;
+                case "diagnostic":
+                    if (Role == P2PRole.Host && !string.IsNullOrEmpty(message.Error))
+                    {
+                        Plugin.Logger.LogError(
+                            "[P2P] Remote client diagnostic: " + message.Error);
                     }
                     break;
                 case "close":
@@ -623,18 +760,23 @@ namespace Shadowbus
             }
             if (uri == NetworkBattleDefine.NetworkBattleURI.JudgeResult.ToString())
             {
-                SendFinishResult(sourceIsHost);
+                SendFinishResult(sourceIsHost, data);
                 return;
             }
 
             bool revealed = BattleCardTracker.PrepareOutgoingAction(
-                sourceIsHost, data, out int playIndex, out int cardId);
+                sourceIsHost, data, out int playIndex, out int cardId,
+                null, null,
+                warning => Plugin.Logger.LogWarning(
+                    $"[P2P] {SideName(sourceIsHost)} hidden-card synchronization: " +
+                    warning + "."));
             if (uri == NetworkBattleDefine.NetworkBattleURI.PlayActions.ToString())
             {
                 Plugin.Logger.LogInfo(
                     $"[P2P] Battle emit {SideName(sourceIsHost)} -> opponent: {uri} " +
                     $"playIdx={playIndex}, cardId={(revealed ? cardId : 0)}, " +
-                    $"keys=[{string.Join(",", data.Keys)}].");
+                    $"keys=[{string.Join(",", data.Keys)}]; " +
+                    P2PBattleStateDiagnostics.DescribeBattleMessage(data) + ".");
             }
 
             P2PBattleRoute route = P2PBattleProtocol.GetRoute(uri);
@@ -1043,36 +1185,55 @@ namespace Shadowbus
             }
         }
 
-        private static void SendFinishResult(bool sourceIsHost)
+        private static void SendFinishResult(
+            bool sourceIsHost,
+            Dictionary<string, object> request)
         {
             if (finishResultSent)
             {
                 return;
             }
-            int hostLocalResult;
+            P2PBattleResultPair results;
+            int authoritativeLocalResult;
+            bool authoritativeSideIsHost;
+            string authority;
             if (retiringHost.HasValue)
             {
-                hostLocalResult = retiringHost.Value
+                authoritativeSideIsHost = true;
+                authoritativeLocalResult = retiringHost.Value
                     ? (int)NetworkBattleReceiver.RESULT_CODE.RetireLose
                     : (int)NetworkBattleReceiver.RESULT_CODE.RetireWin;
+                authority = "retirement";
+            }
+            else if (TryReadReportedLocalResult(request, out int reportedLocalResult))
+            {
+                authoritativeSideIsHost = sourceIsHost;
+                authoritativeLocalResult = reportedLocalResult;
+                authority = SideName(sourceIsHost) + " report";
             }
             else
             {
-                NetworkBattleManagerBase manager = BattleManagerBase.GetIns() as NetworkBattleManagerBase;
-                hostLocalResult = manager == null
-                    ? 0 : (int)manager.JudgeCurrentFinishStatus();
-                if (hostLocalResult == 0)
-                {
-                    Deliver(sourceIsHost, new Dictionary<string, object>
-                    {
-                        ["uri"] = NetworkBattleDefine.NetworkBattleURI.JudgeResult.ToString(),
-                        ["result"] = 0
-                    }, 0);
-                    return;
-                }
+                authoritativeSideIsHost = true;
+                authoritativeLocalResult = GetLocalFinishResult();
+                authority = "Host fallback";
             }
-            P2PBattleResultPair results =
-                P2PBattleResult.FromHostLocalResult(hostLocalResult);
+
+            if (!P2PBattleResult.IsPairedResult(authoritativeLocalResult))
+            {
+                Deliver(sourceIsHost, new Dictionary<string, object>
+                {
+                    ["uri"] = NetworkBattleDefine.NetworkBattleURI.JudgeResult.ToString(),
+                    ["result"] = (int)NetworkBattleReceiver.RESULT_CODE.NotFinish
+                }, 0);
+                Plugin.Logger.LogInfo(
+                    $"[P2P] Battle result is not final yet ({authority}=" +
+                    $"{authoritativeLocalResult}); requested a retry.");
+                return;
+            }
+
+            results = P2PBattleResult.FromLocalResult(
+                authoritativeSideIsHost,
+                authoritativeLocalResult);
             finishResultSent = true;
             Deliver(true, new Dictionary<string, object>
             {
@@ -1085,7 +1246,41 @@ namespace Shadowbus
                 ["result"] = results.Guest
             }, 0);
             Plugin.Logger.LogInfo(
-                $"[P2P] Battle result delivered (host={results.Host}, guest={results.Guest}).");
+                $"[P2P] Battle result delivered from {authority} " +
+                $"({authoritativeLocalResult}): host receives opponent result " +
+                $"{results.Host}, guest receives opponent result {results.Guest}.");
+        }
+
+        private static bool TryReadReportedLocalResult(
+            Dictionary<string, object> request,
+            out int result)
+        {
+            result = 0;
+            if (request == null ||
+                !request.TryGetValue("p2pLocalResult", out object value))
+            {
+                return false;
+            }
+
+            try
+            {
+                result = Convert.ToInt32(value);
+                return true;
+            }
+            catch (Exception)
+            {
+                result = 0;
+                return false;
+            }
+        }
+
+        private static int GetLocalFinishResult()
+        {
+            NetworkBattleManagerBase manager =
+                BattleManagerBase.GetIns() as NetworkBattleManagerBase;
+            return manager == null
+                ? (int)NetworkBattleReceiver.RESULT_CODE.NotFinish
+                : (int)manager.JudgeCurrentFinishStatus();
         }
 
         private static void Deliver(
@@ -1190,6 +1385,30 @@ namespace Shadowbus
             string uri = data != null && data.TryGetValue("uri", out object value)
                 ? value?.ToString() ?? "?"
                 : "?";
+            Dictionary<string, object> expectedBattleState = null;
+            if (data != null &&
+                data.TryGetValue(P2PBattleStateDiagnostics.StateKey, out object rawState))
+            {
+                expectedBattleState = rawState as Dictionary<string, object>;
+                data.Remove(P2PBattleStateDiagnostics.StateKey);
+            }
+            if (string.Equals(
+                    uri,
+                    NetworkBattleDefine.NetworkBattleURI.JudgeResult.ToString(),
+                    StringComparison.Ordinal) &&
+                data.TryGetValue("result", out object resultValue))
+            {
+                try
+                {
+                    if (P2PBattleResult.IsPairedResult(Convert.ToInt32(resultValue)))
+                    {
+                        finishResultSent = true;
+                    }
+                }
+                catch (Exception)
+                {
+                }
+            }
             if (currentAgent == null)
             {
                 RealTimeNetworkAgent gameAgent = ToolboxGame.RealTimeNetworkAgent;
@@ -1204,6 +1423,19 @@ namespace Shadowbus
                         $"(game singleton available: {gameAgent != null}).");
                     return;
                 }
+            }
+            PendingBattleStateCheck pendingStateCheck = null;
+            if (expectedBattleState != null)
+            {
+                // Boundary messages can be injected before the previous message's VFX
+                // has drained. Only the newest checkpoint describes the state that will
+                // exist when the shared queue next becomes idle.
+                PendingBattleStateChecks.Clear();
+                pendingStateCheck = new PendingBattleStateCheck(
+                    uri,
+                    P2PJson.CloneDictionary(expectedBattleState),
+                    DateTime.UtcNow.AddSeconds(BattleStateCheckTimeoutSeconds));
+                PendingBattleStateChecks.Enqueue(pendingStateCheck);
             }
             try
             {
@@ -1220,7 +1452,213 @@ namespace Shadowbus
             }
             catch (Exception ex)
             {
-                Plugin.Logger.LogError($"[P2P] Failed to inject '{uri}' message: {ex}");
+                if (pendingStateCheck != null)
+                {
+                    pendingStateCheck.InjectionError = ex.ToString();
+                }
+                ReportBattleDiagnostic(
+                    $"Failed to inject '{uri}' message; " +
+                    P2PBattleStateDiagnostics.DescribeBattleMessage(data) +
+                    $". Exception: {ex}");
+            }
+        }
+
+        private static void CacheLocalBattleCardIdentities()
+        {
+            if (!IsActive || !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
+                manager.BattlePlayer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                foreach (BattleCardBase card in manager.BattlePlayer.AllCards)
+                {
+                    if (card != null)
+                    {
+                        BattleCardTracker.RememberSourceCard(
+                            Role == P2PRole.Host,
+                            card.Index,
+                            card.CardId,
+                            card.Cost);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogDebug(
+                    "[P2P] Could not refresh the local card identity cache: " +
+                    ex.Message);
+            }
+        }
+
+        private static Dictionary<string, object> CaptureBattleState()
+        {
+            if (!(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
+                manager.BattlePlayer == null || manager.BattleEnemy == null)
+            {
+                return null;
+            }
+
+            BattlePlayerBase host = Role == P2PRole.Host
+                ? manager.BattlePlayer
+                : manager.BattleEnemy;
+            BattlePlayerBase guest = Role == P2PRole.Host
+                ? manager.BattleEnemy
+                : manager.BattlePlayer;
+            return new Dictionary<string, object>
+            {
+                ["turn"] = manager.CurrentTurn,
+                ["host"] = CapturePlayerState(host),
+                ["guest"] = CapturePlayerState(guest)
+            };
+        }
+
+        private static Dictionary<string, object> CapturePlayerState(
+            BattlePlayerBase player)
+        {
+            return new Dictionary<string, object>
+            {
+                ["life"] = player.Class?.Life ?? 0,
+                ["maxLife"] = player.Class?.MaxLife ?? 0,
+                ["pp"] = player.Pp,
+                ["ppTotal"] = player.PpTotal,
+                ["ep"] = player.CurrentEpCount,
+                ["turn"] = player.Turn,
+                ["isTurn"] = player.IsSelfTurn,
+                ["deckCount"] = player.DeckCardList?.Count ?? 0,
+                ["deck"] = FormatCardIndices(player.DeckCardList),
+                ["hand"] = FormatCardIndices(player.HandCardList),
+                ["cemetery"] = FormatPublicCards(player.CemeteryList),
+                ["banish"] = FormatCardIndices(player.BanishList),
+                ["field"] = FormatFieldCards(player.InPlayCards)
+            };
+        }
+
+        private static string FormatCardIndices(IEnumerable<BattleCardBase> cards)
+        {
+            return cards == null
+                ? string.Empty
+                : string.Join(",", cards.Where(card => card != null)
+                    .Select(card => card.Index));
+        }
+
+        private static string FormatPublicCards(IEnumerable<BattleCardBase> cards)
+        {
+            return cards == null
+                ? string.Empty
+                : string.Join(",", cards.Where(card => card != null)
+                    .Select(card => $"{card.Index}:{card.CardId}"));
+        }
+
+        private static string FormatFieldCards(IEnumerable<BattleCardBase> cards)
+        {
+            return cards == null
+                ? string.Empty
+                : string.Join(",", cards.Where(card => card != null)
+                    .Select(card =>
+                        $"{card.Index}:{card.CardId}:{card.Atk}:{card.Life}:" +
+                        $"{card.MaxLife}:{(card.IsEvolution ? 1 : 0)}:{card.ChantCount}"));
+        }
+
+        private static void TryCheckPendingBattleStates()
+        {
+            if (PendingBattleStateChecks.Count == 0)
+            {
+                return;
+            }
+
+            NetworkBattleManagerBase manager =
+                BattleManagerBase.GetIns() as NetworkBattleManagerBase;
+            bool effectsComplete = manager?.VfxMgr != null && manager.VfxMgr.IsEnd;
+            DateTime now = DateTime.UtcNow;
+            while (PendingBattleStateChecks.Count > 0)
+            {
+                PendingBattleStateCheck pending = PendingBattleStateChecks.Peek();
+                bool timedOut = now >= pending.DeadlineUtc;
+                if (!effectsComplete && !timedOut)
+                {
+                    return;
+                }
+                PendingBattleStateChecks.Dequeue();
+
+                Dictionary<string, object> actual = CaptureBattleState();
+                if (actual == null)
+                {
+                    ReportBattleDiagnostic(
+                        $"State check after {pending.Uri} failed: " +
+                        "the network battle manager is unavailable.");
+                    continue;
+                }
+
+                IReadOnlyList<string> differences =
+                    P2PBattleStateDiagnostics.Compare(pending.Expected, actual);
+                if (differences.Count == 0)
+                {
+                    if (timedOut && !effectsComplete)
+                    {
+                        ReportBattleDiagnostic(
+                            $"TURN-END STALL after {pending.Uri}: the effect queue did not " +
+                            $"finish within {BattleStateCheckTimeoutSeconds} seconds; " +
+                            DescribeEffectQueue(manager) +
+                            ". The state snapshot currently matches the peer.");
+                        continue;
+                    }
+                    if (!string.IsNullOrEmpty(pending.InjectionError))
+                    {
+                        ReportBattleDiagnostic(
+                            $"Message injection failed after {pending.Uri}, although the " +
+                            "state snapshot currently matches the peer: " +
+                            pending.InjectionError);
+                        continue;
+                    }
+                    Plugin.Logger.LogInfo(
+                        $"[P2P] State synchronized after {pending.Uri}.");
+                    continue;
+                }
+
+                string waitReason = timedOut && !effectsComplete
+                    ? $" The effect queue did not finish within " +
+                        $"{BattleStateCheckTimeoutSeconds} seconds; " +
+                        DescribeEffectQueue(manager) + "."
+                    : string.Empty;
+                string injectionReason = string.IsNullOrEmpty(pending.InjectionError)
+                    ? string.Empty
+                    : " Message injection failed: " + pending.InjectionError;
+                ReportBattleDiagnostic(
+                    $"DATA DESYNC after {pending.Uri}.{waitReason}" +
+                    injectionReason + " " +
+                    string.Join("; ", differences));
+            }
+        }
+
+        private static string DescribeEffectQueue(NetworkBattleManagerBase manager)
+        {
+            try
+            {
+                string current = manager?.VfxMgr?.CurrentVfxName;
+                List<string> queued = manager?.VfxMgr?.GetSequentialVfxPlayerNames();
+                return $"currentVfx={current ?? "<none>"}, " +
+                    $"queuedVfx=[{string.Join(",", queued ?? new List<string>())}]";
+            }
+            catch (Exception ex)
+            {
+                return "effect queue details unavailable: " + ex.Message;
+            }
+        }
+
+        private static void ReportBattleDiagnostic(string message)
+        {
+            Plugin.Logger.LogError("[P2P] " + message);
+            if (Role == P2PRole.Guest && IsActive)
+            {
+                SendWire(new P2PWireMessage
+                {
+                    Type = "diagnostic",
+                    BattleId = BattleId,
+                    Error = message
+                });
             }
         }
 
@@ -1300,23 +1738,27 @@ namespace Shadowbus
 
             if (BattleManagerBase.GetIns() is NetworkBattleManagerBase)
             {
-                InjectPeerDisconnectVictory();
+                InjectPeerDisconnectResult();
             }
         }
 
-        private static void InjectPeerDisconnectVictory()
+        private static void InjectPeerDisconnectResult()
         {
             if (finishResultSent || currentAgent == null)
             {
                 return;
             }
 
+            int localResult = P2PBattleResult.ResolveLocalResultAfterDisconnect(
+                localRetired,
+                GetLocalFinishResult());
+
+            int receivedOpponentResult = P2PBattleResult.Invert(localResult);
             finishResultSent = true;
             Inject(new Dictionary<string, object>
             {
                 ["uri"] = NetworkBattleDefine.NetworkBattleURI.JudgeResult.ToString(),
-                ["result"] = P2PBattleResult.Invert(
-                    (int)NetworkBattleReceiver.RESULT_CODE.DisconnectWin),
+                ["result"] = receivedOpponentResult,
                 ["viewerId"] = 0,
                 ["bid"] = BattleId ?? string.Empty,
                 ["playSeq"] = Role == P2PRole.Host
@@ -1324,6 +1766,10 @@ namespace Shadowbus
                     : ++guestPlaySequence,
                 ["time"] = UnixMilliseconds()
             });
+            Plugin.Logger.LogInfo(
+                $"[P2P] Peer disconnected; local result {localResult}, " +
+                $"received opponent result {receivedOpponentResult}, " +
+                $"localRetired={localRetired}.");
         }
 
         private static void InjectRoomRelease()
@@ -1621,6 +2067,24 @@ namespace Shadowbus
             }
             return address.AddressFamily != AddressFamily.InterNetworkV6 ||
                 (!address.IsIPv6LinkLocal && !address.IsIPv6Multicast && address.ScopeId == 0);
+        }
+
+        private sealed class PendingBattleStateCheck
+        {
+            internal PendingBattleStateCheck(
+                string uri,
+                Dictionary<string, object> expected,
+                DateTime deadlineUtc)
+            {
+                Uri = uri;
+                Expected = expected;
+                DeadlineUtc = deadlineUtc;
+            }
+
+            internal string Uri { get; }
+            internal Dictionary<string, object> Expected { get; }
+            internal DateTime DeadlineUtc { get; }
+            internal string InjectionError { get; set; }
         }
     }
 }

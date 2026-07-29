@@ -16,17 +16,42 @@ namespace Shadowbus
     {
         internal static P2PBattleResultPair FromHostLocalResult(int hostLocalResult)
         {
-            // JudgeResult carries the opponent's result to each client.
-            return new P2PBattleResultPair(Invert(hostLocalResult), hostLocalResult);
+            return FromLocalResult(true, hostLocalResult);
+        }
+
+        internal static P2PBattleResultPair FromLocalResult(
+            bool localIsHost,
+            int localResult)
+        {
+            // JudgeResult carries the opponent's result, not the receiver's result.
+            int localDelivery = Invert(localResult);
+            return localIsHost
+                ? new P2PBattleResultPair(localDelivery, localResult)
+                : new P2PBattleResultPair(localResult, localDelivery);
+        }
+
+        internal static bool IsPairedResult(int result)
+        {
+            return (result >= 101 && result <= 108) ||
+                (result >= 201 && result <= 208);
+        }
+
+        internal static int ResolveLocalResultAfterDisconnect(
+            bool localRetired,
+            int currentLocalResult)
+        {
+            if (localRetired)
+            {
+                return 106;
+            }
+            return IsPairedResult(currentLocalResult)
+                ? currentLocalResult
+                : 201;
         }
 
         internal static int Invert(int result)
         {
-            if (result >= 101 && result <= 108)
-            {
-                return (result & 1) == 1 ? result + 1 : result - 1;
-            }
-            if (result >= 201 && result <= 208)
+            if (IsPairedResult(result))
             {
                 return (result & 1) == 1 ? result + 1 : result - 1;
             }
