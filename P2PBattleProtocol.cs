@@ -6,6 +6,14 @@ using System.Linq;
 
 namespace Shadowbus
 {
+    internal enum P2PBattleStateCheckDecision
+    {
+        Wait,
+        Synchronized,
+        Desynchronized,
+        Stalled
+    }
+
     internal enum P2PBattleRoute
     {
         Opponent,
@@ -1231,6 +1239,26 @@ namespace Shadowbus
     internal static class P2PBattleStateDiagnostics
     {
         internal const string StateKey = "p2pState";
+
+        internal static P2PBattleStateCheckDecision DecideCheck(
+            bool statesMatch,
+            bool effectsComplete,
+            bool timedOut)
+        {
+            if (!timedOut)
+            {
+                return statesMatch && effectsComplete
+                    ? P2PBattleStateCheckDecision.Synchronized
+                    : P2PBattleStateCheckDecision.Wait;
+            }
+            if (!statesMatch)
+            {
+                return P2PBattleStateCheckDecision.Desynchronized;
+            }
+            return effectsComplete
+                ? P2PBattleStateCheckDecision.Synchronized
+                : P2PBattleStateCheckDecision.Stalled;
+        }
 
         internal static IReadOnlyList<string> Compare(
             Dictionary<string, object> expected,

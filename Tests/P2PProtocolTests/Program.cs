@@ -411,20 +411,21 @@ namespace Shadowbus
         private static void TestBattleResults()
         {
             P2PBattleResultPair hostLifeWin = P2PBattleResult.FromHostLocalResult(101);
-            Assert(hostLifeWin.Host == 102 && hostLifeWin.Guest == 101,
-                "A host life win was not converted to each client's opponent result.");
+            Assert(hostLifeWin.Host == 101 && hostLifeWin.Guest == 102,
+                "A host life win was not delivered as each client's local result.");
 
             P2PBattleResultPair guestLifeWin =
                 P2PBattleResult.FromLocalResult(false, 101);
-            Assert(guestLifeWin.Host == 101 && guestLifeWin.Guest == 102,
+            Assert(guestLifeWin.Host == 102 && guestLifeWin.Guest == 101,
                 "A guest life win was not converted from the reporting side.");
 
             P2PBattleResultPair hostRetired = P2PBattleResult.FromHostLocalResult(106);
-            Assert(hostRetired.Host == 105 && hostRetired.Guest == 106,
+            Assert(hostRetired.Host == 106 && hostRetired.Guest == 105,
                 "A host retirement produced the wrong winner.");
 
-            P2PBattleResultPair guestRetired = P2PBattleResult.FromHostLocalResult(105);
-            Assert(guestRetired.Host == 106 && guestRetired.Guest == 105,
+            P2PBattleResultPair guestRetired =
+                P2PBattleResult.FromLocalResult(false, 106);
+            Assert(guestRetired.Host == 105 && guestRetired.Guest == 106,
                 "A guest retirement produced the wrong winner.");
 
             Assert(P2PBattleResult.Invert(201) == 202,
@@ -1227,6 +1228,19 @@ namespace Shadowbus
 
         private static void TestBattleStateDiagnostics()
         {
+            Assert(P2PBattleStateDiagnostics.DecideCheck(false, true, false) ==
+                    P2PBattleStateCheckDecision.Wait,
+                "A state mismatch was reported before the checkpoint deadline.");
+            Assert(P2PBattleStateDiagnostics.DecideCheck(true, true, false) ==
+                    P2PBattleStateCheckDecision.Synchronized,
+                "A completed matching checkpoint was not accepted.");
+            Assert(P2PBattleStateDiagnostics.DecideCheck(false, true, true) ==
+                    P2PBattleStateCheckDecision.Desynchronized,
+                "A timed-out state mismatch was not reported.");
+            Assert(P2PBattleStateDiagnostics.DecideCheck(true, false, true) ==
+                    P2PBattleStateCheckDecision.Stalled,
+                "A timed-out effect queue was not reported as stalled.");
+
             Dictionary<string, object> expected = new Dictionary<string, object>
             {
                 ["turn"] = 6,

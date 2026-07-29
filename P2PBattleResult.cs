@@ -23,11 +23,10 @@ namespace Shadowbus
             bool localIsHost,
             int localResult)
         {
-            // JudgeResult carries the opponent's result, not the receiver's result.
-            int localDelivery = Invert(localResult);
+            int opponentResult = Invert(localResult);
             return localIsHost
-                ? new P2PBattleResultPair(localDelivery, localResult)
-                : new P2PBattleResultPair(localResult, localDelivery);
+                ? new P2PBattleResultPair(localResult, opponentResult)
+                : new P2PBattleResultPair(opponentResult, localResult);
         }
 
         internal static bool IsPairedResult(int result)

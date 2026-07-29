@@ -1199,10 +1199,9 @@ namespace Shadowbus
             string authority;
             if (retiringHost.HasValue)
             {
-                authoritativeSideIsHost = true;
-                authoritativeLocalResult = retiringHost.Value
-                    ? (int)NetworkBattleReceiver.RESULT_CODE.RetireLose
-                    : (int)NetworkBattleReceiver.RESULT_CODE.RetireWin;
+                authoritativeSideIsHost = retiringHost.Value;
+                authoritativeLocalResult =
+                    (int)NetworkBattleReceiver.RESULT_CODE.RetireLose;
                 authority = "retirement";
             }
             else if (TryReadReportedLocalResult(request, out int reportedLocalResult))
@@ -1247,8 +1246,8 @@ namespace Shadowbus
             }, 0);
             Plugin.Logger.LogInfo(
                 $"[P2P] Battle result delivered from {authority} " +
-                $"({authoritativeLocalResult}): host receives opponent result " +
-                $"{results.Host}, guest receives opponent result {results.Guest}.");
+                $"({authoritativeLocalResult}): host receives local result " +
+                $"{results.Host}, guest receives local result {results.Guest}.");
         }
 
         private static bool TryReadReportedLocalResult(
@@ -1509,7 +1508,6 @@ namespace Shadowbus
                 : manager.BattlePlayer;
             return new Dictionary<string, object>
             {
-                ["turn"] = manager.CurrentTurn,
                 ["host"] = CapturePlayerState(host),
                 ["guest"] = CapturePlayerState(guest)
             };
@@ -1541,7 +1539,8 @@ namespace Shadowbus
             return cards == null
                 ? string.Empty
                 : string.Join(",", cards.Where(card => card != null)
-                    .Select(card => card.Index));
+                    .Select(card => card.Index)
+                    .OrderBy(index => index));
         }
 
         private static string FormatPublicCards(IEnumerable<BattleCardBase> cards)
@@ -1577,15 +1576,14 @@ namespace Shadowbus
             {
                 PendingBattleStateCheck pending = PendingBattleStateChecks.Peek();
                 bool timedOut = now >= pending.DeadlineUtc;
-                if (!effectsComplete && !timedOut)
-                {
-                    return;
-                }
-                PendingBattleStateChecks.Dequeue();
-
                 Dictionary<string, object> actual = CaptureBattleState();
                 if (actual == null)
                 {
+                    if (!timedOut)
+                    {
+                        return;
+                    }
+                    PendingBattleStateChecks.Dequeue();
                     ReportBattleDiagnostic(
                         $"State check after {pending.Uri} failed: " +
                         "the network battle manager is unavailable.");
@@ -1594,17 +1592,19 @@ namespace Shadowbus
 
                 IReadOnlyList<string> differences =
                     P2PBattleStateDiagnostics.Compare(pending.Expected, actual);
-                if (differences.Count == 0)
+                P2PBattleStateCheckDecision decision =
+                    P2PBattleStateDiagnostics.DecideCheck(
+                        differences.Count == 0,
+                        effectsComplete,
+                        timedOut);
+                if (decision == P2PBattleStateCheckDecision.Wait)
                 {
-                    if (timedOut && !effectsComplete)
-                    {
-                        ReportBattleDiagnostic(
-                            $"TURN-END STALL after {pending.Uri}: the effect queue did not " +
-                            $"finish within {BattleStateCheckTimeoutSeconds} seconds; " +
-                            DescribeEffectQueue(manager) +
-                            ". The state snapshot currently matches the peer.");
-                        continue;
-                    }
+                    return;
+                }
+
+                PendingBattleStateChecks.Dequeue();
+                if (decision == P2PBattleStateCheckDecision.Synchronized)
+                {
                     if (!string.IsNullOrEmpty(pending.InjectionError))
                     {
                         ReportBattleDiagnostic(
@@ -1615,6 +1615,16 @@ namespace Shadowbus
                     }
                     Plugin.Logger.LogInfo(
                         $"[P2P] State synchronized after {pending.Uri}.");
+                    continue;
+                }
+
+                if (decision == P2PBattleStateCheckDecision.Stalled)
+                {
+                    ReportBattleDiagnostic(
+                        $"TURN-END STALL after {pending.Uri}: the effect queue did not " +
+                        $"finish within {BattleStateCheckTimeoutSeconds} seconds; " +
+                        DescribeEffectQueue(manager) +
+                        ". The state snapshot currently matches the peer.");
                     continue;
                 }
 
@@ -1753,12 +1763,11 @@ namespace Shadowbus
                 localRetired,
                 GetLocalFinishResult());
 
-            int receivedOpponentResult = P2PBattleResult.Invert(localResult);
             finishResultSent = true;
             Inject(new Dictionary<string, object>
             {
                 ["uri"] = NetworkBattleDefine.NetworkBattleURI.JudgeResult.ToString(),
-                ["result"] = receivedOpponentResult,
+                ["result"] = localResult,
                 ["viewerId"] = 0,
                 ["bid"] = BattleId ?? string.Empty,
                 ["playSeq"] = Role == P2PRole.Host
@@ -1767,8 +1776,7 @@ namespace Shadowbus
                 ["time"] = UnixMilliseconds()
             });
             Plugin.Logger.LogInfo(
-                $"[P2P] Peer disconnected; local result {localResult}, " +
-                $"received opponent result {receivedOpponentResult}, " +
+                $"[P2P] Peer disconnected; received local result {localResult}, " +
                 $"localRetired={localRetired}.");
         }
 
