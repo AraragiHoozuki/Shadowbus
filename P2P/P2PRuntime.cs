@@ -261,6 +261,15 @@ namespace Shadowbus
             {
                 throw new InvalidOperationException("No room deck is selected.");
             }
+            if (!IsDeckAllowed(
+                deck,
+                out CustomFormatDefinition definition,
+                out CustomFormatViolation violation))
+            {
+                throw new InvalidOperationException(
+                    $"Deck {deck.GetDeckID()} is not valid for room format " +
+                    $"{definition.Id}: {violation.ToLogMessage()}.");
+            }
             LocalDeck = new P2PDeckSnapshot
             {
                 Cards = new List<int>(deck.GetCardIdList()),
@@ -277,6 +286,30 @@ namespace Shadowbus
             {
                 TrySendMatched();
             }
+        }
+
+        internal static bool IsDeckAllowed(
+            DeckData deck,
+            out CustomFormatDefinition definition,
+            out CustomFormatViolation violation)
+        {
+            definition = Rules?.FormatDefinition ??
+                CustomFormats.Get(Rules?.CustomFormatId);
+            if (deck == null || deck.GetCardIdList() == null)
+            {
+                violation = new CustomFormatViolation(
+                    CustomFormatRule.CardDataUnavailable,
+                    0,
+                    0,
+                    0);
+                return false;
+            }
+
+            return CustomFormats.IsDeckCompliant(
+                deck.GetCardIdList(),
+                definition,
+                CardMaster.GetInstanceForBattle(),
+                out violation);
         }
 
         internal static void HandleEmit(string uri, Dictionary<string, object> data)

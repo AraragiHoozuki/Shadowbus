@@ -62,7 +62,8 @@ namespace Shadowbus
         }
         private static bool IsTaskOfflinized(string taskName)
         {
-            return IsLocalDeckListTask(taskName) ||
+            return LocalDeckCodeService.CanHandleTaskName(taskName) ||
+                IsLocalDeckListTask(taskName) ||
                 ProfileOfflineData.CanHandle(taskName) ||
                 StoryOfflineData.CanHandle(taskName) ||
                 File.Exists((Path.Combine("Mods", "OfflinizedTasks", $"{taskName}.json")));
@@ -117,7 +118,11 @@ namespace Shadowbus
                 string filePath = Path.Combine("Mods", "OfflinizedTasks", $"{taskName}.json");
                 JsonData data;
 
-                if (TryCreateLocalDeckListResponse(task, out data))
+                if (LocalDeckCodeService.TryCreateResponse(task, out data))
+                {
+                    Plugin.Logger.LogInfo($"[DeckCode] Creating local response for {taskName}...");
+                }
+                else if (TryCreateLocalDeckListResponse(task, out data))
                 {
                     Plugin.Logger.LogInfo($"[CustomFormats] Creating local deck-list response for {taskName}...");
                 }
@@ -139,7 +144,11 @@ namespace Shadowbus
                     throw new FileNotFoundException("Local offline task data was not found.", filePath);
                 }
 
-                ProfileOfflineData.ApplyToResponse(task, data);
+                bool isLocalDeckCodeTask = LocalDeckCodeService.CanHandle(task);
+                if (!isLocalDeckCodeTask)
+                {
+                    ProfileOfflineData.ApplyToResponse(task, data);
+                }
                 data["data_headers"]["servertime"] = (long)TimeNativePlugin.GetDeviceOperatingTime();
                 task.SetResponseData(data);
                 if (task is CheckSpecialTitleTask specialTitleTask)
@@ -150,13 +159,25 @@ namespace Shadowbus
                 {
                     task.CheckResultCodeToPopupCreate_ReturnStatus(0);
                 }
-                ProfileOfflineData.ReapplyCurrentSettings();
+                if (!isLocalDeckCodeTask)
+                {
+                    ProfileOfflineData.ReapplyCurrentSettings();
+                }
 
                 Plugin.Logger.LogInfo($"[Offlinizer] Successfully injected local data for {taskName}");
             }
             catch (Exception ex)
             {
-                Plugin.Logger.LogError($"[Offlinizer] Error processing local data for {taskName}: {ex.Message}");
+                Plugin.Logger.LogError(
+                    $"[Offlinizer] Error processing local data for {taskName}: {ex}");
+                if (LocalDeckCodeService.CanHandle(task))
+                {
+                    DialogBase dialog = UIManager.GetInstance().CreateConfirmationDialog(
+                        "\u724c\u7ec4\u4ee3\u7801\u65e0\u6548\u3002\n" + ex.Message);
+                    dialog.SetPanelDepth(2000, false);
+                    dialog.SetSize(DialogBase.Size.M);
+                    task.CallbackOnFailure?.Invoke(NetworkTask.ResultCode.Error);
+                }
             }
 
             __instance.ClearLastRequestTask();

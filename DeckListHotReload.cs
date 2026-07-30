@@ -16,6 +16,7 @@ namespace Shadowbus
             var stopwatch = Stopwatch.StartNew();
             Plugin.Logger.LogInfo("[DeckListHotReload] Deck list opened; refreshing CardMaster and deck data.");
 
+            CustomFormats.ReloadForUi("deck list");
             RefreshCardMaster();
             RefreshDeckListData();
 

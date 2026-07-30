@@ -405,13 +405,6 @@ namespace Shadowbus
                 }
 
                 LoadLocalDecks(loadDetail);
-                if (P2PRuntime.IsActive)
-                {
-                    CustomFormatDefinition roomFormat = CustomFormats.Get(
-                        P2PRuntime.Rules?.CustomFormatId);
-                    loadDetail.UserDeckListUnlimited =
-                        CustomDeckStore.LoadCompliantDeckList(roomFormat);
-                }
                 JsonData data = responseData["data"];
                 if (__instance._format == Format.All)
                 {
@@ -675,6 +668,7 @@ namespace Shadowbus
             ref bool isVisibleCreateNew,
             ref DeckSelectUI.InitOptions initOptions)
         {
+            CustomFormats.ReloadForUi("deck selection");
             bool isLocalPractice = ForceLocalPracticeDeckDialog;
             bool isP2PRoom = P2PRuntime.IsActive;
             bool isStory = !isP2PRoom && !isLocalPractice &&
@@ -718,10 +712,13 @@ namespace Shadowbus
                         deckGroupListData = new DeckGroupListData(localGroup);
                         isVisibleCreateNew = false;
                     }
+                    AddRoomFormatDeckAvailabilityCallback(ref initOptions);
                     defaultFormat = format;
                     GameMgr.GetIns().GetDataMgr().CurrentDeckListParamData = deckGroupListData;
                     DeckData primaryLocalDeck = localGroup.DeckDataList
-                        .FirstOrDefault(deck => !deck.IsNoCard());
+                        .FirstOrDefault(deck => !deck.IsNoCard() &&
+                            P2PRuntime.IsDeckAllowed(deck, out _, out _)) ??
+                        localGroup.DeckDataList.FirstOrDefault(deck => !deck.IsNoCard());
                     if (primaryLocalDeck != null)
                     {
                         initOptions = initOptions ?? new DeckSelectUI.InitOptions();
@@ -771,11 +768,6 @@ namespace Shadowbus
         {
             LoadDetail loadDetail = Data.Load.data;
             LoadLocalDecks(loadDetail);
-            if (P2PRuntime.IsActive)
-            {
-                loadDetail.UserDeckListUnlimited = CustomDeckStore.LoadCompliantDeckList(
-                    CustomFormats.Get(P2PRuntime.Rules?.CustomFormatId));
-            }
             JsonData localDecks = GetLocalDeckList(loadDetail, format);
             if (localDecks == null)
             {
@@ -794,6 +786,41 @@ namespace Shadowbus
                 .ToList() ?? new List<DeckGroup>();
             groups.Insert(0, localGroup);
             return new DeckGroupListData(groups);
+        }
+
+        private static void AddRoomFormatDeckAvailabilityCallback(
+            ref DeckSelectUI.InitOptions initOptions)
+        {
+            initOptions = initOptions ?? new DeckSelectUI.InitOptions();
+            Action<DeckUI> original = initOptions.OnUpdateDeckUICustomize;
+            initOptions.OnUpdateDeckUICustomize = deckUI =>
+            {
+                original?.Invoke(deckUI);
+                ApplyRoomFormatDeckAvailability(deckUI);
+            };
+        }
+
+        private static void ApplyRoomFormatDeckAvailability(DeckUI deckUI)
+        {
+            DeckData deck = deckUI?.Deck;
+            if (!P2PRuntime.IsActive || deck == null ||
+                deckUI.ViewType != DeckUI.eViewType.Normal || deck.IsNoCard() ||
+                P2PRuntime.IsDeckAllowed(
+                    deck,
+                    out CustomFormatDefinition definition,
+                    out CustomFormatViolation violation))
+            {
+                return;
+            }
+
+            CardMaster cardMaster = CardMaster.GetInstanceForBattle();
+            deckUI._warningSprite.gameObject.SetActive(true);
+            deckUI._warningLabel.overflowMethod = UILabel.Overflow.ShrinkContent;
+            deckUI._warningLabel.maxLineCount = 1;
+            deckUI._warningLabel.text =
+                $"{definition.DisplayName}：" +
+                CustomFormatViolationText.Describe(violation, cardMaster);
+            deckUI.SetSelectable(false);
         }
 
         private static Format ResolveP2PDeckFormat(Format candidate)
@@ -824,8 +851,12 @@ namespace Shadowbus
                 .Select(deck => $"'{deck.GetDeckName()}'({deck.GetCardIdList().Count})"));
             string groups = string.Join(", ", listData.DeckGroupList.Select(group =>
                 $"{group.DeckFormat}/{group.AttributeType}:{group.DeckDataList.Count}"));
+            int disabledByRoomFormat = localGroup.DeckDataList.Count(deck =>
+                !deck.IsNoCard() &&
+                !P2PRuntime.IsDeckAllowed(deck, out _, out _));
             Plugin.Logger.LogInfo(
-                $"[P2P] {stage} received local decks [{localDeckNames}]; final groups [{groups}].");
+                $"[P2P] {stage} received local decks [{localDeckNames}]; " +
+                $"disabledByRoomFormat={disabledByRoomFormat}; final groups [{groups}].");
         }
 
         [HarmonyPatch(typeof(DeckSelectUI), nameof(DeckSelectUI.Initialize))]
@@ -989,7 +1020,7 @@ namespace Shadowbus
                     if (orderByDeckNo.TryGetValue(deck["deck_no"].ToInt(), out int order))
                     {
                         deck["order_num"] = order;
-                        File.WriteAllText(file, deck.ToJson());
+                        CustomDeckStore.SaveDeck(deck, file);
                     }
                 }
                 catch (Exception ex)
@@ -1039,7 +1070,7 @@ namespace Shadowbus
                     {
                         data["leader_skin_id"] = parameters.leader_skin_id;
                         DeckListUtility.DeckUpdate(data, __instance._updateDeckFormat, DeckAttributeType.CustomDeck);
-                        File.WriteAllText(file, data.ToJson());
+                        CustomDeckStore.SaveDeck(data, file);
                     }
                 }
                 catch (Exception ex)
@@ -1071,7 +1102,7 @@ namespace Shadowbus
                     {
                         data["sleeve_id"] = parameters.sleeve_id;
                         DeckListUtility.DeckUpdate(data, __instance._updateDeckFormat, DeckAttributeType.CustomDeck);
-                        File.WriteAllText(file, data.ToJson());
+                        CustomDeckStore.SaveDeck(data, file);
                     }
                 }
                 catch (Exception ex)
@@ -1097,7 +1128,7 @@ namespace Shadowbus
                     {
                         data["deck_name"] = parameters.deck_name;
                         DeckListUtility.DeckUpdate(data, __instance._updateDeckFormat, DeckAttributeType.CustomDeck);
-                        File.WriteAllText(file, data.ToJson());
+                        CustomDeckStore.SaveDeck(data, file);
                     }
                 }
                 catch (Exception ex)
@@ -1147,7 +1178,7 @@ namespace Shadowbus
                             }
                             DeckListUtility.DeckUpdate(data, __instance._updateDeckFormat, DeckAttributeType.CustomDeck);
                             __instance.AchievedInfo = new AchievedInfo();
-                            File.WriteAllText(file, data.ToJson());
+                            CustomDeckStore.SaveDeck(data, file);
                         }
                         
                     }

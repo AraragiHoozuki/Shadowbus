@@ -27,6 +27,37 @@ namespace Shadowbus
                 "local room player");
         }
 
+        [HarmonyPatch(
+            typeof(PlayerControllerForOwn),
+            nameof(PlayerControllerForOwn.SelectDeck),
+            new[] { typeof(DeckData), typeof(bool) })]
+        [HarmonyPrefix]
+        private static bool PlayerControllerForOwn_SelectDeck_Prefix(DeckData deck)
+        {
+            if (!P2PRuntime.IsActive || P2PRuntime.IsDeckAllowed(
+                deck,
+                out CustomFormatDefinition definition,
+                out CustomFormatViolation violation))
+            {
+                return true;
+            }
+
+            CardMaster cardMaster = CardMaster.GetInstanceForBattle();
+            DialogBase dialog = UIManager.GetInstance().CreateDialogClose(false, false);
+            dialog.SetSize(DialogBase.Size.M);
+            dialog.SetTitleLabel("无法选择卡组");
+            dialog.SetText(
+                $"该卡组不符合「{definition.DisplayName}」的规则。\n" +
+                CustomFormatViolationText.Describe(violation, cardMaster),
+                true);
+            dialog.SetButtonLayout(DialogBase.ButtonLayout.OkBtn);
+            Plugin.Logger.LogInfo(
+                $"[CustomFormats] Rejected room deck {deck?.GetDeckID() ?? 0} " +
+                $"for {definition.Id} based on its actual cards: " +
+                violation.ToLogMessage() + ".");
+            return false;
+        }
+
         [HarmonyPatch(typeof(RoomPlayerDisplayBase), "SetPlayerData")]
         [HarmonyPrefix]
         private static void RoomPlayerDisplayBase_SetPlayerData_Prefix(Player player)

@@ -14,6 +14,7 @@ namespace Shadowbus
             try
             {
                 TestConnectionCodes();
+                TestLocalDeckCodes();
                 TestJsonConversion();
                 TestRoomRules();
                 TestPerspectiveTransform();
@@ -33,6 +34,45 @@ namespace Shadowbus
                 Console.Error.WriteLine(ex);
                 return 1;
             }
+        }
+
+        private static void TestLocalDeckCodes()
+        {
+            var source = new LocalDeckCodePayload
+            {
+                ClanId = 6,
+                FormatId = "modern",
+                DeckName = "\u6d4b\u8bd5\u724c\u7ec4",
+                SleeveId = 3000011,
+                SkinId = 123,
+                CardIds = Enumerable.Range(0, 50)
+                    .Select(index => 100000001 + index * 10)
+                    .ToList()
+            };
+            string code = LocalDeckCode.Encode(source);
+            Assert(code.Length <= LocalDeckCode.MaximumLength,
+                "A generated local deck code exceeded the input limit.");
+            Assert(LocalDeckCode.TryDecode(
+                    " \r\n" + code + "\r\n ",
+                    out LocalDeckCodePayload decoded,
+                    out string error),
+                "A generated local deck code could not be decoded: " + error);
+            Assert(decoded.ClanId == source.ClanId &&
+                decoded.FormatId == source.FormatId &&
+                decoded.DeckName == source.DeckName &&
+                decoded.SleeveId == source.SleeveId &&
+                decoded.SkinId == source.SkinId &&
+                decoded.CardIds.SequenceEqual(source.CardIds),
+                "The local deck-code payload changed during round-trip.");
+
+            int separator = code.IndexOf('.') + 1;
+            char replacement = code[separator] == 'A' ? 'B' : 'A';
+            string damaged = code.Substring(0, separator) + replacement +
+                code.Substring(separator + 1);
+            Assert(!LocalDeckCode.TryDecode(damaged, out _, out _),
+                "A damaged local deck code passed its checksum.");
+            Assert(!LocalDeckCode.TryDecode("ABCD", out _, out _),
+                "An official short code was accepted as a local self-contained code.");
         }
 
         private static void TestConnectionCodes()

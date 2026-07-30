@@ -8,6 +8,90 @@ namespace Shadowbus
 {
     internal static class CustomDeckStore
     {
+        internal static void MigrateLegacyDeckFilenames()
+        {
+            Directory.CreateDirectory(PathHelper.UnlimitedDeckPath);
+            string[] files = Directory.GetFiles(
+                PathHelper.UnlimitedDeckPath,
+                "*.json",
+                SearchOption.TopDirectoryOnly);
+            var usedDeckNos = new HashSet<int>();
+            foreach (string file in files)
+            {
+                try
+                {
+                    JsonData deck = JsonMapper.ToObject(File.ReadAllText(file));
+                    if (deck.IsObject && deck.Keys.Contains("deck_no"))
+                    {
+                        int deckNo = deck["deck_no"].ToInt();
+                        if (deckNo > 0)
+                        {
+                            usedDeckNos.Add(deckNo);
+                        }
+                    }
+                }
+                catch
+                {
+                    // The normal loader reports malformed deck files with more context.
+                }
+            }
+
+            int nextDeckNo = usedDeckNos.Count == 0 ? 1 : usedDeckNos.Max() + 1;
+            foreach (string sourceFile in files.OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    JsonData deck = JsonMapper.ToObject(File.ReadAllText(sourceFile));
+                    if (!deck.IsObject || !deck.Keys.Contains("deck_no"))
+                    {
+                        continue;
+                    }
+
+                    int deckNo = deck["deck_no"].ToInt();
+                    if (deckNo <= 0)
+                    {
+                        continue;
+                    }
+
+                    string targetFile = GetDeckPath(deckNo);
+                    if (PathsEqual(sourceFile, targetFile))
+                    {
+                        continue;
+                    }
+
+                    if (!File.Exists(targetFile))
+                    {
+                        File.Move(sourceFile, targetFile);
+                        Plugin.Logger.LogInfo(
+                            $"[CustomFormats] Migrated deck file {Path.GetFileName(sourceFile)} " +
+                            $"to {Path.GetFileName(targetFile)}.");
+                        continue;
+                    }
+
+                    while (usedDeckNos.Contains(nextDeckNo) ||
+                        File.Exists(GetDeckPath(nextDeckNo)))
+                    {
+                        nextDeckNo++;
+                    }
+                    int previousDeckNo = deckNo;
+                    deckNo = nextDeckNo++;
+                    usedDeckNos.Add(deckNo);
+                    deck["deck_no"] = deckNo;
+                    targetFile = GetDeckPath(deckNo);
+                    File.WriteAllText(targetFile, deck.ToJson());
+                    File.Delete(sourceFile);
+                    Plugin.Logger.LogWarning(
+                        $"[CustomFormats] Deck number {previousDeckNo} was duplicated; " +
+                        $"preserved {Path.GetFileName(sourceFile)} as deck {deckNo}.");
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogError(
+                        $"[CustomFormats] Failed to migrate deck file {sourceFile}: {ex.Message}");
+                }
+            }
+        }
+
         internal static void MigrateLegacyModernDecks()
         {
             string sourceDirectory = Path.Combine(
@@ -21,6 +105,7 @@ namespace Shadowbus
 
             Directory.CreateDirectory(PathHelper.UnlimitedDeckPath);
             var usedDeckNos = new HashSet<int>();
+            var importedLegacyFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (string currentFile in EnumerateDeckFiles())
             {
                 try
@@ -29,6 +114,20 @@ namespace Shadowbus
                     if (current.IsObject && current.Keys.Contains("deck_no"))
                     {
                         usedDeckNos.Add(current["deck_no"].ToInt());
+                    }
+                    if (current.IsObject && current.Keys.Contains("legacy_source_file"))
+                    {
+                        importedLegacyFiles.Add(current["legacy_source_file"].ToString());
+                    }
+                    else if (Path.GetFileName(currentFile).StartsWith(
+                        "legacy_modern_",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        string sourceName = Path.GetFileName(currentFile)
+                            .Substring("legacy_modern_".Length);
+                        current["legacy_source_file"] = sourceName;
+                        File.WriteAllText(currentFile, current.ToJson());
+                        importedLegacyFiles.Add(sourceName);
                     }
                 }
                 catch
@@ -42,9 +141,14 @@ namespace Shadowbus
                 "*.json",
                 SearchOption.TopDirectoryOnly))
             {
+                string sourceName = Path.GetFileName(sourceFile);
+                if (importedLegacyFiles.Contains(sourceName))
+                {
+                    continue;
+                }
                 string targetFile = Path.Combine(
                     PathHelper.UnlimitedDeckPath,
-                    "legacy_modern_" + Path.GetFileName(sourceFile));
+                    "legacy_modern_" + sourceName);
                 if (File.Exists(targetFile))
                 {
                     continue;
@@ -68,8 +172,10 @@ namespace Shadowbus
                     }
                     deck["deck_no"] = deckNo;
                     deck["format_id"] = CustomFormats.ModernId;
+                    deck["legacy_source_file"] = sourceName;
                     File.WriteAllText(targetFile, deck.ToJson());
                     usedDeckNos.Add(deckNo);
+                    importedLegacyFiles.Add(sourceName);
                     Plugin.Logger.LogInfo(
                         $"[CustomFormats] Imported legacy Modern deck {sourceFile} " +
                         $"as deck {deckNo} in the shared Unlimited deck folder.");
@@ -86,6 +192,7 @@ namespace Shadowbus
         internal static JsonData LoadDeckList()
         {
             Directory.CreateDirectory(PathHelper.UnlimitedDeckPath);
+            MigrateLegacyDeckFilenames();
             var loadedDecks = new List<JsonData>();
             var existingDeckNos = new HashSet<int>();
             bool hasEmptyDeck = false;
@@ -122,42 +229,12 @@ namespace Shadowbus
                 }
 
                 string json = CreateEmptyDeckJson(deckNo);
-                string file = Path.Combine(PathHelper.UnlimitedDeckPath, $"deck_{deckNo}.json");
+                string file = GetDeckPath(deckNo);
                 File.WriteAllText(file, json);
                 loadedDecks.Add(JsonMapper.ToObject(json));
             }
 
             return ToDeckList(loadedDecks);
-        }
-
-        internal static JsonData LoadCompliantDeckList(CustomFormatDefinition definition)
-        {
-            JsonData filtered = new JsonData();
-            int rejected = 0;
-            foreach (JsonData deck in LoadDeckList().Cast<JsonData>())
-            {
-                JsonData cards = deck["card_id_array"];
-                if (cards.Count == 0)
-                {
-                    continue;
-                }
-                if (CustomFormats.IsDeckCompliant(deck, definition, out string reason))
-                {
-                    filtered.Add(deck);
-                }
-                else
-                {
-                    rejected++;
-                    Plugin.Logger.LogInfo(
-                        $"[CustomFormats] Excluded deck {deck["deck_no"].ToInt()} from " +
-                        $"{definition.Id}: {reason}.");
-                }
-            }
-
-            Plugin.Logger.LogInfo(
-                $"[CustomFormats] Room format {definition.Id}: " +
-                $"accepted={filtered.Count}, rejected={rejected}.");
-            return filtered;
         }
 
         internal static IEnumerable<string> EnumerateDeckFiles()
@@ -167,6 +244,40 @@ namespace Shadowbus
                 PathHelper.UnlimitedDeckPath,
                 "*.json",
                 SearchOption.TopDirectoryOnly);
+        }
+
+        internal static string GetDeckPath(int deckNo)
+        {
+            if (deckNo <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(deckNo));
+            }
+            return Path.Combine(PathHelper.UnlimitedDeckPath, $"deck_{deckNo}.json");
+        }
+
+        internal static void SaveDeck(JsonData deck, string previousPath = null)
+        {
+            if (deck == null || !deck.IsObject || !deck.Keys.Contains("deck_no"))
+            {
+                throw new InvalidDataException("Cannot save a deck without deck_no.");
+            }
+
+            string targetPath = GetDeckPath(deck["deck_no"].ToInt());
+            File.WriteAllText(targetPath, deck.ToJson());
+            if (!string.IsNullOrEmpty(previousPath) &&
+                !PathsEqual(previousPath, targetPath) &&
+                File.Exists(previousPath))
+            {
+                File.Delete(previousPath);
+            }
+        }
+
+        private static bool PathsEqual(string left, string right)
+        {
+            return string.Equals(
+                Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar),
+                Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase);
         }
 
         internal static string GetDeckFormatId(int deckNo)

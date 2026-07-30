@@ -72,6 +72,12 @@ public class Plugin : BaseUnityPlugin
             Harmony.CreateAndPatchAll(typeof(StoryOfflinePatches));
             Harmony.CreateAndPatchAll(typeof(LanguageVoicePatches));
             Harmony.CreateAndPatchAll(typeof(DeckFormatUI));
+            Harmony.CreateAndPatchAll(typeof(LocalDeckCodePatches));
+            var deckFormatRulesHarmony =
+                Harmony.CreateAndPatchAll(typeof(CustomFormatDeckEditRules));
+            Logger.LogInfo(
+                $"[CustomFormats] Deck edit rule registration complete: " +
+                $"{deckFormatRulesHarmony.GetPatchedMethods().Count()} game method(s) patched.");
             Harmony.CreateAndPatchAll(typeof(P2PPatches));
 
         }

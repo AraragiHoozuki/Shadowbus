@@ -39,11 +39,14 @@ namespace Shadowbus
             WriteDefaultIfMissing(CreateModernDefinition());
             Reload();
             CustomDeckStore.MigrateLegacyModernDecks();
+            CustomDeckStore.MigrateLegacyDeckFilenames();
         }
 
         internal static void Reload()
         {
-            Definitions.Clear();
+            Dictionary<string, CustomFormatDefinition> loadedDefinitions =
+                new Dictionary<string, CustomFormatDefinition>(
+                    StringComparer.OrdinalIgnoreCase);
             foreach (string file in Directory.GetFiles(
                 PathHelper.FormatPath,
                 "*.json",
@@ -55,7 +58,7 @@ namespace Shadowbus
                         File.ReadAllText(file),
                         FileJsonSettings);
                     definition = Normalize(definition);
-                    Definitions[definition.Id] = definition;
+                    loadedDefinitions[definition.Id] = definition;
                 }
                 catch (Exception ex)
                 {
@@ -64,11 +67,38 @@ namespace Shadowbus
                 }
             }
 
-            EnsureBuiltInDefinition(CreateUnlimitedDefinition());
-            EnsureBuiltInDefinition(CreateModernDefinition());
+            EnsureBuiltInDefinition(
+                loadedDefinitions,
+                CreateUnlimitedDefinition());
+            EnsureBuiltInDefinition(
+                loadedDefinitions,
+                CreateModernDefinition());
+            Definitions.Clear();
+            foreach (KeyValuePair<string, CustomFormatDefinition> item in loadedDefinitions)
+            {
+                Definitions[item.Key] = item.Value;
+            }
             Plugin.Logger.LogInfo(
                 $"[CustomFormats] Loaded {Definitions.Count} format definition(s) from " +
                 $"{PathHelper.FormatPath}.");
+        }
+
+        internal static bool ReloadForUi(string uiName)
+        {
+            try
+            {
+                Reload();
+                Plugin.Logger.LogInfo(
+                    $"[CustomFormats] Reloaded format files for {uiName}.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError(
+                    $"[CustomFormats] Failed to reload format files for {uiName}; " +
+                    $"keeping the current definitions: {ex}");
+                return false;
+            }
         }
 
         internal static CustomFormatDefinition Get(string id)
@@ -143,75 +173,138 @@ namespace Shadowbus
             out string reason)
         {
             definition = definition ?? Unlimited;
+            bool needsCardData = definition.SameCardLimit.HasValue ||
+                definition.TokenCardTotalLimit.HasValue ||
+                definition.TokenSameCardLimit.HasValue ||
+                (definition.CardLimits != null && definition.CardLimits.Count > 0);
+            bool compliant = IsDeckCompliant(
+                cardIds,
+                definition,
+                needsCardData ? CardMaster.GetInstanceForBattle() : null,
+                out CustomFormatViolation violation);
+            reason = violation?.ToLogMessage();
+            return compliant;
+        }
+
+        internal static bool IsDeckCompliant(
+            IEnumerable<int> cardIds,
+            CustomFormatDefinition definition,
+            CardMaster cardMaster,
+            out CustomFormatViolation violation)
+        {
+            definition = definition ?? Unlimited;
             List<int> cards = cardIds?.ToList() ?? new List<int>();
             if (definition.DeckSizeLimit.HasValue &&
                 cards.Count > definition.DeckSizeLimit.Value)
             {
-                reason = $"deck size {cards.Count} exceeds {definition.DeckSizeLimit.Value}";
+                violation = new CustomFormatViolation(
+                    CustomFormatRule.DeckSize,
+                    0,
+                    cards.Count,
+                    definition.DeckSizeLimit.Value);
                 return false;
             }
 
-            Dictionary<int, int> counts = cards
-                .GroupBy(cardId => cardId)
-                .ToDictionary(group => group.Key, group => group.Count());
-            bool needsTokenData = definition.TokenCardTotalLimit.HasValue ||
-                definition.TokenSameCardLimit.HasValue;
-            CardMaster cardMaster = needsTokenData ? CardMaster.GetInstanceForBattle() : null;
-            if (needsTokenData && cardMaster == null)
+            bool needsCardData = definition.SameCardLimit.HasValue ||
+                definition.TokenCardTotalLimit.HasValue ||
+                definition.TokenSameCardLimit.HasValue ||
+                (definition.CardLimits != null && definition.CardLimits.Count > 0);
+            if (!needsCardData)
             {
-                reason = "card master is unavailable for token validation";
+                violation = null;
+                return true;
+            }
+            if (cardMaster == null)
+            {
+                violation = new CustomFormatViolation(
+                    CustomFormatRule.CardDataUnavailable,
+                    0,
+                    0,
+                    0);
                 return false;
             }
 
-            int tokenTotal = 0;
-            foreach (KeyValuePair<int, int> item in counts)
+            var resolvedCards = new List<KeyValuePair<int, CardParameter>>(cards.Count);
+            foreach (int cardId in cards)
             {
-                CardParameter parameter = needsTokenData
-                    ? cardMaster.GetCardParameterFromId(item.Key)
-                    : null;
-                if (needsTokenData && parameter == null)
+                CardParameter parameter = cardMaster.GetCardParameterFromId(cardId);
+                if (parameter == null)
                 {
-                    reason = $"card {item.Key} is missing from the card master";
+                    violation = new CustomFormatViolation(
+                        CustomFormatRule.CardDataUnavailable,
+                        cardId,
+                        0,
+                        0);
                     return false;
                 }
+                resolvedCards.Add(
+                    new KeyValuePair<int, CardParameter>(cardId, parameter));
+            }
 
-                bool isToken = parameter != null && parameter.IsTokenCard;
-                if (isToken)
+            Dictionary<int, int> individualLimits = new Dictionary<int, int>();
+            foreach (KeyValuePair<int, int> item in
+                definition.CardLimits ?? new Dictionary<int, int>())
+            {
+                CardParameter parameter = cardMaster.GetCardParameterFromId(item.Key);
+                int baseCardId = parameter?.BaseCardId ?? item.Key;
+                if (!individualLimits.TryGetValue(baseCardId, out int currentLimit) ||
+                    item.Value < currentLimit)
                 {
-                    tokenTotal += item.Value;
-                }
-
-                int? limit = null;
-                if (definition.CardLimits != null &&
-                    definition.CardLimits.TryGetValue(item.Key, out int cardLimit))
-                {
-                    limit = cardLimit;
-                }
-                else if (isToken && definition.TokenSameCardLimit.HasValue)
-                {
-                    limit = definition.TokenSameCardLimit;
-                }
-                else
-                {
-                    limit = definition.SameCardLimit;
-                }
-
-                if (limit.HasValue && item.Value > limit.Value)
-                {
-                    reason = $"card {item.Key} count {item.Value} exceeds {limit.Value}";
-                    return false;
+                    individualLimits[baseCardId] = item.Value;
                 }
             }
 
+            int tokenTotal = resolvedCards.Count(item => item.Value.IsTokenCard);
             if (definition.TokenCardTotalLimit.HasValue &&
                 tokenTotal > definition.TokenCardTotalLimit.Value)
             {
-                reason = $"token card count {tokenTotal} exceeds " +
-                    definition.TokenCardTotalLimit.Value;
+                violation = new CustomFormatViolation(
+                    CustomFormatRule.TokenCardTotal,
+                    0,
+                    tokenTotal,
+                    definition.TokenCardTotalLimit.Value);
                 return false;
             }
 
-            reason = null;
+            foreach (IGrouping<int, KeyValuePair<int, CardParameter>> group in
+                resolvedCards.GroupBy(item => item.Value.BaseCardId))
+            {
+                int count = group.Count();
+                int baseCardId = group.Key;
+                bool isToken = group.First().Value.IsTokenCard;
+                if (individualLimits.TryGetValue(baseCardId, out int individualLimit) &&
+                    count > individualLimit)
+                {
+                    violation = new CustomFormatViolation(
+                        CustomFormatRule.IndividualCard,
+                        baseCardId,
+                        count,
+                        individualLimit);
+                    return false;
+                }
+                if (isToken && definition.TokenSameCardLimit.HasValue &&
+                    count > definition.TokenSameCardLimit.Value)
+                {
+                    violation = new CustomFormatViolation(
+                        CustomFormatRule.TokenSameCard,
+                        baseCardId,
+                        count,
+                        definition.TokenSameCardLimit.Value);
+                    return false;
+                }
+                if (!isToken && definition.SameCardLimit.HasValue &&
+                    count > definition.SameCardLimit.Value)
+                {
+                    violation = new CustomFormatViolation(
+                        CustomFormatRule.SameCard,
+                        baseCardId,
+                        count,
+                        definition.SameCardLimit.Value);
+                    return false;
+                }
+            }
+
+            violation = null;
             return true;
         }
 
@@ -228,11 +321,13 @@ namespace Shadowbus
                 new UTF8Encoding(false));
         }
 
-        private static void EnsureBuiltInDefinition(CustomFormatDefinition fallback)
+        private static void EnsureBuiltInDefinition(
+            IDictionary<string, CustomFormatDefinition> definitions,
+            CustomFormatDefinition fallback)
         {
-            if (!Definitions.ContainsKey(fallback.Id))
+            if (!definitions.ContainsKey(fallback.Id))
             {
-                Definitions[fallback.Id] = fallback;
+                definitions[fallback.Id] = fallback;
             }
         }
 
@@ -303,6 +398,96 @@ namespace Shadowbus
                 DisplayName = "\u6469\u767b\u8d5b\u5236",
                 TokenCardTotalLimit = 10
             };
+        }
+    }
+
+    internal enum CustomFormatRule
+    {
+        DeckSize,
+        SameCard,
+        TokenCardTotal,
+        TokenSameCard,
+        IndividualCard,
+        CardDataUnavailable
+    }
+
+    internal sealed class CustomFormatViolation
+    {
+        internal CustomFormatViolation(
+            CustomFormatRule rule,
+            int cardId,
+            int actualCount,
+            int limit)
+        {
+            Rule = rule;
+            CardId = cardId;
+            ActualCount = actualCount;
+            Limit = limit;
+        }
+
+        internal CustomFormatRule Rule { get; }
+        internal int CardId { get; }
+        internal int ActualCount { get; }
+        internal int Limit { get; }
+
+        internal string ToLogMessage()
+        {
+            switch (Rule)
+            {
+                case CustomFormatRule.DeckSize:
+                    return $"deck size {ActualCount} exceeds {Limit}";
+                case CustomFormatRule.TokenCardTotal:
+                    return $"token card count {ActualCount} exceeds {Limit}";
+                case CustomFormatRule.CardDataUnavailable:
+                    return CardId > 0
+                        ? $"card {CardId} is missing from the card master"
+                        : "card master is unavailable for format validation";
+                default:
+                    return $"card {CardId} count {ActualCount} exceeds {Limit}";
+            }
+        }
+    }
+
+    internal static class CustomFormatViolationText
+    {
+        internal static string Describe(
+            CustomFormatViolation violation,
+            CardMaster cardMaster)
+        {
+            if (violation == null)
+            {
+                return string.Empty;
+            }
+
+            switch (violation.Rule)
+            {
+                case CustomFormatRule.DeckSize:
+                    return $"卡组最多只能放入 {violation.Limit} 张卡牌。";
+                case CustomFormatRule.SameCard:
+                    return
+                        $"同名卡牌「{GetCardName(cardMaster, violation.CardId)}」" +
+                        $"最多只能放入 {violation.Limit} 张。";
+                case CustomFormatRule.TokenCardTotal:
+                    return $"Token 卡牌总数最多只能为 {violation.Limit} 张。";
+                case CustomFormatRule.TokenSameCard:
+                    return
+                        $"同名 Token 卡牌「{GetCardName(cardMaster, violation.CardId)}」" +
+                        $"最多只能放入 {violation.Limit} 张。";
+                case CustomFormatRule.IndividualCard:
+                    return
+                        $"卡牌「{GetCardName(cardMaster, violation.CardId)}」" +
+                        $"最多只能放入 {violation.Limit} 张。";
+                default:
+                    return "暂时无法读取卡牌数据，请稍后重试。";
+            }
+        }
+
+        private static string GetCardName(CardMaster cardMaster, int cardId)
+        {
+            CardParameter parameter = cardMaster?.GetCardParameterFromId(cardId);
+            return string.IsNullOrEmpty(parameter?.CardName)
+                ? cardId.ToString()
+                : parameter.CardName;
         }
     }
 
