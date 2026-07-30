@@ -22,9 +22,6 @@ namespace Shadowbus
         private static bool BuildLocalPracticeDeckPages;
         private static readonly HashSet<int> LocalPracticeDeckUiIds = new HashSet<int>();
         private static List<int> LocalPracticeRetryEnemyDeck;
-        private static CustomFormatContextKind PendingCustomFormatTabs;
-        private static string PendingCustomFormatId;
-        private static bool PendingCustomFormatAllowCreateNew;
 
         #region GameStart
         [HarmonyPatch(typeof(AssetManager), nameof(AssetManager.InitializeManifest))]
@@ -350,20 +347,17 @@ namespace Shadowbus
 
         public static void LoadLocalUnlimitedDecks(LoadDetail __instance)
         {
-            LoadLocalDecks(__instance, CustomFormats.Unlimited);
+            LoadLocalDecks(__instance);
         }
 
-        internal static void LoadLocalDecks(
-            LoadDetail loadDetail,
-            CustomFormatDefinition definition)
+        internal static void LoadLocalDecks(LoadDetail loadDetail)
         {
             if (loadDetail == null)
             {
                 return;
             }
 
-            // Custom formats deliberately use Unlimited only as the game's data/API carrier.
-            loadDetail.UserDeckListUnlimited = CustomDeckStore.LoadDeckList(definition);
+            loadDetail.UserDeckListUnlimited = CustomDeckStore.LoadDeckList();
             if (Data.Master.isMasterDataLoaded)
             {
                 DeckListUtility.SetDeckListDataWithLodeIndex();
@@ -384,11 +378,10 @@ namespace Shadowbus
                     return;
                 }
 
-                CustomFormatDefinition definition = CustomFormatContext.DeckListFormat;
-                LoadLocalDecks(loadDetail, definition);
+                LoadLocalDecks(loadDetail);
                 response["data"]["user_deck_list"] = loadDetail.UserDeckListUnlimited;
                 Plugin.Logger.LogInfo(
-                    $"[CustomFormats] Loaded {definition.Id} decks for the deck list.");
+                    "[CustomFormats] Loaded shared Unlimited decks for the deck list.");
             }
             catch (Exception ex)
             {
@@ -411,10 +404,14 @@ namespace Shadowbus
                     return;
                 }
 
-                CustomFormatDefinition source = P2PRuntime.IsActive
-                    ? CustomFormats.Get(P2PRuntime.Rules?.CustomFormatId)
-                    : CustomFormats.Unlimited;
-                LoadLocalDecks(loadDetail, source);
+                LoadLocalDecks(loadDetail);
+                if (P2PRuntime.IsActive)
+                {
+                    CustomFormatDefinition roomFormat = CustomFormats.Get(
+                        P2PRuntime.Rules?.CustomFormatId);
+                    loadDetail.UserDeckListUnlimited =
+                        CustomDeckStore.LoadCompliantDeckList(roomFormat);
+                }
                 JsonData data = responseData["data"];
                 if (__instance._format == Format.All)
                 {
@@ -604,12 +601,11 @@ namespace Shadowbus
                     return;
                 }
 
-                CustomFormatDefinition definition = CustomFormatContext.SelectionFormat;
-                LoadLocalDecks(loadDetail, definition);
+                LoadLocalDecks(loadDetail);
                 responseData["data"]["user_deck_unlimited"] = loadDetail.UserDeckListUnlimited;
                 Plugin.Logger.LogInfo(
                     $"[Offlinizer] Injected {loadDetail.UserDeckListUnlimited.Count} local decks " +
-                    $"from {definition.Id} into the practice retry deck list.");
+                    "into the practice retry deck list.");
             }
             catch (Exception ex)
             {
@@ -679,9 +675,6 @@ namespace Shadowbus
             ref bool isVisibleCreateNew,
             ref DeckSelectUI.InitOptions initOptions)
         {
-            PendingCustomFormatTabs = CustomFormatContextKind.None;
-            PendingCustomFormatId = null;
-            PendingCustomFormatAllowCreateNew = false;
             bool isLocalPractice = ForceLocalPracticeDeckDialog;
             bool isP2PRoom = P2PRuntime.IsActive;
             bool isStory = !isP2PRoom && !isLocalPractice &&
@@ -714,7 +707,6 @@ namespace Shadowbus
                 if (isP2PRoom)
                 {
                     CustomFormatContext.RoomFormatId = P2PRuntime.Rules?.CustomFormatId;
-                    CustomFormatContext.SelectionFormatId = CustomFormatContext.RoomFormatId;
                     CustomFormatDefinition roomDefinition = CustomFormatContext.RoomFormat;
                     Format format = ResolveP2PDeckFormat(defaultFormat);
                     deckGroupListData = MergeLocalCustomDeckGroup(
@@ -745,32 +737,22 @@ namespace Shadowbus
                 }
                 else
                 {
-                    CustomFormatDefinition definition = CustomFormatContext.SelectionFormat;
-                    LoadLocalDecks(loadDetail, definition);
+                    LoadLocalDecks(loadDetail);
                     DeckGroup localUnlimitedGroup = DeckListUtility.CreateDeckGroup(
                         loadDetail.UserDeckListUnlimited,
-                        definition.BaseGameFormat,
+                        Format.Unlimited,
                         DeckAttributeType.CustomDeck);
                     deckGroupListData = new DeckGroupListData(localUnlimitedGroup);
-                    defaultFormat = definition.BaseGameFormat;
+                    defaultFormat = Format.Unlimited;
                     formatChangeUIType = DeckSelectUIDialog.eFormatChangeUIType.SingleFormat;
-                    PendingCustomFormatTabs = isStory
-                        ? CustomFormatContextKind.Story
-                        : CustomFormatContextKind.Practice;
-                    PendingCustomFormatId = definition.Id;
-                    PendingCustomFormatAllowCreateNew = isVisibleCreateNew;
-                    if (definition.Id != CustomFormats.UnlimitedId)
-                    {
-                        isVisibleCreateNew = false;
-                    }
                     if (isLocalPractice)
                     {
                         ForceLocalPracticeDeckUi = true;
                     }
 
                     Plugin.Logger.LogInfo(
-                        $"[CustomFormats] Opening {PendingCustomFormatTabs} deck dialog with " +
-                        $"{localUnlimitedGroup.DeckDataList.Count} {definition.Id} decks.");
+                        "[CustomFormats] Opening shared Unlimited deck dialog with " +
+                        $"{localUnlimitedGroup.DeckDataList.Count} decks.");
                 }
             }
             catch (Exception ex)
@@ -782,35 +764,18 @@ namespace Shadowbus
             }
         }
 
-        [HarmonyPatch(typeof(DeckSelectUIDialog), nameof(DeckSelectUIDialog.Create))]
-        [HarmonyPostfix]
-        public static void DeckSelectUIDialog_Create_Postfix(DeckSelectUIDialog __result)
-        {
-            CustomFormatContextKind context = PendingCustomFormatTabs;
-            string formatId = PendingCustomFormatId;
-            bool allowCreateNew = PendingCustomFormatAllowCreateNew;
-            PendingCustomFormatTabs = CustomFormatContextKind.None;
-            PendingCustomFormatId = null;
-            PendingCustomFormatAllowCreateNew = false;
-            if (context == CustomFormatContextKind.None || __result == null)
-            {
-                return;
-            }
-
-            __result._isVisibleCreateNew = allowCreateNew;
-            CustomFormatDeckTabs.Attach(__result, context, formatId, allowCreateNew);
-        }
-
         private static DeckGroupListData MergeLocalCustomDeckGroup(
             DeckGroupListData existing,
             Format format,
             out DeckGroup localGroup)
         {
             LoadDetail loadDetail = Data.Load.data;
-            CustomFormatDefinition definition = P2PRuntime.IsActive
-                ? CustomFormats.Get(P2PRuntime.Rules?.CustomFormatId)
-                : CustomFormats.Unlimited;
-            LoadLocalDecks(loadDetail, definition);
+            LoadLocalDecks(loadDetail);
+            if (P2PRuntime.IsActive)
+            {
+                loadDetail.UserDeckListUnlimited = CustomDeckStore.LoadCompliantDeckList(
+                    CustomFormats.Get(P2PRuntime.Rules?.CustomFormatId));
+            }
             JsonData localDecks = GetLocalDeckList(loadDetail, format);
             if (localDecks == null)
             {
@@ -981,13 +946,12 @@ namespace Shadowbus
         [HarmonyPrefix]
         public static void DeckDeleteTask_Parse_Prefix(DeckDeleteTask __instance)
         {
-            CustomFormatDefinition definition = CustomFormatContext.DeckListFormat;
             DeckDeleteTask.DeckDeleteTaskParam parameters =
                 __instance.Params as DeckDeleteTask.DeckDeleteTaskParam;
             var deletedDeckNos = new HashSet<int>(
                 parameters?.deck_no_list ?? Array.Empty<int>());
 
-            foreach (string file in CustomDeckStore.EnumerateDeckFiles(definition).ToList())
+            foreach (string file in CustomDeckStore.EnumerateDeckFiles().ToList())
             {
                 try
                 {
@@ -1000,25 +964,24 @@ namespace Shadowbus
                 catch (Exception ex)
                 {
                     Plugin.Logger.LogError(
-                        $"[CustomFormats] Failed to delete {definition.Id} deck {file}: {ex.Message}");
+                        $"[CustomFormats] Failed to delete deck {file}: {ex.Message}");
                 }
             }
 
-            InjectEditedDeckListResponse(__instance.ResponseData, definition);
+            InjectEditedDeckListResponse(__instance.ResponseData);
         }
 
         [HarmonyPatch(typeof(DeckOrderTask), nameof(DeckOrderTask.Parse))]
         [HarmonyPrefix]
         public static void DeckOrderTask_Parse_Prefix(DeckOrderTask __instance)
         {
-            CustomFormatDefinition definition = CustomFormatContext.DeckListFormat;
             DeckOrderTask.DeckOrderTaskParam parameters =
                 __instance.Params as DeckOrderTask.DeckOrderTaskParam;
             var orderByDeckNo = (parameters?.deck_order ?? Array.Empty<int>())
                 .Select((deckNo, index) => new { deckNo, order = index + 1 })
                 .ToDictionary(item => item.deckNo, item => item.order);
 
-            foreach (string file in CustomDeckStore.EnumerateDeckFiles(definition).ToList())
+            foreach (string file in CustomDeckStore.EnumerateDeckFiles().ToList())
             {
                 try
                 {
@@ -1032,23 +995,21 @@ namespace Shadowbus
                 catch (Exception ex)
                 {
                     Plugin.Logger.LogError(
-                        $"[CustomFormats] Failed to reorder {definition.Id} deck {file}: {ex.Message}");
+                        $"[CustomFormats] Failed to reorder deck {file}: {ex.Message}");
                 }
             }
 
-            InjectEditedDeckListResponse(__instance.ResponseData, definition);
+            InjectEditedDeckListResponse(__instance.ResponseData);
         }
 
-        private static void InjectEditedDeckListResponse(
-            JsonData response,
-            CustomFormatDefinition definition)
+        private static void InjectEditedDeckListResponse(JsonData response)
         {
             if (response == null || !response.IsObject || !response.Keys.Contains("data"))
             {
                 return;
             }
 
-            JsonData decks = CustomDeckStore.LoadDeckList(definition);
+            JsonData decks = CustomDeckStore.LoadDeckList();
             response["data"]["user_deck_list"] = decks;
             if (Data.Load?.data != null)
             {
@@ -1067,8 +1028,7 @@ namespace Shadowbus
         public static bool DeckLeaderSkinUpdateTask_Parse_Prefix(DeckLeaderSkinUpdateTask __instance, ref int __result)
         {
             __result = __instance.resultCode = 1;
-            CustomFormatDefinition definition = CustomFormatContext.DeckListFormat;
-            CustomDeckStore.EnumerateDeckFiles(definition).ToList().ForEach(file =>
+            CustomDeckStore.EnumerateDeckFiles().ToList().ForEach(file =>
             {
                 try
                 {
@@ -1084,7 +1044,7 @@ namespace Shadowbus
                 }
                 catch (Exception ex)
                 {
-                    Plugin.Logger.LogError($"[CustomFormats] Failed to update {definition.Id} deck {file}: {ex.Message}");
+                    Plugin.Logger.LogError($"[CustomFormats] Failed to update deck {file}: {ex.Message}");
                 }
             });
             return false;
@@ -1100,8 +1060,7 @@ namespace Shadowbus
         public static bool DeckUpdateSleeveTask_Parse_Prefix(DeckUpdateSleeveTask __instance, ref int __result)
         {
             __result = __instance.resultCode = 1;
-            CustomFormatDefinition definition = CustomFormatContext.DeckListFormat;
-            CustomDeckStore.EnumerateDeckFiles(definition).ToList().ForEach(file =>
+            CustomDeckStore.EnumerateDeckFiles().ToList().ForEach(file =>
             {
                 try
                 {
@@ -1117,7 +1076,7 @@ namespace Shadowbus
                 }
                 catch (Exception ex)
                 {
-                    Plugin.Logger.LogError($"[CustomFormats] Failed to update {definition.Id} deck {file}: {ex.Message}");
+                    Plugin.Logger.LogError($"[CustomFormats] Failed to update deck {file}: {ex.Message}");
                 }
             });
             return false;
@@ -1127,8 +1086,7 @@ namespace Shadowbus
         public static bool DeckNameUpdateTask_Parse_Prefix(DeckNameUpdateTask __instance, ref int __result)
         {
             __result = __instance.resultCode = 1;
-            CustomFormatDefinition definition = CustomFormatContext.DeckListFormat;
-            CustomDeckStore.EnumerateDeckFiles(definition).ToList().ForEach(file =>
+            CustomDeckStore.EnumerateDeckFiles().ToList().ForEach(file =>
             {
                 try
                 {
@@ -1144,7 +1102,7 @@ namespace Shadowbus
                 }
                 catch (Exception ex)
                 {
-                    Plugin.Logger.LogError($"[CustomFormats] Failed to update {definition.Id} deck {file}: {ex.Message}");
+                    Plugin.Logger.LogError($"[CustomFormats] Failed to update deck {file}: {ex.Message}");
                 }
             });
             return false;
@@ -1154,8 +1112,7 @@ namespace Shadowbus
         public static bool DeckUpdateTask_Parse_Prefix(DeckUpdateTask __instance, ref int __result)
         {
             __result = __instance.resultCode = 1;
-            CustomFormatDefinition definition = CustomFormatContext.DeckListFormat;
-            CustomDeckStore.EnumerateDeckFiles(definition).ToList().ForEach(file =>
+            CustomDeckStore.EnumerateDeckFiles().ToList().ForEach(file =>
             {
                 try
                 {
@@ -1169,10 +1126,11 @@ namespace Shadowbus
                         if (parameters.is_delete == 1)
                         {
                             File.Delete(file);
-                            LoadLocalDecks(Data.Load.data, definition);
+                            LoadLocalDecks(Data.Load.data);
                         }
                         else if(parameters.card_id_array != null)
                         {
+                            data["format_id"] = CustomFormatContext.DeckEditFormatId;
                             if (parameters.class_id > 0)
                             {
                                 data["class_id"] = parameters.class_id;
@@ -1196,7 +1154,7 @@ namespace Shadowbus
                 }
                 catch (Exception ex)
                 {
-                    Plugin.Logger.LogError($"[CustomFormats] Failed to update {definition.Id} deck {file}: {ex.Message}");
+                    Plugin.Logger.LogError($"[CustomFormats] Failed to update deck {file}: {ex.Message}");
                 }
             });
             return false;

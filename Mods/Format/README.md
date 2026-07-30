@@ -1,0 +1,15 @@
+# 赛制文件
+
+每个 JSON 文件定义一个赛制。`null` 表示该项不限制，数值限制均为允许的最大数量。
+
+- `id`: 稳定的赛制 ID，只能使用小写英文字母、数字、`-` 和 `_`。
+- `displayName`: 游戏内显示名称。
+- `deckSizeLimit`: 卡组总张数限制。
+- `sameCardLimit`: 普通同名卡数量限制。
+- `tokenCardTotalLimit`: token 卡总数限制。
+- `tokenSameCardLimit`: 同名 token 卡数量限制。
+- `cardLimits`: 个别卡牌的数量限制，键为卡牌 ID，值为最大数量；它优先于总体同名卡限制。
+
+房主创建 P2P 房间时会把所选赛制的完整定义同步给访客。访客收到后会把同名赛制文件保存到自己的 `Mods/Format` 目录。
+
+所有玩家卡组仍保存在 `Mods/UnlimitedDecks`。卡组 JSON 中的 `format_id` 记录创建和编辑该卡组时使用的赛制；缺少此字段的旧卡组按 `unlimited` 处理。房间选牌时按卡组实际内容校验房主选择的赛制。

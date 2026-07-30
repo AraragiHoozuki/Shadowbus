@@ -1,0 +1,9 @@
+{
+  "id": "unlimited",
+  "displayName": "无限赛制",
+  "deckSizeLimit": null,
+  "sameCardLimit": null,
+  "tokenCardTotalLimit": null,
+  "tokenSameCardLimit": null,
+  "cardLimits": {}
+}

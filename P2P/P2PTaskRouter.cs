@@ -170,11 +170,14 @@ namespace Shadowbus
                     $"(received api={parameters.deck_format}, format={deckFormat}).");
             }
 
+            CustomFormatDefinition roomFormat = CustomFormats.Get(
+                CustomFormatContext.RoomFormatId);
             P2PRuntime.StartHosting(new P2PRoomRules
             {
                 BattleType = parameters.battle_type,
                 DeckFormat = parameters.deck_format,
-                CustomFormatId = CustomFormatContext.RoomFormatId,
+                CustomFormatId = roomFormat.Id,
+                FormatDefinition = roomFormat.Clone(),
                 TwoPickType = parameters.two_pick_type,
                 BattleRule = parameters.battle_rule,
                 InitialMaxLife = P2PRoomRules.DefaultInitialMaxLife,

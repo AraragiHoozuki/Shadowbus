@@ -1,0 +1,9 @@
+{
+  "id": "modern",
+  "displayName": "摩登赛制",
+  "deckSizeLimit": null,
+  "sameCardLimit": null,
+  "tokenCardTotalLimit": 10,
+  "tokenSameCardLimit": null,
+  "cardLimits": {}
+}

@@ -147,7 +147,9 @@ namespace Shadowbus
             Role = P2PRole.Host;
             IsActive = true;
             Rules = rules ?? new P2PRoomRules();
-            Rules.CustomFormatId = CustomFormats.Get(Rules.CustomFormatId).Id;
+            CustomFormatDefinition roomFormat = CustomFormats.Get(Rules.CustomFormatId);
+            Rules.CustomFormatId = roomFormat.Id;
+            Rules.FormatDefinition = roomFormat.Clone();
             CustomFormatContext.RoomFormatId = Rules.CustomFormatId;
             LocalProfile = CreateLocalProfile();
             RoomId = CreateNumericId();
@@ -639,10 +641,7 @@ namespace Shadowbus
                     }
                     RemoteProfile = message.Profile;
                     pendingOpponentSync = true;
-                    Rules = message.Rules ?? new P2PRoomRules();
-                    Rules.CustomFormatId = CustomFormats.Get(Rules.CustomFormatId).Id;
-                    CustomFormatContext.RoomFormatId = Rules.CustomFormatId;
-                    CustomFormatContext.SelectionFormatId = Rules.CustomFormatId;
+                    ApplyReceivedRoomRules(message.Rules);
                     BattleId = message.BattleId;
                     RoomId = message.Data != null && message.Data.TryGetValue("roomId", out object roomId)
                         ? roomId?.ToString() : BattleId;
@@ -658,9 +657,7 @@ namespace Shadowbus
                     {
                         return;
                     }
-                    Rules = message.Rules;
-                    Rules.CustomFormatId = CustomFormats.Get(Rules.CustomFormatId).Id;
-                    CustomFormatContext.RoomFormatId = Rules.CustomFormatId;
+                    ApplyReceivedRoomRules(message.Rules);
                     Plugin.Logger.LogInfo(
                         $"[P2P] Received room rule update: " +
                         $"format={Rules.CustomFormatId}; initialMaxLife={Rules.InitialMaxLife}.");
@@ -708,6 +705,30 @@ namespace Shadowbus
                         message.Error ?? "The room was closed by the other player.");
                     break;
             }
+        }
+
+        private static void ApplyReceivedRoomRules(P2PRoomRules receivedRules)
+        {
+            Rules = receivedRules ?? new P2PRoomRules();
+            CustomFormatDefinition definition = null;
+            if (Rules.FormatDefinition != null)
+            {
+                try
+                {
+                    definition = CustomFormats.InstallRoomDefinition(
+                        Rules.FormatDefinition.Clone());
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogError(
+                        "[P2P] Rejected the host's format definition: " + ex.Message);
+                }
+            }
+
+            definition = definition ?? CustomFormats.Get(Rules.CustomFormatId);
+            Rules.CustomFormatId = definition.Id;
+            Rules.FormatDefinition = definition.Clone();
+            CustomFormatContext.RoomFormatId = definition.Id;
         }
 
         private static void HandleServerEmit(bool sourceIsHost, Dictionary<string, object> data)

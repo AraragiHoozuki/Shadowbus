@@ -84,6 +84,16 @@ namespace Shadowbus
                 {
                     IsDeckOpen = true,
                     CustomFormatId = "modern",
+                    FormatDefinition = new CustomFormatDefinition
+                    {
+                        Id = "modern",
+                        DisplayName = "Modern",
+                        TokenCardTotalLimit = 10,
+                        CardLimits = new Dictionary<int, int>
+                        {
+                            [123456] = 1
+                        }
+                    },
                     InitialMaxLife = 137
                 },
                 Data = new Dictionary<string, object>
@@ -93,6 +103,10 @@ namespace Shadowbus
                 }
             };
             string json = Newtonsoft.Json.JsonConvert.SerializeObject(source, P2PJson.Settings);
+            Assert(json.Contains("\"deckSizeLimit\":null") &&
+                json.Contains("\"sameCardLimit\":null") &&
+                json.Contains("\"tokenSameCardLimit\":null"),
+                "Unlimited format fields were omitted from the wire snapshot.");
             P2PWireMessage decoded = P2PJson.DeserializeMessage(json);
             Assert(decoded.Type == "probe", "The wire-message type was not preserved.");
             Assert(decoded.Rules != null && decoded.Rules.IsDeckOpen,
@@ -101,6 +115,12 @@ namespace Shadowbus
                 "The initial maximum life room rule was not preserved.");
             Assert(decoded.Rules.CustomFormatId == "modern",
                 "The custom room format ID was not preserved.");
+            Assert(decoded.Rules.FormatDefinition != null &&
+                decoded.Rules.FormatDefinition.Id == "modern" &&
+                decoded.Rules.FormatDefinition.DeckSizeLimit == null &&
+                decoded.Rules.FormatDefinition.TokenCardTotalLimit == 10 &&
+                decoded.Rules.FormatDefinition.CardLimits[123456] == 1,
+                "The complete custom format definition was not preserved.");
             Assert(decoded.Data["number"] is int number && number == 42,
                 "A small JSON integer was not converted to Int32.");
             Assert(decoded.Data["items"] is List<object> items && items.Count == 3,
@@ -121,6 +141,8 @@ namespace Shadowbus
                 "A legacy room message did not use the initial life default.");
             Assert(legacy.Rules.CustomFormatId == "unlimited",
                 "A legacy room message did not use the Unlimited custom format default.");
+            Assert(legacy.Rules.FormatDefinition == null,
+                "A legacy room message unexpectedly created a format definition.");
 
             rules.InitialMaxLife = 19;
             Assert(rules.InitialMaxLife == 20,

@@ -6,6 +6,46 @@ using System.Globalization;
 
 namespace Shadowbus
 {
+    internal sealed class CustomFormatDefinition
+    {
+        [JsonProperty("id")]
+        public string Id { get; set; }
+
+        [JsonProperty("displayName")]
+        public string DisplayName { get; set; }
+
+        [JsonProperty("deckSizeLimit", NullValueHandling = NullValueHandling.Include)]
+        public int? DeckSizeLimit { get; set; }
+
+        [JsonProperty("sameCardLimit", NullValueHandling = NullValueHandling.Include)]
+        public int? SameCardLimit { get; set; }
+
+        [JsonProperty("tokenCardTotalLimit", NullValueHandling = NullValueHandling.Include)]
+        public int? TokenCardTotalLimit { get; set; }
+
+        [JsonProperty("tokenSameCardLimit", NullValueHandling = NullValueHandling.Include)]
+        public int? TokenSameCardLimit { get; set; }
+
+        [JsonProperty("cardLimits")]
+        public Dictionary<int, int> CardLimits { get; set; } = new Dictionary<int, int>();
+
+        internal CustomFormatDefinition Clone()
+        {
+            return new CustomFormatDefinition
+            {
+                Id = Id,
+                DisplayName = DisplayName,
+                DeckSizeLimit = DeckSizeLimit,
+                SameCardLimit = SameCardLimit,
+                TokenCardTotalLimit = TokenCardTotalLimit,
+                TokenSameCardLimit = TokenSameCardLimit,
+                CardLimits = CardLimits == null
+                    ? new Dictionary<int, int>()
+                    : new Dictionary<int, int>(CardLimits)
+            };
+        }
+    }
+
     internal enum P2PRole
     {
         None,
@@ -77,6 +117,9 @@ namespace Shadowbus
 
         [JsonProperty("customFormatId")]
         public string CustomFormatId { get; set; } = "unlimited";
+
+        [JsonProperty("formatDefinition", NullValueHandling = NullValueHandling.Ignore)]
+        public CustomFormatDefinition FormatDefinition { get; set; }
 
         [JsonProperty("twoPickType")]
         public int TwoPickType { get; set; }

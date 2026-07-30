@@ -268,9 +268,7 @@ namespace Shadowbus
             }
 
             GameMgr.GetIns().GetSoundMgr().PlaySe(Se.TYPE.SYS_COMMON_BUTTON, false);
-            List<CustomFormatDefinition> definitions = CustomFormats.All
-                .Where(definition => definition.Supports(CustomFormatContextKind.Room))
-                .ToList();
+            List<CustomFormatDefinition> definitions = CustomFormats.All.ToList();
             List<string> names = definitions.Select(definition => definition.DisplayName).ToList();
             int selectedIndex = Math.Max(
                 0,

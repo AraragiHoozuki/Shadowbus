@@ -71,7 +71,7 @@ public class Plugin : BaseUnityPlugin
             Harmony.CreateAndPatchAll(typeof(MirrorResidentEffectPatcher));
             Harmony.CreateAndPatchAll(typeof(StoryOfflinePatches));
             Harmony.CreateAndPatchAll(typeof(LanguageVoicePatches));
-            Harmony.CreateAndPatchAll(typeof(ModernDeckMenuUI));
+            Harmony.CreateAndPatchAll(typeof(DeckFormatUI));
             Harmony.CreateAndPatchAll(typeof(P2PPatches));
 
         }

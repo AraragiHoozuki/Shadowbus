@@ -90,8 +90,37 @@ namespace Shadowbus
         [HarmonyPrefix]
         public static bool FilterController_InitializeFilterForDeckEdit_Patch(FilterController __instance, ref ClassSet classSet)
         {
+            DeckCardAvailabilityFilter.Attach(__instance);
             classSet = new ClassSet(CardBasePrm.ClanType.ALL);
             return true;
+        }
+
+        [HarmonyPatch(typeof(FilterController), nameof(FilterController.Show))]
+        [HarmonyPostfix]
+        public static void FilterController_Show_Patch(FilterController __instance)
+        {
+            __instance.GetComponent<DeckCardAvailabilityFilter>()?.EnsureRowsCreated();
+        }
+
+        [HarmonyPatch(typeof(FilterController), nameof(FilterController.Reset))]
+        [HarmonyPrefix]
+        public static void FilterController_Reset_Patch(FilterController __instance)
+        {
+            __instance.GetComponent<DeckCardAvailabilityFilter>()?.ResetMode();
+        }
+
+        [HarmonyPatch(typeof(FilterController), nameof(FilterController.GetFilterParameter))]
+        [HarmonyPostfix]
+        public static void FilterController_GetFilterParameter_Patch(
+            FilterController __instance,
+            UIBase_CardManager.FilterParameter __result)
+        {
+            DeckCardAvailabilityFilter filter =
+                __instance.GetComponent<DeckCardAvailabilityFilter>();
+            if (filter != null)
+            {
+                DeckCardAvailabilityFilter.MarkParameter(__result, filter.Mode);
+            }
         }
 
         [HarmonyPatch(typeof(FilterController), "RemoveTokenCard")]
@@ -109,6 +138,58 @@ namespace Shadowbus
             filterParam.IsEnableResurgentCard = true;
             filterParam.DisableCardSetidList = [];
             return true;
+        }
+
+        [HarmonyPatch(typeof(UIBase_CardManager), nameof(UIBase_CardManager.SelectCardIDInConditionMask))]
+        [HarmonyPostfix]
+        public static void UIBase_CardManager_SelectCardIDInConditionMask_AvailabilityPatch(
+            IFormatBehavior formatBehaviour,
+            UIBase_CardManager.FilterParameter filterParam,
+            ref IList<int> __result)
+        {
+            DeckCardAvailabilityMode mode;
+            if (__result == null ||
+                !DeckCardAvailabilityFilter.TryGetParameterMode(filterParam, out mode) ||
+                mode == DeckCardAvailabilityMode.All)
+            {
+                return;
+            }
+
+            CardMaster cardMaster = CardMaster.GetInstance(formatBehaviour.CardMasterId);
+            List<int> filteredCardIds = new List<int>(__result.Count);
+            foreach (int cardId in __result)
+            {
+                CardParameter card = cardMaster.GetCardParameterFromId(cardId);
+                if (card == null)
+                {
+                    continue;
+                }
+
+                bool include = mode == DeckCardAvailabilityMode.Special
+                    ? card.IsTokenCard
+                    : !card.IsTokenCard;
+                if (include)
+                {
+                    filteredCardIds.Add(cardId);
+                }
+            }
+            __result = filteredCardIds;
+        }
+
+        [HarmonyPatch(
+            typeof(CardBundleControllerBase),
+            nameof(CardBundleControllerBase.FilterParameter),
+            MethodType.Setter)]
+        [HarmonyPostfix]
+        public static void CardBundleControllerBase_FilterParameter_Patch(
+            CardBundleControllerBase __instance,
+            UIBase_CardManager.FilterParameter __0)
+        {
+            DeckCardAvailabilityMode mode;
+            if (DeckCardAvailabilityFilter.TryGetParameterMode(__0, out mode))
+            {
+                __instance.InvalidateFilteredIdListCache();
+            }
         }
         [HarmonyPatch(typeof(CardParameter), nameof(CardParameter.IsAvailableFormat))]
         [HarmonyPrefix]
