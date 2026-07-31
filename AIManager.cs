@@ -64,6 +64,28 @@ namespace Shadowbus
             public int EnemyClassId;
         }
 
+        private sealed class CustomPracticeSession
+        {
+            public string DeckName;
+            public List<int> EnemyDeck;
+            public int EnemyClassId;
+            public int EnemyCharaId;
+            public int Difficulty;
+            public int LogicLevel;
+            public int MaxLife;
+            public int StyleId;
+            public int EmoteId;
+            public bool UseInnerEmote;
+            public int EnemyAIId;
+            public string DeckAIKey;
+            public string StyleAIKey;
+            public string EmoteAIKey;
+            public int DifficultyDegreeId;
+            public int FieldId;
+        }
+
+        private static CustomPracticeSession ActiveCustomPracticeSession;
+
         [HarmonyPatch(typeof(ClassSelectionPage), "CreateClassButton")]
         [HarmonyPostfix]
         public static void ClassSelectionPage_CreateClassButton_Postfix(ClassSelectionPage __instance)
@@ -285,6 +307,25 @@ namespace Shadowbus
                             dataMgr.PracticeDifficultyDegreeId = practiceData?.DegreeId ?? 0;
                             dataMgr.SetSoroPlay3DFieldID(fieldId);
                             dataMgr.Practice3DfieldId = fieldId;
+                            ActiveCustomPracticeSession = new CustomPracticeSession
+                            {
+                                DeckName = settings.Deck.GetDeckName(),
+                                EnemyDeck = deckCardIds.ToList(),
+                                EnemyClassId = classId,
+                                EnemyCharaId = settings.Leader.chara_id,
+                                Difficulty = -1,
+                                LogicLevel = settings.LogicLevel,
+                                MaxLife = settings.MaxLife,
+                                StyleId = settings.AIPreset.StyleId,
+                                EmoteId = settings.AIPreset.EmoteId,
+                                UseInnerEmote = true,
+                                EnemyAIId = -1,
+                                DeckAIKey = deckAIKey,
+                                StyleAIKey = styleAIKey,
+                                EmoteAIKey = emoteAIKey,
+                                DifficultyDegreeId = dataMgr.PracticeDifficultyDegreeId,
+                                FieldId = fieldId
+                            };
                             UIManager.GetInstance().closeInSceneCenterLoading(true, false);
 
                             Plugin.Logger.LogInfo(
@@ -327,6 +368,63 @@ namespace Shadowbus
                 UIManager.GetInstance().closeInSceneCenterLoading(true, false);
                 Plugin.Logger.LogError($"[AIManager] Failed to start the custom practice battle.\n{exception}");
                 ShowMessage("自定义练习", "启动对战失败，请查看 BepInEx 日志。");
+            }
+        }
+
+        internal static bool TryRestoreCustomPracticeForRetry(DataMgr dataMgr)
+        {
+            CustomPracticeSession session = ActiveCustomPracticeSession;
+            if (dataMgr == null || session == null ||
+                dataMgr.m_BattleType != DataMgr.BattleType.Practice ||
+                dataMgr.m_EnemyAIDeckId != int.MinValue)
+            {
+                return false;
+            }
+
+            try
+            {
+                // Rebuild the runtime library because battle teardown may have replaced
+                // its buffered setup. The local CSV assets remain registered in Master.
+                dataMgr.RegisterAllAIData();
+                dataMgr.SetEnemyCharaId(session.EnemyCharaId);
+                dataMgr.SetEnemyAIDeckFromCustomDeck(
+                    session.EnemyClassId,
+                    session.EnemyDeck.ToList(),
+                    session.Difficulty,
+                    session.LogicLevel,
+                    session.MaxLife,
+                    session.StyleId,
+                    session.EmoteId,
+                    session.UseInnerEmote,
+                    session.EnemyAIId);
+                dataMgr.m_AIDataLibrary.SaveBattleSetUpInfo(
+                    session.EnemyClassId,
+                    GetLogicLevel(session.LogicLevel),
+                    session.DeckAIKey,
+                    session.StyleAIKey,
+                    session.EmoteAIKey,
+                    true,
+                    session.UseInnerEmote,
+                    session.EnemyAIId,
+                    null);
+                dataMgr.PracticeDifficultyDegreeId = session.DifficultyDegreeId;
+                dataMgr.SetSoroPlay3DFieldID(session.FieldId);
+                dataMgr.Practice3DfieldId = session.FieldId;
+                dataMgr.LoadEnemyClassData();
+
+                Plugin.Logger.LogInfo(
+                    $"[AIManager] Restored custom practice for retry: " +
+                    $"deck='{session.DeckName}', class={session.EnemyClassId}, " +
+                    $"leader={session.EnemyCharaId}, logic={session.LogicLevel}, " +
+                    $"maxLife={session.MaxLife}, deckAI='{session.DeckAIKey}', " +
+                    $"styleAI='{session.StyleAIKey}', emoteAI='{session.EmoteAIKey}'.");
+                return true;
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogError(
+                    $"[AIManager] Failed to restore custom practice for retry.\n{exception}");
+                return false;
             }
         }
 

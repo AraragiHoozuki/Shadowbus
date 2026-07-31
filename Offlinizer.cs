@@ -565,6 +565,11 @@ namespace Shadowbus
                 return true;
             }
 
+            if (AIManager.TryRestoreCustomPracticeForRetry(__instance))
+            {
+                return false;
+            }
+
             if (LocalPracticeRetryEnemyDeck == null || LocalPracticeRetryEnemyDeck.Count == 0)
             {
                 Plugin.Logger.LogError(
@@ -573,6 +578,7 @@ namespace Shadowbus
             }
 
             __instance.SetCurrentEnemyDeckData(LocalPracticeRetryEnemyDeck.ToList());
+            AITestGlobal.AI_MAX_LIFE = __instance.m_EnemyAIMaxLife;
             Plugin.Logger.LogInfo(
                 $"[Offlinizer] Restored {LocalPracticeRetryEnemyDeck.Count} custom enemy cards " +
                 "for practice retry without resolving an invalid AI deck ID.");
