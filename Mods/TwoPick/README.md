@@ -34,18 +34,26 @@
 
 - `cardClasses`：允许进入该候选职业卡池的职业。它会替换默认的“本职业＋中立”。
   设置为空数组表示不自动加入任何职业的卡。
+- `displayName`：多职业候选面板显示的自定义名称。省略或设为 `null` 时显示候选
+  主战者原本的职业名称。
 - `additionalCards`：额外加入该候选职业卡池的卡牌 ID。即使卡牌职业未列入
   `cardClasses`，或卡牌不在全局 `cardPool` 中，也会加入。
 - `description`：点击该候选职业后显示的介绍文本；省略或设为 `null` 时使用原版文本。
 
+职业选择页会汇总该候选在所有抓牌轮次中实际可能出现的非中立职业。包含多个职业时，
+候选面板会复用原版混沌双选布局显示全部职业图标；`additionalCards` 和 `roundRules.cards`
+引入的额外职业也会计入。中立卡不会额外显示职业图标。
+
 ```json
 "classRules": {
   "1": {
+    "displayName": "精灵皇家混合",
     "cardClasses": [0, 1, 2],
     "additionalCards": [123456789],
     "description": "使用精灵、皇家与中立卡牌的混合卡池。"
   },
   "3": {
+    "displayName": "巫师龙族混合",
     "cardClasses": [3, 4],
     "additionalCards": [],
     "description": "使用巫师与龙族卡牌的混合卡池。"

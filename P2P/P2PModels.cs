@@ -104,6 +104,9 @@ namespace Shadowbus
 
     internal sealed class P2PTwoPickClassRuleDefinition
     {
+        [JsonProperty("displayName", NullValueHandling = NullValueHandling.Include)]
+        public string DisplayName { get; set; }
+
         [JsonProperty("cardClasses", NullValueHandling = NullValueHandling.Include)]
         public List<int> CardClasses { get; set; }
 
@@ -117,6 +120,7 @@ namespace Shadowbus
         {
             return new P2PTwoPickClassRuleDefinition
             {
+                DisplayName = DisplayName,
                 CardClasses = CardClasses == null
                     ? null
                     : new List<int>(CardClasses),

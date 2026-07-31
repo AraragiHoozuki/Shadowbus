@@ -81,6 +81,7 @@ public class Plugin : BaseUnityPlugin
                 $"{deckFormatRulesHarmony.GetPatchedMethods().Count()} game method(s) patched.");
             Harmony.CreateAndPatchAll(typeof(P2PPatches));
             Harmony.CreateAndPatchAll(typeof(P2PTwoPickClassDescriptionPatch));
+            Harmony.CreateAndPatchAll(typeof(P2PTwoPickClassIconPatch));
             Harmony.CreateAndPatchAll(typeof(P2PTwoPickDeckSizePatches));
             Harmony.CreateAndPatchAll(typeof(P2PTwoPickCompletionPatch));
 

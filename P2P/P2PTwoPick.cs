@@ -376,6 +376,9 @@ namespace Shadowbus
 
                 P2PTwoPickClassRuleDefinition classRule =
                     pair.Value?.Clone() ?? new P2PTwoPickClassRuleDefinition();
+                classRule.DisplayName = string.IsNullOrWhiteSpace(classRule.DisplayName)
+                    ? null
+                    : classRule.DisplayName.Trim();
                 if (classRule.CardClasses != null)
                 {
                     classRule.CardClasses = classRule.CardClasses
@@ -649,6 +652,47 @@ namespace Shadowbus
                 out P2PTwoPickClassRuleDefinition classRule)
                 ? classRule.Description
                 : null;
+        }
+
+        internal static string GetClassDisplayName(int classId)
+        {
+            P2PTwoPickRuleDefinition definition = ActiveRule;
+            return definition.ClassRules.TryGetValue(
+                classId,
+                out P2PTwoPickClassRuleDefinition classRule)
+                ? classRule.DisplayName
+                : null;
+        }
+
+        internal static List<int> GetPossibleCardClasses(int classId)
+        {
+            P2PTwoPickRuleDefinition definition = ActiveRule;
+            int roundCount = definition.FinalDeckSize / definition.CardsPerOffer;
+            CardMaster master = CardMaster.GetInstanceForBattle();
+            HashSet<int> classes = new HashSet<int>();
+            HashSet<int> checkedCards = new HashSet<int>();
+            for (int round = 1; round <= roundCount; round++)
+            {
+                foreach (int cardId in BuildCardPool(classId, round))
+                {
+                    if (!checkedCards.Add(cardId))
+                    {
+                        continue;
+                    }
+
+                    CardParameter parameter = master?.GetCardParameterFromId(cardId);
+                    int cardClassId = parameter == null ? 0 : (int)parameter.Clan;
+                    if (cardClassId >= 1 && cardClassId <= 8)
+                    {
+                        classes.Add(cardClassId);
+                    }
+                }
+            }
+
+            return classes
+                .OrderBy(id => id == classId ? 0 : 1)
+                .ThenBy(id => id)
+                .ToList();
         }
 
         private static bool IsUsableCard(CardParameter parameter, bool explicitPool)

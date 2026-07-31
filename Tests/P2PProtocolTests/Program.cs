@@ -202,6 +202,7 @@ namespace Shadowbus
                         {
                             [1] = new P2PTwoPickClassRuleDefinition
                             {
+                                DisplayName = "Forest and Sword",
                                 CardClasses = new List<int> { 0, 1, 2 },
                                 AdditionalCards = new List<int> { 1005 },
                                 Description = "Forest and Sword mix"
@@ -243,6 +244,9 @@ namespace Shadowbus
                 "The open-deck room rule was not preserved.");
             Assert(decoded.Rules.InitialMaxLife == 137,
                 "The initial maximum life room rule was not preserved.");
+            Assert(decoded.Rules.TwoPickRule.ClassRules[1].DisplayName ==
+                    "Forest and Sword",
+                "The Two Pick candidate display name was not preserved.");
             Assert(decoded.Rules.CustomFormatId == "modern",
                 "The custom room format ID was not preserved.");
             Assert(decoded.Rules.TwoPickRule != null &&
