@@ -10,7 +10,10 @@ using System.Reflection.Emit;
 using UnityEngine;
 using Wizard;
 using Wizard.Scenario2.Resource;
-using Wizard.Story.ChapterSelection.SelectionProcessing.Main;
+using BattleResultChapterCharaDecider = Wizard.Story.ChapterSelection.SelectionProcessing.BattleResult.ChapterCharaDecider;
+using BattleResultParameter = Wizard.Story.ChapterSelection.SelectionProcessing.BattleResult.Parameter;
+using MainChapterCharaDecider = Wizard.Story.ChapterSelection.SelectionProcessing.Main.ChapterCharaDecider;
+using MainParameter = Wizard.Story.ChapterSelection.SelectionProcessing.Main.Parameter;
 using ScenarioResourceManager = Wizard.Scenario2.Resource.ResourceManager;
 
 namespace Shadowbus
@@ -236,16 +239,104 @@ namespace Shadowbus
             return $"{chapterNumberText} {displayId}";
         }
 
-        [HarmonyPatch(typeof(ChapterCharaDecider), "GetChapterCharaId")]
+        [HarmonyPatch(typeof(MainChapterCharaDecider), "GetChapterCharaId")]
+        [HarmonyPrefix]
+        private static bool MainChapterCharaDecider_GetChapterCharaId_Prefix(
+            MainParameter param,
+            ref int? __result)
+        {
+            if (param?.DeckData == null || param.ChapterData == null)
+            {
+                return true;
+            }
+
+            BattleSettingData setting = ResolveDeckBattleSetting(
+                param.ChapterData,
+                param.DeckData,
+                "chapter start");
+            if (setting == null)
+            {
+                return true;
+            }
+
+            __result = setting.PlayerCharaId;
+            return false;
+        }
+
+        [HarmonyPatch(typeof(MainChapterCharaDecider), "GetChapterCharaId")]
         [HarmonyPostfix]
         private static void ChapterCharaDecider_GetChapterCharaId_Postfix(
-            Parameter param,
+            MainParameter param,
             ref int? __result)
         {
             if (__result == null && param?.ChapterData != null && param.ChapterData.CharaId != 0)
             {
                 __result = param.ChapterData.CharaId;
             }
+        }
+
+        [HarmonyPatch(typeof(BattleResultChapterCharaDecider), "GetChapterCharaId")]
+        [HarmonyPrefix]
+        private static bool BattleResultChapterCharaDecider_GetChapterCharaId_Prefix(
+            BattleResultParameter param,
+            ref int __result)
+        {
+            if (param?.DeckData == null || param.ChapterData == null)
+            {
+                return true;
+            }
+
+            BattleSettingData setting = ResolveDeckBattleSetting(
+                param.ChapterData,
+                param.DeckData,
+                "battle-result deck selection");
+            if (setting == null)
+            {
+                return true;
+            }
+
+            __result = setting.PlayerCharaId;
+            return false;
+        }
+
+        private static BattleSettingData ResolveDeckBattleSetting(
+            StoryChapterData chapterData,
+            DeckData deckData,
+            string context)
+        {
+            int deckSkinId = deckData.GetSkinId(false);
+            BattleSettingData setting =
+                chapterData.FindBattleSettingDataByDeckSkinId(deckSkinId);
+            if (setting != null)
+            {
+                return setting;
+            }
+
+            int deckClassId = deckData.GetDeckClassID();
+            setting = chapterData.FindBattleSettingDataByDeckClassId(deckClassId);
+            if (setting != null)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[Offlinizer] Story {context} could not match deck skin {deckSkinId}; " +
+                    $"using the chapter battle setting for class {deckClassId}.");
+                return setting;
+            }
+
+            setting = chapterData.BattleSettingDatas?.FirstOrDefault();
+            if (setting != null)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[Offlinizer] Story {context} could not match deck skin {deckSkinId} " +
+                    $"or class {deckClassId}; using the chapter's first battle setting.");
+            }
+            else
+            {
+                Plugin.Logger.LogError(
+                    $"[Offlinizer] Story {context} has no battle setting for deck " +
+                    $"skin {deckSkinId}, class {deckClassId}.");
+            }
+
+            return setting;
         }
 
         [HarmonyPatch(typeof(ScenarioTemporaryVoice), nameof(ScenarioTemporaryVoice.GetDownloadInfoCoroutine))]

@@ -734,6 +734,31 @@ namespace Shadowbus
                         $"[P2P] Room deck dialog primary page anchored to " +
                         $"'{primaryLocalDeck?.GetDeckName() ?? "<none>"}'.");
                 }
+                else if (isStory)
+                {
+                    // DeckSelectionDialog has already cloned the local story decks and
+                    // replaced their skin IDs with the chapter-compatible overrides.
+                    // Rebuilding the group here discards those overrides, so
+                    // ChapterCharaDecider cannot map the selected deck to battle data.
+                    defaultFormat = Format.Unlimited;
+                    formatChangeUIType = DeckSelectUIDialog.eFormatChangeUIType.SingleFormat;
+                    initOptions = initOptions ?? new DeckSelectUI.InitOptions();
+                    if (initOptions.PrimaryFirstDisplayDeck == null)
+                    {
+                        initOptions.PrimaryFirstDisplayDeck = deckGroupListData?.DeckGroupList?
+                            .Where(group => group.DeckFormat == Format.Unlimited &&
+                                group.AttributeType == DeckAttributeType.CustomDeck)
+                            .SelectMany(group => group.DeckDataList)
+                            .FirstOrDefault(deck => !deck.IsNoCard());
+                    }
+
+                    int storyDeckCount = deckGroupListData?.DeckGroupList?
+                        .SelectMany(group => group.DeckDataList)
+                        .Count(deck => !deck.IsNoCard()) ?? 0;
+                    Plugin.Logger.LogInfo(
+                        $"[Offlinizer] Preserved {storyDeckCount} chapter-compatible " +
+                        "local deck(s) for story selection.");
+                }
                 else
                 {
                     LoadLocalDecks(loadDetail);
