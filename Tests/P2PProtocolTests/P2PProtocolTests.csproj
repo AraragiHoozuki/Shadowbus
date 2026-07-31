@@ -18,6 +18,7 @@
     <Compile Include="..\..\P2P\P2PDisconnectPolicy.cs" Link="P2PDisconnectPolicy.cs" />
     <Compile Include="..\..\P2P\P2PDeliverySequence.cs" Link="P2PDeliverySequence.cs" />
     <Compile Include="..\..\P2P\P2PModels.cs" Link="P2PModels.cs" />
+    <Compile Include="..\..\P2P\P2PTwoPickRuleFiles.cs" Link="P2PTwoPickRuleFiles.cs" />
     <Compile Include="..\..\P2P\P2PRoomRoundState.cs" Link="P2PRoomRoundState.cs" />
     <Compile Include="..\..\P2P\P2PTransport.cs" Link="P2PTransport.cs" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />

@@ -10,6 +10,7 @@ using System.Linq;
 using System.Text;
 using UnityEngine;
 using Wizard;
+using Wizard.RoomMatch;
 using Wizard.Title;
 
 namespace Shadowbus
@@ -670,7 +671,8 @@ namespace Shadowbus
         {
             CustomFormats.ReloadForUi("deck selection");
             bool isLocalPractice = ForceLocalPracticeDeckDialog;
-            bool isP2PRoom = P2PRuntime.IsActive;
+            bool isP2PRoom = P2PRuntime.IsActive &&
+                RoomBase.GetInstance() != null;
             bool isStory = !isP2PRoom && !isLocalPractice &&
                 ForceLocalStoryDeckDialog;
             if (!isLocalPractice && !isP2PRoom && !isStory)

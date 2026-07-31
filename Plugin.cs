@@ -50,6 +50,7 @@ public class Plugin : BaseUnityPlugin
             p2pAdvertisedAddress.Value,
             p2pPort.Value);
         CustomFormats.Initialize();
+        P2PTwoPickRules.Initialize();
 
         try
         {
@@ -79,6 +80,9 @@ public class Plugin : BaseUnityPlugin
                 $"[CustomFormats] Deck edit rule registration complete: " +
                 $"{deckFormatRulesHarmony.GetPatchedMethods().Count()} game method(s) patched.");
             Harmony.CreateAndPatchAll(typeof(P2PPatches));
+            Harmony.CreateAndPatchAll(typeof(P2PTwoPickClassDescriptionPatch));
+            Harmony.CreateAndPatchAll(typeof(P2PTwoPickDeckSizePatches));
+            Harmony.CreateAndPatchAll(typeof(P2PTwoPickCompletionPatch));
 
         }
         catch (System.Exception exception)

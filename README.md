@@ -72,7 +72,7 @@ P2P 模式不提供账号服务、房间列表、STUN 打洞或 TURN 中继。�
 - `AdvertisedAddress`：写入连接码的地址。留空时优先使用明确配置的 `BindAddress`，否则自动选择一个同地址族的本机地址；跨公网或使用虚拟局域网时建议明确填写。使用 IPv6 时，两项都必须配置为 IPv6 地址。
 - `Port`：房主监听的 TCP 端口，默认 `29600`。设置为 `0` 会随机选择端口，不适合固定端口转发。
 
-目前仅支持普通构筑格式的 Open Room BO1，不支持 HOF、Windfall、Avatar、Two Pick、BO3/BO5、观战、断线重连、奖励和反作弊。战斗中断线时，仍在线的一方按断线胜利结算。每个游戏安装目录会在 `Mods/P2PIdentity.json` 保存独立玩家 ID，并在 `Mods/Profile.json` 保存玩家修改后的名称、称号、徽章和地区；不要把已经生成的身份文件复制给另一名玩家或第二个测试实例。
+目前支持普通构筑 Open Room BO1 和自定义规则的 Room Two Pick BO1；不支持 HOF、Windfall、Avatar、原版 Backdraft/Cube/Chaos Two Pick、BO3/BO5、观战、断线重连、奖励和反作弊。`Mods/TwoPick` 下每个 JSON 文件对应一个建房时可选的双选模式，`displayName` 是界面名称；双方分别在本地选牌，房主会把所选完整规则同步给访客，完成后再使用最终牌组进入匹配。战斗中断线时，仍在线的一方按断线胜利结算。每个游戏安装目录会在 `Mods/P2PIdentity.json` 保存独立玩家 ID，并在 `Mods/Profile.json` 保存玩家修改后的名称、称号、徽章和地区；不要把已经生成的身份文件复制给另一名玩家或第二个测试实例。
 
 ## 自定义练习
 

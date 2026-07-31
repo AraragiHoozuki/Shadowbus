@@ -262,7 +262,15 @@ namespace Shadowbus
             bool isTwoPick,
             bool isSelectBaseRule)
         {
-            if (!isTwoPick && !isSelectBaseRule)
+            if (isSelectBaseRule)
+            {
+                return;
+            }
+            if (isTwoPick)
+            {
+                ApplyFixedP2PTwoPickRule(setting);
+            }
+            else
             {
                 ApplyFixedP2PRoomRule(setting);
             }
@@ -273,9 +281,20 @@ namespace Shadowbus
         private static void RoomRuleSelectDialog_Start_Postfix(
             RoomRuleSelectDialog __instance)
         {
-            if (__instance == null || __instance._is2pick ||
-                RoomRuleSelectDialog._isSelectBaseRule)
+            if (__instance == null || RoomRuleSelectDialog._isSelectBaseRule)
             {
+                return;
+            }
+
+            if (__instance._is2pick)
+            {
+                ApplyFixedP2PTwoPickRule(__instance._setting);
+                __instance._normalRuleLabel.text = RoomRuleSetting.GetWinTypeString(
+                    RoomConnectController.BattleRule.Bo1);
+                __instance._twoPickLabel.text =
+                    P2PTwoPickRules.LoadSelected().DisplayName;
+                DisableRuleChangeButton(__instance._normalRuleChangeButton);
+                EnableRuleChangeButton(__instance._twoPickRuleChangeButton);
                 return;
             }
 
@@ -285,6 +304,62 @@ namespace Shadowbus
             __instance._formatLabel.text = CustomFormatContext.RoomFormat.DisplayName;
             DisableRuleChangeButton(__instance._normalRuleChangeButton);
             EnableRuleChangeButton(__instance._formatChangeButton);
+        }
+
+        [HarmonyPatch(typeof(RoomRuleSelectDialog), "OnPushBattleTypeButton")]
+        [HarmonyPrefix]
+        private static bool RoomRuleSelectDialog_OnPushBattleTypeButton_Prefix(
+            RoomRuleSelectDialog __instance)
+        {
+            if (__instance == null || !__instance._is2pick ||
+                RoomRuleSelectDialog._isSelectBaseRule)
+            {
+                return true;
+            }
+
+            GameMgr.GetIns().GetSoundMgr().PlaySe(Se.TYPE.SYS_COMMON_BUTTON, false);
+            List<P2PTwoPickRuleDefinition> definitions =
+                P2PTwoPickRules.LoadAll().ToList();
+            List<string> names = definitions
+                .Select(definition => definition.DisplayName)
+                .ToList();
+            int selectedIndex = Math.Max(
+                0,
+                definitions.FindIndex(definition => string.Equals(
+                    definition.Id,
+                    P2PTwoPickRules.SelectedRuleId,
+                    StringComparison.OrdinalIgnoreCase)));
+            int pendingIndex = selectedIndex;
+            __instance.SaveCurrentSetting();
+            DialogBase selector = null;
+            selector = DrumrollDialog.Create(
+                names,
+                selectedIndex,
+                index => pendingIndex = index,
+                null,
+                null,
+                string.Empty);
+            __instance._dialogSelf.SetDisp(false);
+            selector.SetTitleLabel(Data.SystemText.Get("RoomBattle_0094"));
+            selector.SetButtonLayout(DialogBase.ButtonLayout.DecisionBtn);
+            selector.onPushButton1 = () =>
+            {
+                P2PTwoPickRuleDefinition selected =
+                    P2PTwoPickRules.Select(definitions[pendingIndex].Id);
+                ApplyFixedP2PTwoPickRule(RoomRuleSelectDialog._settingSave);
+                RoomRuleSelectDialog.ReCreateDialog(RoomRuleSelectDialog._settingSave);
+                selector.SetDisp(false);
+                Plugin.Logger.LogInfo(
+                    $"[P2P] Selected Two Pick rule {selected.Id} " +
+                    $"('{selected.DisplayName}').");
+            };
+            selector.onCloseWithoutSelect = () =>
+            {
+                RoomRuleSelectDialog.ReCreateDialog(RoomRuleSelectDialog._settingSave);
+                selector.SetDisp(false);
+            };
+            selector.ResetBackViewAlpha();
+            return false;
         }
 
         [HarmonyPatch(typeof(RoomRuleSelectDialog), "OnClickFormatChangeButton")]
@@ -344,6 +419,15 @@ namespace Shadowbus
             BattleParameter battleParameter,
             ref string __result)
         {
+            if (P2PRuntime.IsActive &&
+                battleParameter?.BattleType == NetworkDefine.ServerBattleType.RoomTwoPick &&
+                P2PRuntime.Rules?.TwoPickRule != null)
+            {
+                __result = P2PRuntime.Rules.TwoPickRule.DisplayName + " " +
+                    RoomRuleSetting.GetWinTypeString(battleParameter.Rule);
+                return;
+            }
+
             CustomFormatDefinition definition = CustomFormatContext.RoomFormat;
             if (!P2PRuntime.IsActive ||
                 definition.Id == CustomFormats.UnlimitedId ||
@@ -388,8 +472,15 @@ namespace Shadowbus
         private static void RoomRuleSelectDialog_OnPushCreateButton_Prefix(
             RoomRuleSelectDialog __instance)
         {
-            if (__instance != null && !__instance._is2pick &&
-                !RoomRuleSelectDialog._isSelectBaseRule)
+            if (__instance == null || RoomRuleSelectDialog._isSelectBaseRule)
+            {
+                return;
+            }
+            if (__instance._is2pick)
+            {
+                ApplyFixedP2PTwoPickRule(__instance._setting);
+            }
+            else
             {
                 ApplyFixedP2PRoomRule(__instance._setting);
             }
@@ -410,6 +501,23 @@ namespace Shadowbus
             PlayerPrefsWrapper.SetValue(
                 PlayerPrefsWrapper.ROOM_MATCH_FORMAT,
                 (int)Format.Unlimited);
+            PlayerPrefsWrapper.SetValue(
+                PlayerPrefsWrapper.LAST_ROOM_MATCH_RULE,
+                (int)RoomConnectController.BattleRule.Bo1);
+        }
+
+        private static void ApplyFixedP2PTwoPickRule(RoomRuleSetting setting)
+        {
+            BattleParameter parameter = setting?.BattleParameterInstance;
+            if (parameter == null)
+            {
+                return;
+            }
+
+            parameter.BattleType = NetworkDefine.ServerBattleType.RoomTwoPick;
+            parameter.DeckFormat = Format.TwoPick;
+            parameter.TwoPickFormat = TwoPickFormat.Normal;
+            parameter.Rule = RoomConnectController.BattleRule.Bo1;
             PlayerPrefsWrapper.SetValue(
                 PlayerPrefsWrapper.LAST_ROOM_MATCH_RULE,
                 (int)RoomConnectController.BattleRule.Bo1);
@@ -455,16 +563,31 @@ namespace Shadowbus
             P2PRoomFormatUI.Attach(__instance);
         }
 
+        [HarmonyPatch(typeof(RoomBase), nameof(RoomBase.DestroyMyRoomInfo))]
+        [HarmonyPostfix]
+        private static void RoomBase_DestroyMyRoomInfo_Postfix()
+        {
+            if (!P2PRuntime.IsActive)
+            {
+                return;
+            }
+
+            Plugin.Logger.LogInfo(
+                "[P2P] Native room state was destroyed; clearing the P2P session.");
+            P2PRuntime.Shutdown();
+        }
+
         [HarmonyPatch(
             typeof(BattleManagerBase),
             nameof(BattleManagerBase.SetupInitialGameState),
             new[] { typeof(bool), typeof(bool), typeof(int), typeof(int) })]
         [HarmonyPrefix]
         private static void BattleManagerBase_SetupInitialGameState_Prefix(
+            BattleManagerBase __instance,
             ref int playerMaxLife,
             ref int enemyMaxLife)
         {
-            if (!P2PRuntime.IsActive)
+            if (!P2PRuntime.IsActive || !(__instance is NetworkStandardBattleMgr))
             {
                 return;
             }

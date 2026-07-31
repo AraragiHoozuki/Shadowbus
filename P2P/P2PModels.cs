@@ -3,6 +3,7 @@ using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace Shadowbus
 {
@@ -101,6 +102,141 @@ namespace Shadowbus
         public long SleeveId { get; set; }
     }
 
+    internal sealed class P2PTwoPickClassRuleDefinition
+    {
+        [JsonProperty("cardClasses", NullValueHandling = NullValueHandling.Include)]
+        public List<int> CardClasses { get; set; }
+
+        [JsonProperty("additionalCards")]
+        public List<int> AdditionalCards { get; set; } = new List<int>();
+
+        [JsonProperty("description", NullValueHandling = NullValueHandling.Include)]
+        public string Description { get; set; }
+
+        internal P2PTwoPickClassRuleDefinition Clone()
+        {
+            return new P2PTwoPickClassRuleDefinition
+            {
+                CardClasses = CardClasses == null
+                    ? null
+                    : new List<int>(CardClasses),
+                AdditionalCards = AdditionalCards == null
+                    ? new List<int>()
+                    : new List<int>(AdditionalCards),
+                Description = Description
+            };
+        }
+    }
+
+    internal sealed class P2PTwoPickRoundRuleDefinition
+    {
+        [JsonProperty("rounds")]
+        public List<int> Rounds { get; set; } = new List<int>();
+
+        [JsonProperty("costs", NullValueHandling = NullValueHandling.Include)]
+        public List<int> Costs { get; set; }
+
+        [JsonProperty("rarities", NullValueHandling = NullValueHandling.Include)]
+        public List<int> Rarities { get; set; }
+
+        [JsonProperty("cards", NullValueHandling = NullValueHandling.Include)]
+        public List<int> Cards { get; set; }
+
+        internal P2PTwoPickRoundRuleDefinition Clone()
+        {
+            return new P2PTwoPickRoundRuleDefinition
+            {
+                Rounds = Rounds == null ? new List<int>() : new List<int>(Rounds),
+                Costs = Costs == null ? null : new List<int>(Costs),
+                Rarities = Rarities == null ? null : new List<int>(Rarities),
+                Cards = Cards == null ? null : new List<int>(Cards)
+            };
+        }
+    }
+
+    internal sealed class P2PTwoPickRuleDefinition
+    {
+        [JsonProperty("id")]
+        public string Id { get; set; }
+
+        [JsonProperty("displayName")]
+        public string DisplayName { get; set; }
+
+        [JsonProperty("finalDeckSize")]
+        public int FinalDeckSize { get; set; } = 30;
+
+        [JsonProperty("candidateClassCount")]
+        public int CandidateClassCount { get; set; } = 3;
+
+        [JsonProperty("offersPerRound")]
+        public int OffersPerRound { get; set; } = 2;
+
+        [JsonProperty("cardsPerOffer")]
+        public int CardsPerOffer { get; set; } = 2;
+
+        [JsonProperty("allowDuplicatePicks")]
+        public bool AllowDuplicatePicks { get; set; } = true;
+
+        [JsonProperty("sameCardLimit", NullValueHandling = NullValueHandling.Include)]
+        public int? SameCardLimit { get; set; }
+
+        [JsonProperty("candidateClasses", NullValueHandling = NullValueHandling.Include)]
+        public List<int> CandidateClasses { get; set; }
+
+        [JsonProperty("classRules")]
+        public Dictionary<int, P2PTwoPickClassRuleDefinition> ClassRules { get; set; } =
+            new Dictionary<int, P2PTwoPickClassRuleDefinition>();
+
+        [JsonProperty("roundRules")]
+        public List<P2PTwoPickRoundRuleDefinition> RoundRules { get; set; } =
+            new List<P2PTwoPickRoundRuleDefinition>();
+
+        [JsonProperty("cardPool", NullValueHandling = NullValueHandling.Include)]
+        public List<int> CardPool { get; set; }
+
+        [JsonProperty("excludedCards")]
+        public List<int> ExcludedCards { get; set; } = new List<int>();
+
+        [JsonProperty("cardWeights")]
+        public Dictionary<int, int> CardWeights { get; set; } =
+            new Dictionary<int, int>();
+
+        internal P2PTwoPickRuleDefinition Clone()
+        {
+            return new P2PTwoPickRuleDefinition
+            {
+                Id = Id,
+                DisplayName = DisplayName,
+                FinalDeckSize = FinalDeckSize,
+                CandidateClassCount = CandidateClassCount,
+                OffersPerRound = OffersPerRound,
+                CardsPerOffer = CardsPerOffer,
+                AllowDuplicatePicks = AllowDuplicatePicks,
+                SameCardLimit = SameCardLimit,
+                CandidateClasses = CandidateClasses == null
+                    ? null
+                    : new List<int>(CandidateClasses),
+                ClassRules = ClassRules == null
+                    ? new Dictionary<int, P2PTwoPickClassRuleDefinition>()
+                    : ClassRules.ToDictionary(
+                        pair => pair.Key,
+                        pair => pair.Value?.Clone() ??
+                            new P2PTwoPickClassRuleDefinition()),
+                RoundRules = RoundRules == null
+                    ? new List<P2PTwoPickRoundRuleDefinition>()
+                    : RoundRules.Select(rule =>
+                        rule?.Clone() ?? new P2PTwoPickRoundRuleDefinition()).ToList(),
+                CardPool = CardPool == null ? null : new List<int>(CardPool),
+                ExcludedCards = ExcludedCards == null
+                    ? new List<int>()
+                    : new List<int>(ExcludedCards),
+                CardWeights = CardWeights == null
+                    ? new Dictionary<int, int>()
+                    : new Dictionary<int, int>(CardWeights)
+            };
+        }
+    }
+
     internal sealed class P2PRoomRules
     {
         internal const int DefaultInitialMaxLife = 20;
@@ -123,6 +259,9 @@ namespace Shadowbus
 
         [JsonProperty("twoPickType")]
         public int TwoPickType { get; set; }
+
+        [JsonProperty("twoPickRule", NullValueHandling = NullValueHandling.Ignore)]
+        public P2PTwoPickRuleDefinition TwoPickRule { get; set; }
 
         [JsonProperty("battleRule")]
         public int BattleRule { get; set; }

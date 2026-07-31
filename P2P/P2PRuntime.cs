@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -14,6 +15,7 @@ namespace Shadowbus
     internal static class P2PRuntime
     {
         private const int BattleStateCheckTimeoutSeconds = 15;
+        private const int MaxDeferredAgentDeliveries = 128;
 
         private static readonly ConcurrentQueue<Action> MainThreadActions =
             new ConcurrentQueue<Action>();
@@ -23,6 +25,8 @@ namespace Shadowbus
         private static readonly P2PDeliverySequence GuestDeliverySequence =
             new P2PDeliverySequence();
         private static readonly Queue<Dictionary<string, object>> DeferredGuestDeliveries =
+            new Queue<Dictionary<string, object>>();
+        private static readonly Queue<Dictionary<string, object>> DeferredAgentDeliveries =
             new Queue<Dictionary<string, object>>();
         private static readonly P2PBattleSelectionTracker BattleSelectionTracker =
             new P2PBattleSelectionTracker();
@@ -76,6 +80,9 @@ namespace Shadowbus
         internal static P2PRoomRules Rules { get; private set; }
         internal static int InitialMaxLife =>
             Rules?.InitialMaxLife ?? P2PRoomRules.DefaultInitialMaxLife;
+        internal static bool IsTwoPickRoom => IsActive &&
+            Rules?.TwoPickType == (int)TwoPickFormat.Normal &&
+            Rules?.BattleType == (int)NetworkDefine.ServerBattleType.RoomTwoPick;
         internal static bool CanEditRoomRules =>
             IsActive &&
             Role == P2PRole.Host &&
@@ -106,6 +113,10 @@ namespace Shadowbus
                 catch (Exception ex)
                 {
                     Plugin.Logger.LogError("[P2P] Main-thread action failed: " + ex);
+                    if (Role == P2PRole.Guest && !JoinFinished)
+                    {
+                        FailJoin("Failed while processing the room join response: " + ex.Message);
+                    }
                 }
             }
             TrySynchronizeOpponentRoomState();
@@ -147,6 +158,12 @@ namespace Shadowbus
             Role = P2PRole.Host;
             IsActive = true;
             Rules = rules ?? new P2PRoomRules();
+            if (Rules.TwoPickType == (int)TwoPickFormat.Normal)
+            {
+                Rules.TwoPickRule = P2PTwoPickRules.Normalize(
+                    Rules.TwoPickRule ?? P2PTwoPickRules.LoadSelected());
+                P2PTwoPickRules.ResetDraft(Rules.TwoPickRule);
+            }
             CustomFormatDefinition roomFormat = CustomFormats.Get(Rules.CustomFormatId);
             Rules.CustomFormatId = roomFormat.Id;
             Rules.FormatDefinition = roomFormat.Clone();
@@ -179,6 +196,9 @@ namespace Shadowbus
             Plugin.Logger.LogInfo(
                 $"[P2P] Hosting room on {bind}:{transport.BoundPort}; advertised as {advertised}; " +
                 $"format={Rules.CustomFormatId}; openDeck={Rules.IsDeckOpen}; " +
+                $"twoPick={Rules.TwoPickType}; " +
+                $"twoPickRule={Rules.TwoPickRule?.Id ?? string.Empty}; " +
+                $"draftSize={Rules.TwoPickRule?.FinalDeckSize ?? 0}; " +
                 $"initialMaxLife={Rules.InitialMaxLife}.");
         }
 
@@ -253,6 +273,7 @@ namespace Shadowbus
             }
             Plugin.Logger.LogInfo(
                 $"[P2P] Bound realtime agent from {source ?? "unknown"}: {agent.GetType().Name}.");
+            FlushDeferredAgentDeliveries();
         }
 
         internal static void SetLocalDeck(DeckData deck)
@@ -261,10 +282,20 @@ namespace Shadowbus
             {
                 throw new InvalidOperationException("No room deck is selected.");
             }
-            if (!IsDeckAllowed(
-                deck,
-                out CustomFormatDefinition definition,
-                out CustomFormatViolation violation))
+            if (IsTwoPickRoom)
+            {
+                int expectedCount = Rules?.TwoPickRule?.FinalDeckSize ?? 30;
+                if (deck.GetCardIdList().Count != expectedCount)
+                {
+                    throw new InvalidOperationException(
+                        $"The completed Two Pick deck contains " +
+                        $"{deck.GetCardIdList().Count} cards; expected {expectedCount}.");
+                }
+            }
+            else if (!IsDeckAllowed(
+                         deck,
+                         out CustomFormatDefinition definition,
+                         out CustomFormatViolation violation))
             {
                 throw new InvalidOperationException(
                     $"Deck {deck.GetDeckID()} is not valid for room format " +
@@ -305,6 +336,12 @@ namespace Shadowbus
                 return false;
             }
 
+            if (IsTwoPickRoom)
+            {
+                violation = null;
+                return deck.GetCardIdList().Count > 0;
+            }
+
             return CustomFormats.IsDeckCompliant(
                 deck.GetCardIdList(),
                 definition,
@@ -323,6 +360,15 @@ namespace Shadowbus
             messageData["uri"] = uri;
             messageData["viewerId"] = LocalProfile?.ViewerId ?? P2PIdentity.ViewerId;
             messageData["bid"] = BattleId ?? string.Empty;
+            RemovePrivateTwoPickDraftData(messageData, uri);
+            if (string.Equals(
+                    uri,
+                    PlayerController.ROOM_URI.RoomEntry.ToString(),
+                    StringComparison.Ordinal))
+            {
+                Plugin.Logger.LogInfo(
+                    $"[P2P] Emitting RoomEntry as {Role}; agentReady={currentAgent != null}.");
+            }
 
             if (P2PBattleProtocol.CarriesBattleStateCheckpoint(uri))
             {
@@ -525,10 +571,13 @@ namespace Shadowbus
 
         internal static void FailJoin(string error)
         {
-            LastError = error;
+            LastError = string.IsNullOrWhiteSpace(error)
+                ? "The room join failed."
+                : error;
             JoinFinished = true;
             JoinSucceeded = false;
             transport?.Stop(false);
+            Plugin.Logger.LogError("[P2P] Room join failed: " + LastError);
         }
 
         internal static void AbortFailedJoin()
@@ -668,22 +717,7 @@ namespace Shadowbus
                     Plugin.Logger.LogInfo($"[P2P] Guest '{RemoteProfile.UserName}' joined the transport session.");
                     break;
                 case "join_ok":
-                    if (Role != P2PRole.Guest || message.Profile == null)
-                    {
-                        return;
-                    }
-                    RemoteProfile = message.Profile;
-                    pendingOpponentSync = true;
-                    ApplyReceivedRoomRules(message.Rules);
-                    BattleId = message.BattleId;
-                    RoomId = message.Data != null && message.Data.TryGetValue("roomId", out object roomId)
-                        ? roomId?.ToString() : BattleId;
-                    JoinFinished = true;
-                    JoinSucceeded = true;
-                    Plugin.Logger.LogInfo(
-                        $"[P2P] Joined room hosted by '{RemoteProfile.UserName}' " +
-                        $"(format={Rules.CustomFormatId}, openDeck={Rules.IsDeckOpen}, " +
-                        $"initialMaxLife={Rules.InitialMaxLife}).");
+                    HandleJoinAccepted(message);
                     break;
                 case "rules_update":
                     if (Role != P2PRole.Guest || message.Rules == null)
@@ -717,12 +751,29 @@ namespace Shadowbus
                 case "deliver":
                     if (Role == P2PRole.Guest && message.Data != null)
                     {
+                        string deliveredUri = GetUri(message.Data);
+                        if (string.Equals(
+                                deliveredUri,
+                                PlayerController.ROOM_URI.RoomEntry.ToString(),
+                                StringComparison.Ordinal))
+                        {
+                            Plugin.Logger.LogInfo(
+                                $"[P2P] Received RoomEntry from the host; " +
+                                $"agentReady={currentAgent != null}.");
+                        }
                         if (message.Data.TryGetValue("playSeq", out object playSequence))
                         {
                             guestPlaySequence = Math.Max(guestPlaySequence,
                                 Convert.ToInt32(playSequence));
                         }
-                        Inject(message.Data);
+                        if (currentAgent == null)
+                        {
+                            DeferAgentDelivery(message.Data);
+                        }
+                        else
+                        {
+                            Inject(message.Data);
+                        }
                     }
                     break;
                 case "diagnostic":
@@ -740,16 +791,88 @@ namespace Shadowbus
             }
         }
 
+        private static void HandleJoinAccepted(P2PWireMessage message)
+        {
+            if (Role != P2PRole.Guest)
+            {
+                return;
+            }
+
+            Plugin.Logger.LogInfo("[P2P] Received join_ok; synchronizing room rules.");
+            try
+            {
+                if (message.Profile == null)
+                {
+                    throw new InvalidDataException(
+                        "The room host did not provide its player profile.");
+                }
+                if (message.Rules == null)
+                {
+                    throw new InvalidDataException(
+                        "The room host did not provide room rules.");
+                }
+                if (string.IsNullOrWhiteSpace(message.BattleId))
+                {
+                    throw new InvalidDataException(
+                        "The room host did not provide a battle ID.");
+                }
+
+                string receivedRoomId = message.Data != null &&
+                    message.Data.TryGetValue("roomId", out object roomId)
+                        ? roomId?.ToString()
+                        : message.BattleId;
+                if (string.IsNullOrWhiteSpace(receivedRoomId))
+                {
+                    throw new InvalidDataException(
+                        "The room host did not provide a room ID.");
+                }
+
+                ApplyReceivedRoomRules(message.Rules);
+                RemoteProfile = message.Profile;
+                BattleId = message.BattleId;
+                RoomId = receivedRoomId;
+                pendingOpponentSync = true;
+                LastError = null;
+                JoinSucceeded = true;
+                JoinFinished = true;
+                Plugin.Logger.LogInfo(
+                    $"[P2P] Joined room hosted by '{RemoteProfile.UserName}' " +
+                    $"(format={Rules.CustomFormatId}, openDeck={Rules.IsDeckOpen}, " +
+                    $"twoPick={Rules.TwoPickType}, " +
+                    $"twoPickRule={Rules.TwoPickRule?.Id ?? string.Empty}, " +
+                    $"draftSize={Rules.TwoPickRule?.FinalDeckSize ?? 0}, " +
+                    $"initialMaxLife={Rules.InitialMaxLife}).");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError(
+                    "[P2P] Failed to apply the host's room rules: " + ex);
+                FailJoin("The host's room rules could not be synchronized: " + ex.Message);
+            }
+        }
+
         private static void ApplyReceivedRoomRules(P2PRoomRules receivedRules)
         {
-            Rules = receivedRules ?? new P2PRoomRules();
+            P2PRoomRules synchronizedRules = receivedRules ??
+                throw new ArgumentNullException(nameof(receivedRules));
+            if (synchronizedRules.TwoPickType == (int)TwoPickFormat.Normal)
+            {
+                if (synchronizedRules.BattleType !=
+                    (int)NetworkDefine.ServerBattleType.RoomTwoPick)
+                {
+                    throw new FormatException(
+                        "Normal Two Pick rules require the RoomTwoPick battle type.");
+                }
+                synchronizedRules.TwoPickRule = P2PTwoPickRules.Normalize(
+                    synchronizedRules.TwoPickRule ?? P2PTwoPickRules.Load());
+            }
             CustomFormatDefinition definition = null;
-            if (Rules.FormatDefinition != null)
+            if (synchronizedRules.FormatDefinition != null)
             {
                 try
                 {
                     definition = CustomFormats.InstallRoomDefinition(
-                        Rules.FormatDefinition.Clone());
+                        synchronizedRules.FormatDefinition.Clone());
                 }
                 catch (Exception ex)
                 {
@@ -758,10 +881,22 @@ namespace Shadowbus
                 }
             }
 
-            definition = definition ?? CustomFormats.Get(Rules.CustomFormatId);
-            Rules.CustomFormatId = definition.Id;
-            Rules.FormatDefinition = definition.Clone();
+            definition = definition ?? CustomFormats.Get(synchronizedRules.CustomFormatId);
+            synchronizedRules.CustomFormatId = definition.Id;
+            synchronizedRules.FormatDefinition = definition.Clone();
+
+            if (synchronizedRules.TwoPickType == (int)TwoPickFormat.Normal)
+            {
+                P2PTwoPickRules.ResetDraft(synchronizedRules.TwoPickRule);
+            }
+
+            Rules = synchronizedRules;
             CustomFormatContext.RoomFormatId = definition.Id;
+            Plugin.Logger.LogInfo(
+                $"[P2P] Room rules synchronized: battleType={Rules.BattleType}, " +
+                $"deckFormat={Rules.DeckFormat}, twoPick={Rules.TwoPickType}, " +
+                $"twoPickRule={Rules.TwoPickRule?.Id ?? string.Empty}, " +
+                $"draftSize={Rules.TwoPickRule?.FinalDeckSize ?? 0}.");
         }
 
         private static void HandleServerEmit(bool sourceIsHost, Dictionary<string, object> data)
@@ -861,6 +996,32 @@ namespace Shadowbus
                 ? P2PMessageTransform.PrepareOpponentBattleMessage(data)
                 : data;
             Deliver(toHost, routedData, SourceViewerId(sourceIsHost));
+        }
+
+        private static void RemovePrivateTwoPickDraftData(
+            Dictionary<string, object> data,
+            string uri)
+        {
+            if (!IsTwoPickRoom ||
+                !TryGetRoomUri(data, uri, out PlayerController.ROOM_URI roomUri))
+            {
+                return;
+            }
+
+            switch (roomUri)
+            {
+                case PlayerController.ROOM_URI.BeginCreateDeck:
+                    data.Remove("candidateClassIds");
+                    break;
+                case PlayerController.ROOM_URI.SelectClass:
+                    data.Remove("classInfo");
+                    data.Remove("candidateCardList");
+                    break;
+                case PlayerController.ROOM_URI.SelectCardSet:
+                    data.Remove("deckInfo");
+                    data.Remove("candidateCardList");
+                    break;
+            }
         }
 
         private static void HandleRoomEmit(
@@ -1423,6 +1584,42 @@ namespace Shadowbus
                     BattleId = BattleId,
                     Data = data
                 });
+            }
+        }
+
+        private static void DeferAgentDelivery(Dictionary<string, object> data)
+        {
+            string uri = GetUri(data);
+            if (DeferredAgentDeliveries.Count >= MaxDeferredAgentDeliveries)
+            {
+                Plugin.Logger.LogError(
+                    $"[P2P] Could not defer '{uri}' because the realtime-agent queue is full.");
+                if (Role == P2PRole.Guest && !JoinFinished)
+                {
+                    FailJoin("Too many room messages arrived before the realtime agent was ready.");
+                }
+                return;
+            }
+
+            DeferredAgentDeliveries.Enqueue(P2PJson.CloneDictionary(data));
+            Plugin.Logger.LogInfo(
+                $"[P2P] Deferred incoming '{uri}' until the realtime agent is ready " +
+                $"(queued={DeferredAgentDeliveries.Count}).");
+        }
+
+        private static void FlushDeferredAgentDeliveries()
+        {
+            if (currentAgent == null || DeferredAgentDeliveries.Count == 0)
+            {
+                return;
+            }
+
+            int count = DeferredAgentDeliveries.Count;
+            Plugin.Logger.LogInfo(
+                $"[P2P] Replaying {count} message(s) deferred before realtime-agent setup.");
+            while (currentAgent != null && DeferredAgentDeliveries.Count > 0)
+            {
+                Inject(DeferredAgentDeliveries.Dequeue());
             }
         }
 
@@ -2042,6 +2239,7 @@ namespace Shadowbus
             guestPlaySequence = 0;
             GuestDeliverySequence.Reset();
             DeferredGuestDeliveries.Clear();
+            DeferredAgentDeliveries.Clear();
             RoomRoundState.Reset();
             ResetBattleState();
             localEmitSequence = 1;

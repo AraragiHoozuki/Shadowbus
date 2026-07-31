@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
@@ -17,6 +18,7 @@ namespace Shadowbus
                 TestLocalDeckCodes();
                 TestJsonConversion();
                 TestRoomRules();
+                TestTwoPickRuleFiles();
                 TestPerspectiveTransform();
                 TestBattleResults();
                 TestBattleProtocol();
@@ -98,6 +100,61 @@ namespace Shadowbus
                 "A non-P2P room ID was accepted as a connection code.");
         }
 
+        private static void TestTwoPickRuleFiles()
+        {
+            string directory = Path.Combine(
+                Path.GetTempPath(),
+                "shadowbus-twopick-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            try
+            {
+                File.WriteAllText(
+                    Path.Combine(directory, "alternate.json"),
+                    "{\"id\":\"alternate\",\"displayName\":\"Alternate\"}");
+                File.WriteAllText(
+                    Path.Combine(directory, "custom.json"),
+                    "{\"displayName\":\"Custom\"}");
+                File.WriteAllText(
+                    Path.Combine(directory, "normal.json"),
+                    "{\"id\":\"normal\",\"displayName\":\"Standard\"}");
+                File.WriteAllText(
+                    Path.Combine(directory, "z-duplicate.json"),
+                    "{\"id\":\"alternate\",\"displayName\":\"Duplicate\"}");
+                File.WriteAllText(Path.Combine(directory, "z-invalid.json"), "{");
+
+                List<string> errors = new List<string>();
+                IReadOnlyList<P2PTwoPickRuleDefinition> definitions =
+                    P2PTwoPickRuleFiles.Load(
+                        directory,
+                        P2PJson.Settings,
+                        (source, fileId) =>
+                        {
+                            source.Id = string.IsNullOrWhiteSpace(source.Id)
+                                ? fileId
+                                : source.Id.Trim();
+                            source.DisplayName = string.IsNullOrWhiteSpace(source.DisplayName)
+                                ? source.Id
+                                : source.DisplayName.Trim();
+                            return source;
+                        },
+                        errors.Add);
+
+                Assert(definitions.Select(rule => rule.Id).SequenceEqual(
+                        new[] { "alternate", "custom", "normal" }),
+                    "Two Pick JSON files were not discovered in stable filename order.");
+                Assert(definitions[1].DisplayName == "Custom",
+                    "A Two Pick rule display name was not loaded.");
+                Assert(errors.Count == 2 &&
+                        errors.Any(error => error.Contains("Duplicate")) &&
+                        errors.Any(error => error.Contains("Failed to load")),
+                    "Invalid or duplicate Two Pick rule files were not isolated.");
+            }
+            finally
+            {
+                Directory.Delete(directory, true);
+            }
+        }
+
         private static void AssertRoundTrip(IPAddress address, int port, byte[] token)
         {
             string first = P2PConnectionCode.Create(address, port, token);
@@ -134,6 +191,39 @@ namespace Shadowbus
                             [123456] = 1
                         }
                     },
+                    TwoPickType = 1,
+                    TwoPickRule = new P2PTwoPickRuleDefinition
+                    {
+                        Id = "custom-draft",
+                        DisplayName = "Custom Draft",
+                        FinalDeckSize = 40,
+                        CandidateClasses = new List<int> { 1, 2, 3, 4 },
+                        ClassRules = new Dictionary<int, P2PTwoPickClassRuleDefinition>
+                        {
+                            [1] = new P2PTwoPickClassRuleDefinition
+                            {
+                                CardClasses = new List<int> { 0, 1, 2 },
+                                AdditionalCards = new List<int> { 1005 },
+                                Description = "Forest and Sword mix"
+                            }
+                        },
+                        RoundRules = new List<P2PTwoPickRoundRuleDefinition>
+                        {
+                            new P2PTwoPickRoundRuleDefinition
+                            {
+                                Rounds = new List<int> { 1, 10, 20 },
+                                Costs = new List<int> { 2, 3 },
+                                Rarities = new List<int> { 3, 4 }
+                            },
+                            new P2PTwoPickRoundRuleDefinition
+                            {
+                                Rounds = new List<int> { 5 },
+                                Cards = new List<int> { 1001, 1002, 1003, 1004 }
+                            }
+                        },
+                        CardPool = new List<int> { 1001, 1002, 1003, 1004 },
+                        CardWeights = new Dictionary<int, int> { [1001] = 3 }
+                    },
                     InitialMaxLife = 137
                 },
                 Data = new Dictionary<string, object>
@@ -155,6 +245,19 @@ namespace Shadowbus
                 "The initial maximum life room rule was not preserved.");
             Assert(decoded.Rules.CustomFormatId == "modern",
                 "The custom room format ID was not preserved.");
+            Assert(decoded.Rules.TwoPickRule != null &&
+                decoded.Rules.TwoPickRule.Id == "custom-draft" &&
+                decoded.Rules.TwoPickRule.FinalDeckSize == 40 &&
+                decoded.Rules.TwoPickRule.CardPool.Count == 4 &&
+                decoded.Rules.TwoPickRule.CardWeights[1001] == 3 &&
+                decoded.Rules.TwoPickRule.ClassRules[1].CardClasses.Count == 3 &&
+                decoded.Rules.TwoPickRule.ClassRules[1].AdditionalCards[0] == 1005 &&
+                decoded.Rules.TwoPickRule.ClassRules[1].Description ==
+                    "Forest and Sword mix" &&
+                decoded.Rules.TwoPickRule.RoundRules.Count == 2 &&
+                decoded.Rules.TwoPickRule.RoundRules[0].Rarities[1] == 4 &&
+                decoded.Rules.TwoPickRule.RoundRules[1].Cards.Count == 4,
+                "The complete Two Pick rule was not preserved.");
             Assert(decoded.Rules.FormatDefinition != null &&
                 decoded.Rules.FormatDefinition.Id == "modern" &&
                 decoded.Rules.FormatDefinition.DeckSizeLimit == null &&
@@ -174,6 +277,8 @@ namespace Shadowbus
                 "The initial maximum life default is incorrect.");
             Assert(rules.CustomFormatId == "unlimited",
                 "The custom room format default is incorrect.");
+            Assert(rules.TwoPickRule == null,
+                "A constructed room unexpectedly has a Two Pick rule.");
 
             P2PWireMessage legacy = P2PJson.DeserializeMessage(
                 "{\"type\":\"probe\",\"rules\":{\"isDeckOpen\":true}}");
@@ -183,6 +288,8 @@ namespace Shadowbus
                 "A legacy room message did not use the Unlimited custom format default.");
             Assert(legacy.Rules.FormatDefinition == null,
                 "A legacy room message unexpectedly created a format definition.");
+            Assert(legacy.Rules.TwoPickRule == null,
+                "A legacy room message unexpectedly created a Two Pick definition.");
 
             rules.InitialMaxLife = 19;
             Assert(rules.InitialMaxLife == 20,

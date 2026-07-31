@@ -50,6 +50,10 @@ namespace Shadowbus
             }
 
             return task is OpenRoomBattleSetDeckTask ||
+                task is OpenRoom2PickBattleDeckResetTask ||
+                task is OpenRoom2PickBattleBeginDeckCreateTask ||
+                task is OpenRoom2PickBattleSelectClassTask ||
+                task is OpenRoom2PickBattleSelectCardTask ||
                 task is OpenRoomInitilizeRoomBattle ||
                 task is RoomBattleDoMatchingTask ||
                 task is RoomBattleFinishTask ||
@@ -92,6 +96,8 @@ namespace Shadowbus
 
             if (joinStarted && startError == null)
             {
+                Plugin.Logger.LogInfo(
+                    $"[P2P] Waiting up to {JoinTimeoutSeconds:0} seconds for join_ok.");
                 float deadline = Time.realtimeSinceStartup + JoinTimeoutSeconds;
                 while (!P2PRuntime.JoinFinished && Time.realtimeSinceStartup < deadline)
                 {
@@ -101,6 +107,9 @@ namespace Shadowbus
                 {
                     P2PRuntime.FailJoin("Timed out while connecting to the room host.");
                 }
+                Plugin.Logger.LogInfo(
+                    $"[P2P] Join handshake finished: success={P2PRuntime.JoinSucceeded}, " +
+                    $"error='{P2PRuntime.LastError ?? string.Empty}'.");
             }
 
             Exception processError = startError;
@@ -111,9 +120,23 @@ namespace Shadowbus
                     JsonData response = CreateResponse(task);
                     task.SetResponseData(response);
                     task.CheckResultCodeToPopupCreate_ReturnStatus(0);
-                    if (task is OpenRoomBattleEnterRoomTask && !P2PRuntime.JoinSucceeded)
+                    if (task is OpenRoomBattleEnterRoomTask enterTask)
                     {
-                        P2PRuntime.AbortFailedJoin();
+                        Plugin.Logger.LogInfo(
+                            $"[P2P] Enter-room API parsed: resultReason={enterTask.result_reason}, " +
+                            $"battleId='{enterTask.BattleID ?? string.Empty}'.");
+                        if (P2PRuntime.JoinSucceeded)
+                        {
+                            SynchronizeNativeRoomMode();
+                        }
+                        else
+                        {
+                            P2PRuntime.AbortFailedJoin();
+                        }
+                    }
+                    else if (task is OpenRoomBattleCreateRoomTask)
+                    {
+                        SynchronizeNativeRoomMode();
                     }
                     Plugin.Logger.LogInfo(
                         $"[P2P] Completed local room task: {task.GetType().Name}.");
@@ -156,22 +179,33 @@ namespace Shadowbus
             {
                 throw new NotSupportedException("P2P rooms currently support BO1 only.");
             }
-            if (parameters.battle_type != (int)NetworkDefine.ServerBattleType.OpenRoom ||
-                parameters.two_pick_type != (int)TwoPickFormat.None)
+            bool isConstructed =
+                parameters.battle_type == (int)NetworkDefine.ServerBattleType.OpenRoom &&
+                parameters.two_pick_type == (int)TwoPickFormat.None;
+            bool isTwoPick =
+                parameters.battle_type == (int)NetworkDefine.ServerBattleType.RoomTwoPick &&
+                parameters.two_pick_type == (int)TwoPickFormat.Normal;
+            if (!isConstructed && !isTwoPick)
             {
                 throw new NotSupportedException(
-                    "P2P rooms currently support normal constructed Open Room battles only.");
+                    "P2P rooms support constructed Open Room and normal Room Two Pick only.");
             }
-            Format deckFormat = Data.ParseApiFormat(parameters.deck_format);
-            if (deckFormat != Format.Unlimited)
+            if (isConstructed)
             {
-                throw new NotSupportedException(
-                    $"P2P rooms currently support Unlimited format only " +
-                    $"(received api={parameters.deck_format}, format={deckFormat}).");
+                Format deckFormat = Data.ParseApiFormat(parameters.deck_format);
+                if (deckFormat != Format.Unlimited)
+                {
+                    throw new NotSupportedException(
+                        $"P2P rooms currently support Unlimited format only " +
+                        $"(received api={parameters.deck_format}, format={deckFormat}).");
+                }
             }
 
             CustomFormatDefinition roomFormat = CustomFormats.Get(
                 CustomFormatContext.RoomFormatId);
+            P2PTwoPickRuleDefinition twoPickRule = isTwoPick
+                ? P2PTwoPickRules.LoadSelected()
+                : null;
             P2PRuntime.StartHosting(new P2PRoomRules
             {
                 BattleType = parameters.battle_type,
@@ -179,6 +213,7 @@ namespace Shadowbus
                 CustomFormatId = roomFormat.Id,
                 FormatDefinition = roomFormat.Clone(),
                 TwoPickType = parameters.two_pick_type,
+                TwoPickRule = twoPickRule,
                 BattleRule = parameters.battle_rule,
                 InitialMaxLife = P2PRoomRules.DefaultInitialMaxLife,
                 IsDeckOpen = task._room != null &&
@@ -227,6 +262,53 @@ namespace Shadowbus
             {
                 CaptureSelectedDeck();
                 data = new Dictionary<string, object>();
+            }
+            else if (task is OpenRoom2PickBattleDeckResetTask)
+            {
+                P2PTwoPickRules.ResetDraft(GetRoomTwoPickRule());
+                data = new Dictionary<string, object>();
+            }
+            else if (task is OpenRoom2PickBattleBeginDeckCreateTask)
+            {
+                int[] classes = P2PTwoPickRules.BeginDraft(GetRoomTwoPickRule());
+                data = new Dictionary<string, object>
+                {
+                    ["candidate_class_ids"] = new List<int>(classes)
+                };
+            }
+            else if (task is OpenRoom2PickBattleSelectClassTask classTask)
+            {
+                OpenRoom2PickBattleSelectClassTask.OpenRoom2PickBattleSelectClassTaskParam
+                    parameters = classTask.Params as
+                        OpenRoom2PickBattleSelectClassTask.OpenRoom2PickBattleSelectClassTaskParam;
+                if (parameters == null)
+                {
+                    throw new NotSupportedException(
+                        "Chaos Two Pick is not supported by the local P2P draft.");
+                }
+                P2PTwoPickRules.SelectClass(parameters.class_id);
+                data = P2PTwoPickRules.CreateCandidateData();
+            }
+            else if (task is OpenRoom2PickBattleSelectCardTask cardTask)
+            {
+                OpenRoom2PickBattleSelectCardTask.OpenRoom2PickBattleSelectCardTaskParam
+                    parameters = cardTask.Params as
+                        OpenRoom2PickBattleSelectCardTask.OpenRoom2PickBattleSelectCardTaskParam;
+                if (parameters == null)
+                {
+                    throw new InvalidOperationException(
+                        "The selected Two Pick card offer is unavailable.");
+                }
+                P2PTwoPickRules.SelectCard(parameters.card_set_id);
+                data = new Dictionary<string, object>
+                {
+                    ["deck_info"] = P2PTwoPickRules.CreateDeckData()
+                };
+                if (!P2PTwoPickRules.IsComplete)
+                {
+                    data["candidate_card_list"] =
+                        P2PTwoPickRules.CreateCandidateData()["candidate_card_list"];
+                }
             }
             else if (task is OpenRoomInitilizeRoomBattle)
             {
@@ -353,6 +435,34 @@ namespace Shadowbus
             {
                 P2PRuntime.SetLocalDeck(selected);
             }
+        }
+
+        private static P2PTwoPickRuleDefinition GetRoomTwoPickRule()
+        {
+            return P2PTwoPickRules.Normalize(
+                P2PRuntime.Rules?.TwoPickRule ?? P2PTwoPickRules.LoadSelected());
+        }
+
+        private static void SynchronizeNativeRoomMode()
+        {
+            RoomConnectController controller = RoomBase.ConnectController;
+            BattleParameter parameter = controller?.BattleParameterInstance;
+            DataMgr dataManager = GameMgr.GetIns()?.GetDataMgr();
+            if (parameter == null || dataManager == null)
+            {
+                throw new InvalidOperationException(
+                    "The native room state is unavailable after the room API completed.");
+            }
+
+            dataManager.m_BattleType = RoomConnectController.RoomRuleToBattleType(parameter);
+            if (parameter.BattleType == NetworkDefine.ServerBattleType.RoomTwoPick)
+            {
+                dataManager.TwoPickFormat = parameter.TwoPickFormat;
+            }
+            Plugin.Logger.LogInfo(
+                $"[P2P] Native room mode synchronized: battleType={parameter.BattleType}, " +
+                $"dataBattleType={dataManager.m_BattleType}, " +
+                $"twoPick={parameter.TwoPickFormat}.");
         }
 
         private static JsonData Wrap(Dictionary<string, object> data)
