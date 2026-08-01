@@ -8,7 +8,7 @@ using System.Linq;
 
 namespace Shadowbus;
 
-[BepInPlugin("08c8e386-a794-442f-a98c-aec65a183898", "GeorgesZebit.Shadowbus", "2.2.0")]
+[BepInPlugin("08c8e386-a794-442f-a98c-aec65a183898", "GeorgesZebit.Shadowbus", "2.3.0")]
 public class Plugin : BaseUnityPlugin
 {
     public static new ManualLogSource Logger;
@@ -51,6 +51,8 @@ public class Plugin : BaseUnityPlugin
             p2pPort.Value);
         CustomFormats.Initialize();
         P2PTwoPickRules.Initialize();
+        BossRushOfflineData.Initialize();
+        BossRushReferenceExporter.Export();
 
         try
         {
@@ -64,7 +66,9 @@ public class Plugin : BaseUnityPlugin
                 $"[DeckListHotReload] Harmony registration complete: " +
                 $"{deckListHotReloadHarmony.GetPatchedMethods().Count()} game method(s) patched.");
             Harmony.CreateAndPatchAll(typeof(FakeConnect));
+            Harmony.CreateAndPatchAll(typeof(BossRushPatches));
             Harmony.CreateAndPatchAll(typeof(AIManager));
+            Harmony.CreateAndPatchAll(typeof(BossRushReferenceExporter));
             Harmony.CreateAndPatchAll(typeof(ActiveSkill));
             Harmony.CreateAndPatchAll(typeof(GeminizeSkillPatcher));
             Harmony.CreateAndPatchAll(typeof(AcquireSkillsSkillPatcher));

@@ -36,6 +36,11 @@ namespace Shadowbus
                 Plugin.Logger.LogInfo($"[P2P] Intercepted room task: {taskTypeName}");
                 yield return P2PTaskRouter.Process(__instance, currentTask);
             }
+            else if (BossRushOfflineData.IsActive && BossRushOfflineData.TryCreateResponse(currentTask, out _))
+            {
+                Plugin.Logger.LogInfo($"[BossRush] Intercepted task: {taskTypeName}");
+                yield return ProcessBossRushTask(__instance, currentTask);
+            }
             else if (IsTaskSkipped(taskTypeName))
             {
                 Plugin.Logger.LogInfo($"[Offlinizer] Skipped Task: {taskTypeName}");
@@ -67,6 +72,55 @@ namespace Shadowbus
                 ProfileOfflineData.CanHandle(taskName) ||
                 StoryOfflineData.CanHandle(taskName) ||
                 File.Exists((Path.Combine("Mods", "OfflinizedTasks", $"{taskName}.json")));
+        }
+
+        private static IEnumerator ProcessBossRushTask(NetworkManager networkManager, NetworkTask task)
+        {
+            while (networkManager.isConnect)
+            {
+                yield return 0;
+            }
+
+            yield return new WaitForSeconds(0.01f);
+            networkManager.isConnect = true;
+            networkManager.isTimeOut = false;
+            networkManager.isError = false;
+            try
+            {
+                if (task is BossRushRetireTask)
+                {
+                    // Retire always ends the local run. Clearing the registered
+                    // deck makes the next entry follow the new-challenge deck
+                    // selection flow instead of the stale Continue path.
+                    BossRushOfflineData.ClearRun(true, true);
+                }
+                else if (task is BossRushLoseFinishTask)
+                {
+                    BossRushOfflineData.ClearRun(false);
+                }
+                JsonData data;
+                if (!BossRushOfflineData.TryCreateResponse(task, out data))
+                {
+                    throw new InvalidOperationException("No BossRush response was generated.");
+                }
+
+                data["data_headers"]["servertime"] = (long)TimeNativePlugin.GetDeviceOperatingTime();
+                task.SetResponseData(data);
+                task.CheckResultCodeToPopupCreate_ReturnStatus(0);
+                task.CallbackOnUnityWebRequestDone?.Invoke(null);
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogError($"[BossRush] Error processing {task.GetType().Name}: {exception}");
+                task.CallbackOnFailure?.Invoke(NetworkTask.ResultCode.Error);
+            }
+
+            if (networkManager.NetworkUI != null)
+            {
+                networkManager.NetworkUI.StopLoading();
+            }
+            networkManager.ClearLastRequestTask();
+            networkManager.isConnect = false;
         }
 
         private static bool IsLocalDeckListTask(string taskName)
@@ -328,10 +382,17 @@ namespace Shadowbus
                                 {
                                     text = MessagePackSerializer.ToJson(array);
                                 }
-                                __instance.lastRequestTask.SetResponseData(JsonMapper.ToObject(text));
+                                string taskTypeName = task.GetType().Name;
+                                JsonData parsedResponse = JsonMapper.ToObject(text);
+                                __instance.lastRequestTask.SetResponseData(parsedResponse);
+
+                                // BossRush's opponent table and ability candidates are
+                                // service data, not part of the AI master. Preserve the
+                                // original response so it can be converted into a local
+                                // authoring reference by BossRushReferenceExporter.
+                                BossRushReferenceExporter.CaptureResponse(taskTypeName, parsedResponse);
 
                                 // Offlinizer: Save the response data to a local file for future offline use
-                                string taskTypeName = task.GetType().Name;
                                 File.WriteAllText((Path.Combine("Mods", "OfflinizedTasks", $"{taskTypeName}.json")), text);
                             }
                             catch (Exception ex)

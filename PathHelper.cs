@@ -24,6 +24,9 @@ namespace Shadowbus
         public static readonly string MyPageBackgroundSettingsPath = Path.Combine(ModPath, "MyPageBackground.json");
         public static readonly string ProfileSettingsPath = Path.Combine(ModPath, "Profile.json");
         public static readonly string P2PIdentityPath = Path.Combine(ModPath, "P2PIdentity.json");
+        public static readonly string BossRushPath = Path.Combine(ModPath, "BossRush");
+        public static readonly string BossRushStatePath = Path.Combine(BossRushPath, "State");
+        public static readonly string BossRushReferencePath = Path.Combine(BossRushPath, "Reference");
 
         static PathHelper()
         {
@@ -36,6 +39,9 @@ namespace Shadowbus
             Directory.CreateDirectory(AIDeckPath);
             Directory.CreateDirectory(AIStylePath);
             Directory.CreateDirectory(AIEmotePath);
+            Directory.CreateDirectory(BossRushPath);
+            Directory.CreateDirectory(BossRushStatePath);
+            Directory.CreateDirectory(BossRushReferencePath);
         }
     }
 }

@@ -444,7 +444,7 @@ namespace Shadowbus
                     : AI_LOGIC_LV.STRONG;
         }
 
-        private static string RegisterLocalDeckCsv(string path)
+        internal static string RegisterLocalDeckCsv(string path)
         {
             if (string.IsNullOrEmpty(path))
             {
@@ -456,10 +456,11 @@ namespace Shadowbus
             data.ConvertCsvTextToAsset(ReadCsv(path));
             Data.Master.AIDeckDic ??= new Dictionary<string, AICardDataAssetSet>();
             Data.Master.AIDeckDic[key] = data;
+            Data.Master.AIDeckDic["ai/" + Path.GetFileNameWithoutExtension(path)] = data;
             return key;
         }
 
-        private static string RegisterLocalStyleCsv(string path)
+        internal static string RegisterLocalStyleCsv(string path)
         {
             if (string.IsNullOrEmpty(path))
             {
@@ -472,10 +473,11 @@ namespace Shadowbus
                 .ToList();
             Data.Master.AIStyleDic ??= new Dictionary<string, List<AIPolicyDataAsset>>();
             Data.Master.AIStyleDic[key] = data;
+            Data.Master.AIStyleDic["ai/" + Path.GetFileNameWithoutExtension(path)] = data;
             return key;
         }
 
-        private static string RegisterLocalEmoteCsv(string path)
+        internal static string RegisterLocalEmoteCsv(string path)
         {
             if (string.IsNullOrEmpty(path))
             {
@@ -488,6 +490,7 @@ namespace Shadowbus
                 .ToList();
             Data.Master.AIEmoteDic ??= new Dictionary<string, List<AIEmoteDataAsset>>();
             Data.Master.AIEmoteDic[key] = data;
+            Data.Master.AIEmoteDic["ai/" + Path.GetFileNameWithoutExtension(path)] = data;
             return key;
         }
 
