@@ -30,6 +30,128 @@ namespace Shadowbus
         internal const string TurnStartUri = "TurnStart";
         internal const string JudgeUri = "Judge";
         internal const string EchoUri = "Echo";
+        // Unlike normal battle messages, this table is intentionally sent once at
+        // battle setup so both local rule engines can evaluate hidden-zone effects
+        // against the same card identities.
+        internal const string OpponentDeckIdentityKey = "p2pOpponentDeck";
+
+        internal static List<object> CreateDeckIdentityPayload(IList<int> cardIds)
+        {
+            if (cardIds == null || cardIds.Count == 0)
+            {
+                throw new ArgumentException("A non-empty deck is required.", nameof(cardIds));
+            }
+
+            List<object> payload = new List<object>(cardIds.Count);
+            for (int i = 0; i < cardIds.Count; i++)
+            {
+                int cardId = cardIds[i];
+                if (cardId <= 0)
+                {
+                    throw new ArgumentException(
+                        $"Deck card at position {i + 1} has an invalid ID {cardId}.",
+                        nameof(cardIds));
+                }
+                payload.Add(new Dictionary<string, object>
+                {
+                    ["idx"] = i + 1,
+                    ["cardId"] = cardId
+                });
+            }
+            return payload;
+        }
+
+        internal static bool TryReadDeckIdentityPayload(
+            Dictionary<string, object> data,
+            int expectedCount,
+            out List<object> deckData,
+            out string error)
+        {
+            deckData = null;
+            error = string.Empty;
+            if (data == null || !data.TryGetValue(
+                    OpponentDeckIdentityKey, out object rawPayload))
+            {
+                error = "the Matched message did not contain an opponent deck identity table";
+                return false;
+            }
+            if (!(rawPayload is IEnumerable rawItems) || rawPayload is string)
+            {
+                error = "the opponent deck identity table was not an array";
+                return false;
+            }
+
+            List<object> items = new List<object>();
+            foreach (object item in rawItems)
+            {
+                items.Add(item);
+            }
+            if (expectedCount <= 0)
+            {
+                error = $"the expected opponent deck size was invalid ({expectedCount})";
+                return false;
+            }
+            if (items.Count != expectedCount)
+            {
+                error = $"opponent deck identity count was {items.Count}, expected {expectedCount}";
+                return false;
+            }
+
+            deckData = new List<object>(items.Count);
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (!(items[i] is IDictionary<string, object> item))
+                {
+                    deckData = null;
+                    error = $"opponent deck identity entry {i + 1} was not an object";
+                    return false;
+                }
+                if (!TryConvertInt(item, "idx", out int index) || index != i + 1)
+                {
+                    deckData = null;
+                    error = $"opponent deck identity entry {i + 1} had index " +
+                        (item.ContainsKey("idx") ? item["idx"]?.ToString() : "<missing>") +
+                        $", expected {i + 1}";
+                    return false;
+                }
+                if (!TryConvertInt(item, "cardId", out int cardId) || cardId <= 0)
+                {
+                    deckData = null;
+                    error = $"opponent deck identity entry {i + 1} had an invalid card ID " +
+                        (item.ContainsKey("cardId")
+                            ? item["cardId"]?.ToString() ?? "<null>"
+                            : "<missing>");
+                    return false;
+                }
+                deckData.Add(new Dictionary<string, object>
+                {
+                    ["idx"] = index,
+                    ["cardId"] = cardId
+                });
+            }
+            return true;
+        }
+
+        private static bool TryConvertInt(
+            IDictionary<string, object> data,
+            string key,
+            out int value)
+        {
+            value = 0;
+            if (data == null || !data.TryGetValue(key, out object rawValue))
+            {
+                return false;
+            }
+            try
+            {
+                value = Convert.ToInt32(rawValue, CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
 
         internal static P2PBattleRoute GetRoute(string uri)
         {

@@ -599,6 +599,53 @@ namespace Shadowbus
                 $"[P2P] Applying initial maximum life {initialMaxLife} to both players.");
         }
 
+        [HarmonyPatch(typeof(NetworkBattleManagerBase), nameof(NetworkBattleManagerBase.MetamorphoseCard))]
+        [HarmonyPrefix]
+        private static void NetworkBattleManagerBase_MetamorphoseCard_Prefix(
+            NetworkBattleManagerBase __instance,
+            bool isPlayer,
+            int index,
+            bool isFusion,
+            out bool __state)
+        {
+            __state = false;
+            if (!P2PRuntime.IsActive || isPlayer || isFusion || __instance == null)
+            {
+                return;
+            }
+
+            GameMgr game = GameMgr.GetIns();
+            if (game == null || game.IsAdmin ||
+                NetworkBattleGenericTool.GetCardPlaceState(
+                    __instance.BattleEnemy,
+                    index) != NetworkBattleDefine.NetworkCardPlaceState.Hand)
+            {
+                return;
+            }
+
+            // The server client normally restores secret opponent-hand transforms
+            // immediately. P2P needs the transformed rule object on both peers.
+            game.IsAdmin = true;
+            __state = true;
+        }
+
+        [HarmonyPatch(typeof(NetworkBattleManagerBase), nameof(NetworkBattleManagerBase.MetamorphoseCard))]
+        [HarmonyFinalizer]
+        private static Exception NetworkBattleManagerBase_MetamorphoseCard_Finalizer(
+            bool __state,
+            Exception __exception)
+        {
+            if (__state)
+            {
+                GameMgr game = GameMgr.GetIns();
+                if (game != null)
+                {
+                    game.IsAdmin = false;
+                }
+            }
+            return __exception;
+        }
+
         [HarmonyPatch(
             typeof(SendKeyActionDataManager),
             nameof(SendKeyActionDataManager.SettingKeyActionData),
@@ -816,6 +863,22 @@ namespace Shadowbus
             {
                 __result = true;
             }
+        }
+
+        [HarmonyPatch(typeof(RealTimeNetworkAgent), nameof(RealTimeNetworkAgent.SetNetworkInfo))]
+        [HarmonyPostfix]
+        private static void RealTimeNetworkAgent_SetNetworkInfo_Postfix(
+            Dictionary<string, object> synchronizeData)
+        {
+            if (!P2PRuntime.IsActive)
+            {
+                return;
+            }
+
+            // SetNetworkInfo has already populated oppoInfo here. Installing the
+            // identity table at this point is early enough for Matching.StartBattleLoad
+            // and avoids changing the original server message handling path.
+            P2PRuntime.ApplyOpponentDeckIdentity(synchronizeData);
         }
 
         [HarmonyPatch(

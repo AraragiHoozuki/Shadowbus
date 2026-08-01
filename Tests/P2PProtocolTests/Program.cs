@@ -635,6 +635,70 @@ namespace Shadowbus
                 !P2PBattleProtocol.CarriesBattleStateCheckpoint("PlayActions"),
                 "Battle-state checkpoints do not cover the complete turn transition.");
 
+            List<int> hiddenDeck = new List<int> { 900001, 900002, 900003 };
+            Dictionary<string, object> matchedWithDeck = new Dictionary<string, object>
+            {
+                [P2PBattleProtocol.OpponentDeckIdentityKey] =
+                    P2PBattleProtocol.CreateDeckIdentityPayload(hiddenDeck)
+            };
+            Assert(P2PBattleProtocol.TryReadDeckIdentityPayload(
+                    matchedWithDeck,
+                    hiddenDeck.Count,
+                    out List<object> decodedDeck,
+                    out string deckError),
+                "A valid opponent deck identity table was rejected: " + deckError);
+            Assert(decodedDeck.Count == hiddenDeck.Count &&
+                Convert.ToInt32(((Dictionary<string, object>)decodedDeck[1])["idx"]) == 2 &&
+                Convert.ToInt32(((Dictionary<string, object>)decodedDeck[1])["cardId"]) == 900002,
+                "An opponent deck identity table changed during validation.");
+            Dictionary<string, object> clonedMatchedWithDeck =
+                P2PJson.CloneDictionary(matchedWithDeck);
+            Assert(P2PBattleProtocol.TryReadDeckIdentityPayload(
+                    clonedMatchedWithDeck,
+                    hiddenDeck.Count,
+                    out _,
+                    out _),
+                "An opponent deck identity table did not survive wire JSON conversion.");
+
+            Dictionary<string, object> wrongCount = new Dictionary<string, object>
+            {
+                [P2PBattleProtocol.OpponentDeckIdentityKey] =
+                    P2PBattleProtocol.CreateDeckIdentityPayload(hiddenDeck).Take(2).ToList()
+            };
+            Assert(!P2PBattleProtocol.TryReadDeckIdentityPayload(
+                    wrongCount, hiddenDeck.Count, out _, out _),
+                "A truncated opponent deck identity table was accepted.");
+
+            List<object> invalidCard = P2PBattleProtocol.CreateDeckIdentityPayload(hiddenDeck);
+            ((Dictionary<string, object>)invalidCard[1]).Remove("cardId");
+            Dictionary<string, object> missingCardId = new Dictionary<string, object>
+            {
+                [P2PBattleProtocol.OpponentDeckIdentityKey] = invalidCard
+            };
+            Assert(!P2PBattleProtocol.TryReadDeckIdentityPayload(
+                    missingCardId, hiddenDeck.Count, out _, out _),
+                "An opponent deck identity entry without cardId was accepted.");
+
+            List<object> zeroCardId = P2PBattleProtocol.CreateDeckIdentityPayload(hiddenDeck);
+            ((Dictionary<string, object>)zeroCardId[0])["cardId"] = 0;
+            Dictionary<string, object> invalidCardId = new Dictionary<string, object>
+            {
+                [P2PBattleProtocol.OpponentDeckIdentityKey] = zeroCardId
+            };
+            Assert(!P2PBattleProtocol.TryReadDeckIdentityPayload(
+                    invalidCardId, hiddenDeck.Count, out _, out _),
+                "An opponent deck identity entry with an invalid cardId was accepted.");
+
+            List<object> invalidIndex = P2PBattleProtocol.CreateDeckIdentityPayload(hiddenDeck);
+            ((Dictionary<string, object>)invalidIndex[2])["idx"] = 1;
+            Dictionary<string, object> duplicateIndex = new Dictionary<string, object>
+            {
+                [P2PBattleProtocol.OpponentDeckIdentityKey] = invalidIndex
+            };
+            Assert(!P2PBattleProtocol.TryReadDeckIdentityPayload(
+                    duplicateIndex, hiddenDeck.Count, out _, out _),
+                "An opponent deck identity table with duplicate indexes was accepted.");
+
             P2PBattleSelectionTracker selectionTracker =
                 new P2PBattleSelectionTracker();
             Assert(selectionTracker.RecordHandData(

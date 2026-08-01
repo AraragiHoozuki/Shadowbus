@@ -1241,6 +1241,7 @@ namespace Shadowbus
             P2PDeckSnapshot selfDeck = forHost ? LocalDeck : RemoteDeck;
             P2PDeckSnapshot oppoDeck = forHost ? RemoteDeck : LocalDeck;
             List<int> cards = forHost ? shuffledHostDeck : shuffledGuestDeck;
+            List<int> opponentCards = forHost ? shuffledGuestDeck : shuffledHostDeck;
             List<object> deckData = new List<object>(cards.Count);
             for (int i = 0; i < cards.Count; i++)
             {
@@ -1259,8 +1260,79 @@ namespace Shadowbus
                     battleSeed),
                 ["oppoInfo"] = CreateBattleInfo(oppoProfile, oppoDeck, selfProfile, selfDeck,
                     battleSeed),
-                ["selfDeck"] = deckData
+                ["selfDeck"] = deckData,
+                [P2PBattleProtocol.OpponentDeckIdentityKey] =
+                    P2PBattleProtocol.CreateDeckIdentityPayload(opponentCards)
             };
+        }
+
+        internal static void ApplyOpponentDeckIdentity(
+            Dictionary<string, object> synchronizeData)
+        {
+            if (!IsActive || synchronizeData == null ||
+                !synchronizeData.TryGetValue("uri", out object rawUri) ||
+                !string.Equals(
+                    rawUri?.ToString(),
+                    NetworkBattleDefine.NetworkBattleURI.Matched.ToString(),
+                    StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            int expectedCount = 0;
+            if (synchronizeData.TryGetValue("oppoInfo", out object rawOpponentInfo) &&
+                rawOpponentInfo is Dictionary<string, object> opponentInfo &&
+                opponentInfo.TryGetValue("deckCount", out object rawDeckCount))
+            {
+                try
+                {
+                    expectedCount = Convert.ToInt32(rawDeckCount);
+                }
+                catch (Exception)
+                {
+                    expectedCount = 0;
+                }
+            }
+            if (expectedCount <= 0)
+            {
+                P2PDeckSnapshot expectedDeck = Role == P2PRole.Host
+                    ? RemoteDeck
+                    : LocalDeck;
+                expectedCount = expectedDeck?.Cards?.Count ?? 0;
+            }
+            if (!P2PBattleProtocol.TryReadDeckIdentityPayload(
+                    synchronizeData,
+                    expectedCount,
+                    out List<object> deckData,
+                    out string error))
+            {
+                Plugin.Logger.LogError(
+                    "[P2P] Opponent deck identity was rejected: " + error + ".");
+                return;
+            }
+
+            try
+            {
+                GameMgr game = GameMgr.GetIns();
+                NetworkUserInfoData networkInfo =
+                    game?.GetNetworkUserInfoData();
+                if (networkInfo == null)
+                {
+                    Plugin.Logger.LogError(
+                        "[P2P] Could not install opponent deck identity: " +
+                        "NetworkUserInfoData was unavailable.");
+                    return;
+                }
+                networkInfo.SetOppoDeck(deckData);
+                Plugin.Logger.LogInfo(
+                    $"[P2P] Installed {deckData.Count}-card opponent deck identity " +
+                    "before battle load.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError(
+                    "[P2P] Failed to install opponent deck identity: " + ex);
+            }
         }
 
         private static void TrySendBattleStart()
@@ -1790,8 +1862,8 @@ namespace Shadowbus
             return cards == null
                 ? string.Empty
                 : string.Join(",", cards.Where(card => card != null)
-                    .Select(card => card.Index)
-                    .OrderBy(index => index));
+                    .OrderBy(card => card.Index)
+                    .Select(card => $"{card.Index}:{card.CardId}"));
         }
 
         private static string FormatPublicCards(IEnumerable<BattleCardBase> cards)
