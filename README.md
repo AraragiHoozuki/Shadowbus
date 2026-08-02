@@ -98,6 +98,11 @@ P2P 模式不提供账号服务、房间列表、STUN 打洞或 TURN 中继。�
 
 修改配置后进入卡组列表即可热重载。新增卡牌应使用未占用的卡牌 ID；卡图放在 `Mods/CardImages/`，并通过 `ResourceCardId` 引用。
 
+- 进化前卡图命名为 `<ResourceCardId>.png`。
+- 进化后卡图命名为 `<ResourceCardId>_evo.png`；未提供时自动使用进化前卡图。
+- 修改已有卡牌时，补丁会同步应用到其普通版和闪卡版，同时保留两个版本各自的身份字段。
+- `stringArrayFields` 可用于替换 `SkillEffectPath`、`SkillSe`、`EvolEffectPath` 等 `string[]` 字段。
+
 项目已提供以下扩展：
 
 | 关键词 | 用途 |

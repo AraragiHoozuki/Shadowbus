@@ -9,11 +9,20 @@ using System.Runtime.CompilerServices;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using Wizard;
+using Wizard.Battle.Resource;
+using Wizard.Battle.View.Vfx;
 
 namespace Shadowbus
 {
     public class CardParameterPatch
     {
+        private static readonly HashSet<string> VariantIdentityFields = new HashSet<string>
+        {
+            nameof(CardParameter.CardId),
+            nameof(CardParameter.IsFoil),
+            nameof(CardParameter.CardHashId)
+        };
+
         public bool newCard = false;
         public int cardId = 0;
         public int templateCardId;
@@ -24,57 +33,106 @@ namespace Shadowbus
         public Dictionary<string, string[]> stringArrayFields = [];
         public Dictionary<string, string> localizationFields = [];
 
-        public void PatchTemplate(CardParameter card)
+        public void PatchTemplate(CardParameter card, bool preserveVariantIdentity = false)
         {
+            if (card == null)
+            {
+                Plugin.Logger.LogWarning($"Cannot patch null card for template {templateCardId}");
+                return;
+            }
+
+            ApplyFields(card, boolFields, preserveVariantIdentity);
+            ApplyFields(card, intFields, preserveVariantIdentity);
+            ApplyFields(card, stringChangeFields, preserveVariantIdentity);
+
+            if (stringAppendFields != null)
+            {
+                foreach (var kvp in stringAppendFields)
+                {
+                    TrySetProperty(card, kvp.Key, property =>
+                    {
+                        string oldValue = (string)property.GetValue(card);
+                        return (oldValue ?? string.Empty) + kvp.Value;
+                    }, preserveVariantIdentity);
+                }
+            }
+
+            if (stringArrayFields != null)
+            {
+                foreach (var kvp in stringArrayFields)
+                {
+                    string[] value = kvp.Value == null ? null : (string[])kvp.Value.Clone();
+                    TrySetProperty(card, kvp.Key, _ => value, preserveVariantIdentity);
+                }
+            }
+
+            if (localizationFields != null)
+            {
+                foreach (var kvp in localizationFields)
+                {
+                    if (!string.IsNullOrEmpty(kvp.Value))
+                    {
+                        CardMasterPatcher.CustomLocalization[$"{card.CardId}_{kvp.Key}"] = kvp.Value;
+                    }
+                }
+            }
+        }
+
+        private void ApplyFields<T>(
+            CardParameter card,
+            Dictionary<string, T> fields,
+            bool preserveVariantIdentity)
+        {
+            if (fields == null)
+            {
+                return;
+            }
+
+            foreach (var kvp in fields)
+            {
+                TrySetProperty(card, kvp.Key, property => ConvertValue(property, kvp.Value),
+                    preserveVariantIdentity);
+            }
+        }
+
+        private void TrySetProperty(
+            CardParameter card,
+            string propertyName,
+            Func<PropertyInfo, object> valueFactory,
+            bool preserveVariantIdentity)
+        {
+            if (preserveVariantIdentity && VariantIdentityFields.Contains(propertyName))
+            {
+                return;
+            }
+
             try
             {
-                if (boolFields != null)
+                PropertyInfo property = AccessTools.Property(typeof(CardParameter), propertyName);
+                if (property == null || !property.CanWrite)
                 {
-                    foreach (var kvp in boolFields)
-                    {
-                        AccessTools.Property(typeof(CardParameter), kvp.Key).SetValue(card, kvp.Value);
-                    }
-                }
-                if (intFields != null)
-                {
-                    foreach (var kvp in intFields)
-                    {
-                        AccessTools.Property(typeof(CardParameter), kvp.Key).SetValue(card, kvp.Value);
-                    }
-                }
-                if (stringChangeFields != null)
-                {
-                    foreach (var kvp in stringChangeFields)
-                    {
-                        AccessTools.Property(typeof(CardParameter), kvp.Key).SetValue(card, kvp.Value);
-                    }
-                }
-                if (stringAppendFields != null)
-                {
-                    foreach (var kvp in stringAppendFields)
-                    {
-                        var old = (string)AccessTools.Property(typeof(CardParameter), kvp.Key).GetValue(card);
-                        AccessTools.Property(typeof(CardParameter), kvp.Key).SetValue(card, old + kvp.Value);
-                    }
-                }
-                if (localizationFields != null)
-                {
-                    foreach (var kvp in localizationFields)
-                    {
-                        if (!string.IsNullOrEmpty(kvp.Value))
-                        {
-                            CardMasterPatcher.CustomLocalization.Add($"{card.CardId}_{kvp.Key}", kvp.Value);
-                        }
-                        
-                    }
+                    Plugin.Logger.LogWarning(
+                        $"CardParameter property '{propertyName}' is missing or read-only; skipping it");
+                    return;
                 }
 
+                property.SetValue(card, valueFactory(property));
             }
             catch (Exception e)
             {
-                Plugin.Logger.LogError($"Error patching card {cardId}: {e.Message}");
+                Plugin.Logger.LogError(
+                    $"Error patching card {card.CardId} property '{propertyName}': {e.Message}");
+            }
+        }
+
+        private static object ConvertValue<T>(PropertyInfo property, T value)
+        {
+            if (property.PropertyType.IsEnum && value is int enumValue)
+            {
+                return Enum.ToObject(property.PropertyType, enumValue);
             }
 
+            return value;
         }
 
         public void ConvertFrom(CardParameter original)
@@ -326,15 +384,24 @@ namespace Shadowbus
                     else if (!patch.newCard)
                     {
                         Plugin.Logger.LogInfo($"patching card {template.CardId}");
-                        if (template.IsFoil)
+                        HashSet<int> variantIds = new HashSet<int>
                         {
-                            patch.PatchTemplate(master.GetCardParameterFromId(template.BaseCardId));
-                        }
-                        else
+                            template.CardId,
+                            template.NormalCardId,
+                            template.FoilCardId
+                        };
+                        foreach (int variantId in variantIds)
                         {
-                            patch.PatchTemplate(master.GetCardParameterFromId(template.FoilCardId));
+                            CardParameter variant = master.GetCardParameterFromId(variantId);
+                            if (variant == null)
+                            {
+                                Plugin.Logger.LogWarning(
+                                    $"related card version {variantId} for {template.CardId} not found");
+                                continue;
+                            }
+
+                            patch.PatchTemplate(variant, preserveVariantIdentity: true);
                         }
-                        patch.PatchTemplate(template);
                     }
                     else
                     {
@@ -380,7 +447,10 @@ namespace Shadowbus
 
         [HarmonyPatch(typeof(Cute.ResourcesManager), nameof(Cute.ResourcesManager.FindCardMaterial))]
         [HarmonyPostfix]
-        public static void ResourcesManager_FindCardMaterial(ref int cardId, ref Material __result)
+        public static void ResourcesManager_FindCardMaterial(
+            int cardId,
+            bool isEvol,
+            ref Material __result)
         {
             if (__result != null)
             {
@@ -390,14 +460,79 @@ namespace Shadowbus
                 }
             }
 
-            if (__result == null) {
-                Plugin.Logger.LogInfo($"Custom texture for {cardId} loaded");
-                Material newMat = UnityEngine.Object.Instantiate(commonCardMaterial);
-                Texture2D custom_texture = Utils.GetExternalTexture(cardId);
-                newMat.mainTexture = custom_texture;
-                newMat.SetTexture("_MainTex", custom_texture);
-                __result = newMat;
+            Material customMaterial = CreateExternalCardMaterial(cardId, isEvol, __result);
+            if (customMaterial != null)
+            {
+                __result = customMaterial;
             }
+        }
+
+        [HarmonyPatch(typeof(BattleResourceMgr), nameof(BattleResourceMgr.LoadCardImageMaterial))]
+        [HarmonyPrefix]
+        public static bool BattleResourceMgr_LoadCardImageMaterial(
+            int cardId,
+            bool isEvolution,
+            ref VfxBase __result)
+        {
+            int resourceCardId = ResolveResourceCardId(cardId);
+            if (!Utils.HasExternalTexture(resourceCardId, isEvolution))
+            {
+                return true;
+            }
+
+            // The original loader assumes an AssetBundle material exists and dereferences
+            // null for external-only cards. The postfix below supplies the material instead.
+            __result = NullVfx.GetInstance();
+            return false;
+        }
+
+        [HarmonyPatch(typeof(BattleResourceMgr), nameof(BattleResourceMgr.GetCardImageMaterial))]
+        [HarmonyPostfix]
+        public static void BattleResourceMgr_GetCardImageMaterial(
+            int cardId,
+            bool isEvolution,
+            ref Material __result)
+        {
+            int resourceCardId = ResolveResourceCardId(cardId);
+            Material customMaterial = CreateExternalCardMaterial(
+                resourceCardId, isEvolution, __result);
+            if (customMaterial != null)
+            {
+                __result = customMaterial;
+            }
+        }
+
+        private static int ResolveResourceCardId(int cardId)
+        {
+            CardParameter parameter = CardMaster.GetInstanceForBattle()?.GetCardParameterFromId(cardId);
+            return parameter?.ResourceCardId ?? cardId;
+        }
+
+        private static Material CreateExternalCardMaterial(
+            int resourceCardId,
+            bool isEvolution,
+            Material originalMaterial)
+        {
+            Texture2D texture = Utils.GetExternalTexture(resourceCardId, isEvolution);
+            if (texture == null)
+            {
+                return null;
+            }
+
+            Material materialTemplate = originalMaterial ?? commonCardMaterial;
+            if (materialTemplate == null)
+            {
+                Plugin.Logger.LogWarning(
+                    $"Cannot apply custom texture {resourceCardId}: no card material template is loaded");
+                return null;
+            }
+
+            Material material = UnityEngine.Object.Instantiate(materialTemplate);
+            material.mainTexture = texture;
+            material.SetTexture("_MainTex", texture);
+            Plugin.Logger.LogInfo(
+                $"Custom {(isEvolution ? "evolved" : "normal")} texture for {resourceCardId} loaded");
+            return material;
         }
     }
 
