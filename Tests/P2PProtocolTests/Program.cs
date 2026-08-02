@@ -20,6 +20,8 @@ namespace Shadowbus
                 TestRoomRules();
                 TestTwoPickRuleFiles();
                 TestPerspectiveTransform();
+                TestSkillTargetPerspectiveTransform();
+                TestHiddenSnapshotPerspectiveTransform();
                 TestBattleResults();
                 TestBattleProtocol();
                 TestBattleStateDiagnostics();
@@ -467,6 +469,190 @@ namespace Shadowbus
                 ((List<object>)opponentLeaderAttack["oppoTargetList"])[0];
             Assert(Convert.ToInt32(attackTarget["isSelf"]) == 0,
                 "An opponent leader attack was redirected to the acting side.");
+        }
+
+        private static void TestSkillTargetPerspectiveTransform()
+        {
+            Dictionary<string, object> source = new Dictionary<string, object>
+            {
+                ["skillTarget"] = "10123",
+                ["skillTargetList"] = new List<object>
+                    { "01234", "1234", 10005, "invalid", 0 },
+                ["orderList"] = new List<object>
+                {
+                    new Dictionary<string, object>
+                    {
+                        ["move"] = new Dictionary<string, object>
+                        {
+                            ["skillTarget"] = "10007"
+                        }
+                    }
+                }
+            };
+
+            Dictionary<string, object> flipped = P2PMessageTransform.FlipPerspective(source);
+            Assert((string)flipped["skillTarget"] == "123",
+                "A skill target with source-player side 1 was not flipped.");
+            List<object> targets = (List<object>)flipped["skillTargetList"];
+            Assert((string)targets[0] == "11234" &&
+                (string)targets[1] == "11234" &&
+                Convert.ToInt32(targets[2]) == 5,
+                "Skill target list entries did not preserve their low digits while flipping sides.");
+            Assert((string)targets[3] == "invalid" && Convert.ToInt32(targets[4]) == 0,
+                "Invalid skill target values were unexpectedly changed.");
+            Dictionary<string, object> move = (Dictionary<string, object>)
+                ((List<object>)flipped["orderList"])[0];
+            Dictionary<string, object> nestedMove = (Dictionary<string, object>)move["move"];
+            Assert((string)nestedMove["skillTarget"] == "7",
+                "A nested skill target was not flipped.");
+            Assert((string)source["skillTarget"] == "10123",
+                "Skill target perspective conversion modified the source message.");
+        }
+
+        private static void TestHiddenSnapshotPerspectiveTransform()
+        {
+            Dictionary<string, object> source = new Dictionary<string, object>
+            {
+                ["p2pHiddenOwner"] = 1,
+                ["p2pHiddenRemoved"] = new List<object> { 17, 29 },
+                ["p2pHiddenCards"] = new List<object>
+                {
+                    new Dictionary<string, object>
+                    {
+                        ["idx"] = 42,
+                        ["isSelf"] = 1,
+                        ["p2pGenericKeys"] = new Dictionary<string, object>
+                        {
+                            ["isSelf"] = 7
+                        },
+                        ["p2pDamagedCounter"] = new Dictionary<string, object>
+                        {
+                            ["selfTurn"] = 3,
+                            ["opponentTurn"] = 4
+                        },
+                        ["p2pMaxAttackableCount"] = 3,
+                        ["p2pModifiers"] = new Dictionary<string, object>
+                        {
+                            ["cost"] = new List<object>
+                            {
+                                new Dictionary<string, object>
+                                {
+                                    ["kind"] = "add",
+                                    ["value"] = -2,
+                                    ["resident"] = 1
+                                }
+                            }
+                        },
+                        ["p2pSkillCollections"] = new Dictionary<string, object>
+                        {
+                            ["lifeHistory"] = new List<object>
+                            {
+                                new Dictionary<string, object>
+                                {
+                                    ["kind"] = "damage",
+                                    ["value"] = 2,
+                                    ["turn"] = 6,
+                                    ["turnOwner"] = 1
+                                }
+                            }
+                        }
+                    }
+                },
+                ["p2pPlayerHistory"] = new Dictionary<string, object>
+                {
+                    ["owner"] = 1,
+                    ["revision"] = 4,
+                    ["class"] = new Dictionary<string, object>
+                    {
+                        ["p2pSkillActivationIds"] = new List<object>
+                        {
+                            9000000001L
+                        },
+                        ["p2pDamagedCounter"] = new Dictionary<string, object>
+                        {
+                            ["selfTurn"] = 8,
+                            ["opponentTurn"] = 1
+                        }
+                    },
+                    ["lists"] = new Dictionary<string, object>
+                    {
+                        ["GameTurnPlayCards"] = new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["turnOwner"] = 1,
+                                ["card"] = new Dictionary<string, object>
+                                {
+                                    ["owner"] = 1,
+                                    ["idx"] = 42,
+                                    ["isSelf"] = 9
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            Dictionary<string, object> flipped =
+                P2PMessageTransform.FlipPerspective(source);
+            Assert(Convert.ToInt32(flipped["p2pHiddenOwner"]) == 1,
+                "Hidden snapshot owner was unexpectedly perspective-flipped.");
+            List<object> removed = (List<object>)flipped["p2pHiddenRemoved"];
+            Assert(Convert.ToInt32(removed[0]) == 17 &&
+                Convert.ToInt32(removed[1]) == 29,
+                "Hidden snapshot tombstones were unexpectedly perspective-flipped.");
+            Dictionary<string, object> hidden = (Dictionary<string, object>)
+                ((List<object>)flipped["p2pHiddenCards"])[0];
+            Assert(Convert.ToInt32(hidden["isSelf"]) == 1,
+                "Hidden snapshot card metadata was unexpectedly perspective-flipped.");
+            Dictionary<string, object> genericKeys =
+                (Dictionary<string, object>)hidden["p2pGenericKeys"];
+            Assert(Convert.ToInt32(genericKeys["isSelf"]) == 7,
+                "A generic skill key named isSelf was corrupted by perspective conversion.");
+            Dictionary<string, object> damagedCounter =
+                (Dictionary<string, object>)hidden["p2pDamagedCounter"];
+            Assert(Convert.ToInt32(damagedCounter["selfTurn"]) == 3 &&
+                Convert.ToInt32(damagedCounter["opponentTurn"]) == 4,
+                "Card-owner-relative damage counters were perspective-flipped.");
+            Assert(Convert.ToInt32(hidden["p2pMaxAttackableCount"]) == 3,
+                "A hidden card's maximum attack count was perspective-flipped.");
+            Dictionary<string, object> modifiers =
+                (Dictionary<string, object>)hidden["p2pModifiers"];
+            Dictionary<string, object> costModifier =
+                (Dictionary<string, object>)
+                    ((List<object>)modifiers["cost"])[0];
+            Assert(Convert.ToInt32(costModifier["resident"]) == 1 &&
+                Convert.ToInt32(costModifier["value"]) == -2,
+                "A hidden-card modifier was corrupted by perspective conversion.");
+            Dictionary<string, object> skillCollections =
+                (Dictionary<string, object>)hidden["p2pSkillCollections"];
+            Dictionary<string, object> lifeHistory =
+                (Dictionary<string, object>)
+                    ((List<object>)skillCollections["lifeHistory"])[0];
+            Assert(Convert.ToInt32(lifeHistory["turnOwner"]) == 1,
+                "An absolute hidden-card history turn owner was perspective-flipped.");
+            Dictionary<string, object> history =
+                (Dictionary<string, object>)flipped["p2pPlayerHistory"];
+            Assert(Convert.ToInt32(history["owner"]) == 1 &&
+                Convert.ToInt32(history["revision"]) == 4,
+                "Player history ownership was unexpectedly perspective-flipped.");
+            Dictionary<string, object> classState =
+                (Dictionary<string, object>)history["class"];
+            List<object> activationIds =
+                (List<object>)classState["p2pSkillActivationIds"];
+            Assert(Convert.ToInt64(activationIds[0]) == 9000000001L,
+                "A class skill-activation history ID was perspective-flipped.");
+            Dictionary<string, object> historyLists =
+                (Dictionary<string, object>)history["lists"];
+            Dictionary<string, object> historyEntry =
+                (Dictionary<string, object>)
+                    ((List<object>)historyLists["GameTurnPlayCards"])[0];
+            Dictionary<string, object> historyCard =
+                (Dictionary<string, object>)historyEntry["card"];
+            Assert(Convert.ToInt32(historyEntry["turnOwner"]) == 1 &&
+                Convert.ToInt32(historyCard["owner"]) == 1 &&
+                Convert.ToInt32(historyCard["isSelf"]) == 9,
+                "Player history metadata was corrupted by perspective conversion.");
         }
 
         private static void TestDealState()
@@ -935,6 +1121,74 @@ namespace Shadowbus
                 Convert.ToInt32(discardedKnownCard["from"]) == 10 &&
                 Convert.ToInt32(discardedKnownCard["to"]) == 30,
                 "A discarded card could not be revealed from the pre-action cache.");
+
+            P2PBattleCardTracker hiddenCostTracker =
+                new P2PBattleCardTracker();
+            hiddenCostTracker.Reset(new List<int>(), new List<int>());
+            hiddenCostTracker.RememberSourceCard(true, 15, 1500, 7);
+            Dictionary<string, object> hiddenCostChange =
+                new Dictionary<string, object>
+                {
+                    ["uri"] = "PlayActions",
+                    ["orderList"] = new List<object>
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["alter"] = new Dictionary<string, object>
+                            {
+                                ["idx"] = new List<object> { 15 },
+                                ["isSelf"] = 1,
+                                ["type"] = "add",
+                                ["cost"] = "a2"
+                            }
+                        }
+                    }
+                };
+            hiddenCostTracker.PrepareOutgoingAction(true, hiddenCostChange,
+                out _, out _);
+            Dictionary<string, object> hiddenCostPlay =
+                new Dictionary<string, object>
+                {
+                    ["uri"] = "PlayActions",
+                    ["playIdx"] = 15
+                };
+            Assert(hiddenCostTracker.PrepareOutgoingAction(true, hiddenCostPlay,
+                    out _, out _) &&
+                Convert.ToInt32(((Dictionary<string, object>)
+                    ((List<object>)hiddenCostPlay["knownList"])[0])["cost"]) == 9,
+                "A hidden hand cost change was not retained for a later card reveal.");
+
+            Dictionary<string, object> hiddenCostRemoval =
+                new Dictionary<string, object>
+                {
+                    ["uri"] = "PlayActions",
+                    ["orderList"] = new List<object>
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["alter"] = new Dictionary<string, object>
+                            {
+                                ["idx"] = new List<object> { 15 },
+                                ["isSelf"] = 1,
+                                ["type"] = "del",
+                                ["cost"] = "a2"
+                            }
+                        }
+                    }
+                };
+            hiddenCostTracker.PrepareOutgoingAction(true, hiddenCostRemoval,
+                out _, out _);
+            Dictionary<string, object> hiddenCostPlayAfterRemoval =
+                new Dictionary<string, object>
+                {
+                    ["uri"] = "PlayActions",
+                    ["playIdx"] = 15
+                };
+            Assert(hiddenCostTracker.PrepareOutgoingAction(true,
+                    hiddenCostPlayAfterRemoval, out _, out _) &&
+                Convert.ToInt32(((Dictionary<string, object>)
+                    ((List<object>)hiddenCostPlayAfterRemoval["knownList"])[0])["cost"]) == 7,
+                "A removed hidden hand cost change was not reversed in the cache.");
 
             P2PBattleCardTracker tracker = new P2PBattleCardTracker();
             tracker.Reset(

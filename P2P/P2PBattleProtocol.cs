@@ -841,9 +841,31 @@ namespace Shadowbus
                     continue;
                 }
                 bool ownerIsHost = IsSelf(card) ? sourceIsHost : !sourceIsHost;
+                int? cost = TryGetInt(card, "cost", out int knownCost)
+                    ? (int?)knownCost
+                    : null;
                 foreach (int index in GetIndices(card))
                 {
                     GetCards(ownerIsHost)[index] = cardId;
+                    if (!cost.HasValue)
+                    {
+                        continue;
+                    }
+
+                    // Accelerated/Crystallize known entries deliberately carry the
+                    // original cost while their cardId is already the transformed
+                    // card. Keep the replacement cost in that case; otherwise cache
+                    // the explicit state supplied by the network message.
+                    if (GetCardMutations(ownerIsHost).TryGetValue(
+                            index, out CardMutation mutation) &&
+                        mutation.CardId == cardId)
+                    {
+                        GetCardCosts(ownerIsHost)[index] = mutation.Cost;
+                    }
+                    else
+                    {
+                        GetCardCosts(ownerIsHost)[index] = cost.Value;
+                    }
                 }
             }
         }
@@ -870,7 +892,92 @@ namespace Shadowbus
                     ObserveMetamorphose(sourceIsHost,
                         rawMetamorphose as Dictionary<string, object>);
                 }
+                if (order.TryGetValue("alter", out object rawAlter))
+                {
+                    ObserveAlter(sourceIsHost,
+                        rawAlter as Dictionary<string, object>);
+                }
             }
+        }
+
+        private void ObserveAlter(
+            bool sourceIsHost,
+            Dictionary<string, object> alter)
+        {
+            if (alter == null || !alter.TryGetValue("cost", out object rawCost))
+            {
+                return;
+            }
+
+            string encodedCost = rawCost?.ToString();
+            if (!TryParseCostOperation(encodedCost, out char operation, out int value))
+            {
+                return;
+            }
+
+            bool isDelete = alter.TryGetValue("type", out object rawType) &&
+                string.Equals(rawType?.ToString(), "del", StringComparison.Ordinal);
+            bool ownerIsHost = IsSelf(alter) ? sourceIsHost : !sourceIsHost;
+            Dictionary<int, int> costs = GetCardCosts(ownerIsHost);
+            foreach (int index in GetIndices(alter))
+            {
+                if (!costs.TryGetValue(index, out int current))
+                {
+                    continue;
+                }
+
+                if (isDelete)
+                {
+                    // A delta can be reversed without additional information. A
+                    // set/half operation cannot reliably reconstruct its previous
+                    // value, so leave that cache untouched until a card is observed
+                    // again with an explicit cost.
+                    if (operation == 'a')
+                    {
+                        costs[index] = Math.Max(0, current - value);
+                    }
+                    continue;
+                }
+
+                switch (operation)
+                {
+                    case 'a':
+                        costs[index] = Math.Max(0, current + value);
+                        break;
+                    case 's':
+                        costs[index] = Math.Max(0, value);
+                        break;
+                    case 'd':
+                        costs[index] = (current + 1) / 2;
+                        break;
+                    case 'D':
+                        costs[index] = current / 2;
+                        break;
+                }
+            }
+        }
+
+        private static bool TryParseCostOperation(
+            string encoded,
+            out char operation,
+            out int value)
+        {
+            operation = '\0';
+            value = 0;
+            if (string.IsNullOrEmpty(encoded) || encoded.Length < 2)
+            {
+                return false;
+            }
+
+            operation = encoded[0];
+            if (operation != 'a' && operation != 's' &&
+                operation != 'd' && operation != 'D')
+            {
+                operation = '\0';
+                return false;
+            }
+            return int.TryParse(encoded.Substring(1), NumberStyles.Integer,
+                CultureInfo.InvariantCulture, out value);
         }
 
         private void RevealPublicMoves(
@@ -1420,6 +1527,7 @@ namespace Shadowbus
             string type = Read(data, "type", "-");
             int targets = Count(data, "targetList") + Count(data, "oppoTargetList");
             int known = Count(data, "knownList");
+            int unapproved = Count(data, "uList");
             int orders = Count(data, "orderList");
             List<string> moves = new List<string>();
             if (data.TryGetValue("orderList", out object rawOrders))
@@ -1438,7 +1546,7 @@ namespace Shadowbus
                 }
             }
             return $"uri={uri}, playIdx={playIndex}, type={type}, " +
-                $"targets={targets}, known={known}, orders={orders}, " +
+                $"targets={targets}, known={known}, uList={unapproved}, orders={orders}, " +
                 $"moves=[{string.Join(";", moves)}]";
         }
 

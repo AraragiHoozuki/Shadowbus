@@ -37,28 +37,12 @@ namespace Shadowbus
 
         public static string GetLobbyBackgroundName()
         {
-            if (_current == null)
-            {
-                return "bg_gp_special_01";
-            }
-
-            if (!string.IsNullOrWhiteSpace(_current.LobbyBackground))
+            if (_current != null && !string.IsNullOrWhiteSpace(_current.LobbyBackground))
             {
                 return _current.LobbyBackground.Trim();
             }
 
-            switch ((_current.UiTheme ?? string.Empty).Trim().ToLowerInvariant())
-            {
-                case "classic": return "bg_boss_rush";
-                case "grand_prix_2": return "bg_gp_special_02";
-                case "colosseum_1": return "bg_colosseum_01";
-                case "colosseum_2": return "bg_colosseum_02";
-                case "two_pick": return "bg_2pick";
-                case "quest": return "bg_quest";
-                case "grand_prix_1":
-                default:
-                    return "bg_gp_special_01";
-            }
+            return "bg_boss_rush";
         }
 
         public static void Initialize()
@@ -67,10 +51,11 @@ namespace Shadowbus
             {
                 Directory.CreateDirectory(PathHelper.BossRushPath);
                 Directory.CreateDirectory(PathHelper.BossRushStatePath);
-                Packages.Clear();
-                PackageDirectories.Clear();
                 EnsureDefaultPackage();
 
+                List<BossRushPackage> loadedPackages = new List<BossRushPackage>();
+                Dictionary<string, string> loadedDirectories =
+                    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 foreach (string directory in Directory.GetDirectories(PathHelper.BossRushPath))
                 {
                     string name = Path.GetFileName(directory);
@@ -90,15 +75,15 @@ namespace Shadowbus
                     {
                         BossRushPackage package = JsonConvert.DeserializeObject<BossRushPackage>(File.ReadAllText(configPath), JsonSettings);
                         ValidatePackage(package, configPath);
-                        if (Packages.Any(existing => string.Equals(existing.Id, package.Id, StringComparison.OrdinalIgnoreCase)))
+                        if (loadedPackages.Any(existing => string.Equals(existing.Id, package.Id, StringComparison.OrdinalIgnoreCase)))
                         {
                             Plugin.Logger.LogWarning($"[BossRush] Duplicate config id '{package.Id}', skipping '{configPath}'.");
                             continue;
                         }
 
                         package.Normalize();
-                        Packages.Add(package);
-                        PackageDirectories[package.Id] = directory;
+                        loadedPackages.Add(package);
+                        loadedDirectories[package.Id] = directory;
                     }
                     catch (Exception exception)
                     {
@@ -106,12 +91,41 @@ namespace Shadowbus
                     }
                 }
 
-                Packages.Sort((left, right) => string.Compare(left.DisplayName, right.DisplayName, StringComparison.OrdinalIgnoreCase));
+                loadedPackages.Sort((left, right) =>
+                    string.Compare(left.DisplayName, right.DisplayName, StringComparison.OrdinalIgnoreCase));
+                Packages.Clear();
+                Packages.AddRange(loadedPackages);
+                PackageDirectories.Clear();
+                foreach (KeyValuePair<string, string> entry in loadedDirectories)
+                {
+                    PackageDirectories[entry.Key] = entry.Value;
+                }
+
                 if (Packages.Count > 0)
                 {
                     string last = LoadLastSelectedId();
                     _current = Packages.FirstOrDefault(package => string.Equals(package.Id, last, StringComparison.OrdinalIgnoreCase)) ?? Packages[0];
                 }
+                else
+                {
+                    _current = null;
+                }
+            }
+        }
+
+        public static bool ReloadPackages()
+        {
+            try
+            {
+                Initialize();
+                Plugin.Logger.LogInfo($"[BossRush] Hot reload found {Packages.Count} valid config package(s).");
+                return Packages.Count > 0;
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[BossRush] Could not hot reload config directories; keeping the previous cache: {exception.Message}");
+                return Packages.Count > 0;
             }
         }
 
@@ -119,15 +133,46 @@ namespace Shadowbus
         {
             lock (Sync)
             {
-                BossRushPackage package = Packages.FirstOrDefault(item => string.Equals(item.Id, id, StringComparison.OrdinalIgnoreCase));
-                if (package == null)
+                int packageIndex = Packages.FindIndex(item => string.Equals(item.Id, id, StringComparison.OrdinalIgnoreCase));
+                if (packageIndex < 0)
                 {
                     return;
                 }
 
+                BossRushPackage package = Packages[packageIndex];
+                string directory;
+                if (PackageDirectories.TryGetValue(package.Id, out directory))
+                {
+                    string configPath = Path.Combine(directory, "bossrush.json");
+                    try
+                    {
+                        BossRushPackage reloaded = JsonConvert.DeserializeObject<BossRushPackage>(
+                            File.ReadAllText(configPath), JsonSettings);
+                        ValidatePackage(reloaded, configPath);
+                        if (!string.Equals(reloaded.Id, package.Id, StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new InvalidDataException(
+                                $"id cannot be changed while the game is running (expected '{package.Id}', got '{reloaded.Id}')");
+                        }
+
+                        reloaded.Normalize();
+                        Packages[packageIndex] = reloaded;
+                        package = reloaded;
+                    }
+                    catch (Exception exception)
+                    {
+                        Plugin.Logger.LogWarning(
+                            $"[BossRush] Could not reload config '{configPath}'; using the previously loaded copy: {exception.Message}");
+                    }
+                }
+
                 _current = package;
                 File.WriteAllText(Path.Combine(PathHelper.BossRushPath, "selected.txt"), package.Id);
-                GetState(package);
+                BossRushState state = GetState(package);
+                state?.Normalize(package);
+                Plugin.Logger.LogInfo(
+                    $"[BossRush] Selected config '{package.Id}' with ui_theme '{package.UiTheme}' " +
+                    $"and lobby background '{GetLobbyBackgroundName()}'.");
             }
         }
 

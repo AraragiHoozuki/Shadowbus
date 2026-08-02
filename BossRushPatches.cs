@@ -1,6 +1,7 @@
 using HarmonyLib;
 using Cute;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -289,6 +290,7 @@ namespace Shadowbus
         [HarmonyPrefix]
         private static bool BossRushButton_Prefix(QuestEventBossRushButton __instance)
         {
+            BossRushOfflineData.ReloadPackages();
             IReadOnlyList<BossRushPackage> packages = BossRushOfflineData.AvailablePackages;
             if (!BossRushOfflineData.IsActive || packages == null || packages.Count == 0)
             {
@@ -451,26 +453,103 @@ namespace Shadowbus
             string background = BossRushOfflineData.GetLobbyBackgroundName();
             __result = Toolbox.ResourcesManager.GetAssetTypePath(
                 background, ResourcesManager.AssetLoadPathType.Background, isFetch);
-
             if (!isFetch)
             {
-                return;
+                Plugin.Logger.LogInfo($"[BossRush] Loading lobby background '{background}'.");
+            }
+        }
+
+        [HarmonyPatch(typeof(BossRushLobby), "Initialize")]
+        [HarmonyPostfix]
+        private static void BossRushLobby_Initialize_Postfix(BossRushLobby __instance)
+        {
+            UITexture background = AccessTools.Field(typeof(BossRushLobby), "_bgTexture")?
+                .GetValue(__instance) as UITexture;
+            if (background != null && background.mainTexture == null)
+            {
+                background.mainTexture = Texture2D.whiteTexture;
+                background.color = new Color32(38, 35, 43, 255);
+                Plugin.Logger.LogWarning(
+                    $"[BossRush] Lobby background '{BossRushOfflineData.GetLobbyBackgroundName()}' is unavailable; " +
+                    "using a neutral fallback.");
             }
 
             try
             {
-                if (Toolbox.ResourcesManager.LoadObject<Texture>(__result, false, false) != null)
+                int themedLabelCount = ApplyLobbyUiTheme(__instance);
+                __instance.StartCoroutine(ReapplyLobbyUiTheme(__instance));
+                Plugin.Logger.LogInfo(
+                    $"[BossRush] Applied UI theme '{BossRushOfflineData.CurrentPackage?.UiTheme}' " +
+                    $"to {themedLabelCount} lobby labels.");
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogWarning($"[BossRush] Could not apply lobby UI theme: {exception.Message}");
+            }
+        }
+
+        private static IEnumerator ReapplyLobbyUiTheme(BossRushLobby lobby)
+        {
+            for (int frame = 0; frame < 3; frame++)
+            {
+                yield return null;
+                if (lobby == null) yield break;
+
+                try
                 {
-                    return;
+                    ApplyLobbyUiTheme(lobby);
+                }
+                catch (Exception exception)
+                {
+                    Plugin.Logger.LogWarning($"[BossRush] Could not reapply lobby UI theme: {exception.Message}");
+                    yield break;
                 }
             }
-            catch
+        }
+
+        private static int ApplyLobbyUiTheme(BossRushLobby lobby)
+        {
+            UISprite window = AccessTools.Field(typeof(BossRushLobby), "_windowSprite")?
+                .GetValue(lobby) as UISprite;
+            if (window != null)
             {
+                window.color = GetLobbyPanelColor();
             }
 
-            Plugin.Logger.LogWarning($"[BossRush] Lobby background '{background}' is unavailable; using the Quest background.");
-            __result = Toolbox.ResourcesManager.GetAssetTypePath(
-                "bg_quest", ResourcesManager.AssetLoadPathType.Background, true);
+            GameObject panelRoot = AccessTools.Field(typeof(BossRushLobby), "_animationFromLeft")?
+                .GetValue(lobby) as GameObject;
+            if (panelRoot == null) return 0;
+
+            int themedLabelCount = 0;
+            foreach (UILabel label in panelRoot.GetComponentsInChildren<UILabel>(true))
+            {
+                if (label == null) continue;
+                label.applyGradient = false;
+                label.color = new Color32(255, 248, 224, 255);
+                label.effectStyle = UILabel.Effect.Outline8;
+                label.effectColor = new Color32(30, 25, 33, 255);
+                label.effectDistance = new Vector2(2f, 2f);
+                themedLabelCount++;
+            }
+
+            return themedLabelCount;
+        }
+
+        private static Color GetLobbyPanelColor()
+        {
+            string theme = BossRushOfflineData.CurrentPackage?.UiTheme?.Trim().ToLowerInvariant();
+            switch (theme)
+            {
+                case "grand_prix_2": return new Color32(66, 48, 70, 255);
+                case "colosseum_1": return new Color32(45, 66, 56, 255);
+                case "colosseum_2": return new Color32(74, 48, 50, 255);
+                case "two_pick": return new Color32(45, 56, 78, 255);
+                case "quest": return new Color32(58, 59, 56, 255);
+                case "classic": return new Color32(56, 49, 58, 255);
+                case "grand_prix_1":
+                default:
+                    return new Color32(46, 58, 64, 255);
+            }
         }
 
         [HarmonyPatch(typeof(BossRushLobby), "InitializeBattleButton")]

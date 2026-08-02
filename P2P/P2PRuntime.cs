@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -6,7 +7,10 @@ using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Security.Cryptography;
+using System.Globalization;
+using Newtonsoft.Json;
 using Wizard;
 using Wizard.RoomMatch;
 
@@ -53,6 +57,41 @@ namespace Shadowbus
         private static List<int> shuffledGuestDeck;
         private static readonly P2PBattleCardTracker BattleCardTracker =
             new P2PBattleCardTracker();
+        // The native server only sends private card state when a card is involved
+        // in a particular register action.  In P2P both clients execute the same
+        // effects locally, so keep a compact per-index snapshot and publish every
+        // hidden-zone state change.  The receiver feeds these entries through the
+        // original knownList/ReplaceReceivedCard path.
+        private static readonly Dictionary<int, string> LocalHiddenCardStateSignatures =
+            new Dictionary<int, string>();
+        // Keep the latest pre-action state separately from the last state sent to
+        // the peer. A played/discarded card is no longer in a private zone when
+        // EmitMsg runs, so without this cache its hand/deck-only state is lost at
+        // exactly the point where the receiver replaces the hidden card.
+        private static readonly Dictionary<int, Dictionary<string, object>>
+            LocalHiddenCardStates =
+            new Dictionary<int, Dictionary<string, object>>();
+        // Hidden card snapshots use a P2P-only side channel because the native
+        // CardDataModel has no fields for generic skill values, fusion turns, or
+        // Super Skybound Art. Keep the latest complete state per owner/index so
+        // a later native card replacement can apply it deterministically.
+        private static readonly Dictionary<string, Dictionary<string, object>>
+            ReceivedHiddenCardStates =
+            new Dictionary<string, Dictionary<string, object>>();
+        private static readonly Dictionary<string, string>
+            ReceivedHiddenCardStateSignatures =
+            new Dictionary<string, string>();
+        private static readonly Dictionary<string, AppliedHiddenCardState>
+            AppliedReceivedHiddenCardStates =
+            new Dictionary<string, AppliedHiddenCardState>();
+        private const string PlayerHistoryStateKey = "p2pPlayerHistory";
+        private static readonly Dictionary<string, PendingPlayerHistoryState>
+            ReceivedPlayerHistoryStates =
+            new Dictionary<string, PendingPlayerHistoryState>();
+        private static readonly Dictionary<int, int> AppliedPlayerHistoryRevisions =
+            new Dictionary<int, int>();
+        private static string localPlayerHistoryStateSignature = string.Empty;
+        private static int localPlayerHistoryRevision;
         private static List<int> hostMulliganHand;
         private static List<int> guestMulliganHand;
         private static bool hostSwapped;
@@ -64,6 +103,8 @@ namespace Shadowbus
         private static bool peerDisconnected;
         private static bool roomReleaseInjected;
         private static bool pendingOpponentSync;
+        private static bool applyingReceivedHiddenCardStates;
+        private static bool applyingReceivedPlayerHistoryStates;
         private static Dictionary<string, object> hostDeckEntry;
         private static Dictionary<string, object> guestDeckEntry;
         private static int sessionGeneration;
@@ -120,6 +161,9 @@ namespace Shadowbus
                 }
             }
             TrySynchronizeOpponentRoomState();
+            TryApplyPendingHiddenCardStates();
+            TryApplyPendingPlayerHistoryStates();
+            ObserveLocalHiddenCardStates();
             TryCheckPendingBattleStates();
             if (!peerDisconnected)
             {
@@ -360,6 +404,8 @@ namespace Shadowbus
             messageData["uri"] = uri;
             messageData["viewerId"] = LocalProfile?.ViewerId ?? P2PIdentity.ViewerId;
             messageData["bid"] = BattleId ?? string.Empty;
+            AppendLocalHiddenCardState(uri, messageData);
+            AppendLocalPlayerHistoryState(uri, messageData);
             RemovePrivateTwoPickDraftData(messageData, uri);
             if (string.Equals(
                     uri,
@@ -558,6 +604,15 @@ namespace Shadowbus
             shuffledHostDeck = null;
             shuffledGuestDeck = null;
             BattleCardTracker.Clear();
+            LocalHiddenCardStateSignatures.Clear();
+            LocalHiddenCardStates.Clear();
+            ReceivedHiddenCardStates.Clear();
+            ReceivedHiddenCardStateSignatures.Clear();
+            AppliedReceivedHiddenCardStates.Clear();
+            ReceivedPlayerHistoryStates.Clear();
+            AppliedPlayerHistoryRevisions.Clear();
+            localPlayerHistoryStateSignature = string.Empty;
+            localPlayerHistoryRevision = 0;
             BattleSelectionTracker.Reset();
             PendingBattleStateChecks.Clear();
             hostMulliganHand = null;
@@ -1271,10 +1326,14 @@ namespace Shadowbus
         {
             if (!IsActive || synchronizeData == null ||
                 !synchronizeData.TryGetValue("uri", out object rawUri) ||
-                !string.Equals(
+                (!string.Equals(
                     rawUri?.ToString(),
                     NetworkBattleDefine.NetworkBattleURI.Matched.ToString(),
-                    StringComparison.Ordinal))
+                    StringComparison.Ordinal) &&
+                 !string.Equals(
+                     rawUri?.ToString(),
+                     NetworkBattleDefine.NetworkBattleURI.BattleStart.ToString(),
+                     StringComparison.Ordinal)))
             {
                 return;
             }
@@ -1323,6 +1382,9 @@ namespace Shadowbus
                         "NetworkUserInfoData was unavailable.");
                     return;
                 }
+                // SetOppoDeck uses DataMgr as its size fallback while the Matched
+                // callback has not populated oppoInfo yet.
+                game.GetDataMgr()?.SetDeckMaxCount(expectedCount, false);
                 networkInfo.SetOppoDeck(deckData);
                 Plugin.Logger.LogInfo(
                     $"[P2P] Installed {deckData.Count}-card opponent deck identity " +
@@ -1353,6 +1415,7 @@ namespace Shadowbus
             P2PProfile oppoProfile = forHost ? RemoteProfile : LocalProfile;
             P2PDeckSnapshot selfDeck = forHost ? LocalDeck : RemoteDeck;
             P2PDeckSnapshot oppoDeck = forHost ? RemoteDeck : LocalDeck;
+            List<int> opponentCards = forHost ? shuffledGuestDeck : shuffledHostDeck;
             return new Dictionary<string, object>
             {
                 ["uri"] = NetworkBattleDefine.NetworkBattleURI.BattleStart.ToString(),
@@ -1361,7 +1424,9 @@ namespace Shadowbus
                 ["selfInfo"] = CreateBattleInfo(selfProfile, selfDeck, oppoProfile, oppoDeck,
                     battleSeed),
                 ["oppoInfo"] = CreateBattleInfo(oppoProfile, oppoDeck, selfProfile, selfDeck,
-                    battleSeed)
+                    battleSeed),
+                [P2PBattleProtocol.OpponentDeckIdentityKey] =
+                    P2PBattleProtocol.CreateDeckIdentityPayload(opponentCards)
             };
         }
 
@@ -1714,6 +1779,8 @@ namespace Shadowbus
                 expectedBattleState = rawState as Dictionary<string, object>;
                 data.Remove(P2PBattleStateDiagnostics.StateKey);
             }
+            RememberReceivedHiddenCardStates(data);
+            RememberReceivedPlayerHistoryState(data, false);
             if (string.Equals(
                     uri,
                     NetworkBattleDefine.NetworkBattleURI.JudgeResult.ToString(),
@@ -1745,6 +1812,21 @@ namespace Shadowbus
                         $"(game singleton available: {gameAgent != null}).");
                     return;
                 }
+            }
+            // Matching starts battle loading from the Matched callback before
+            // RealTimeNetworkBattleAgent applies SetNetworkInfo. Install the
+            // private opponent deck table first so that callback can construct
+            // real opponent cards instead of the all-Dummy fallback.
+            if (string.Equals(
+                    uri,
+                    NetworkBattleDefine.NetworkBattleURI.Matched.ToString(),
+                    StringComparison.Ordinal) ||
+                string.Equals(
+                    uri,
+                    NetworkBattleDefine.NetworkBattleURI.BattleStart.ToString(),
+                    StringComparison.Ordinal))
+            {
+                ApplyOpponentDeckIdentity(data);
             }
             PendingBattleStateCheck pendingStateCheck = null;
             if (expectedBattleState != null)
@@ -1785,6 +1867,2087 @@ namespace Shadowbus
             }
         }
 
+        private static void RememberReceivedHiddenCardStates(
+            Dictionary<string, object> data)
+        {
+            if (data == null ||
+                !data.TryGetValue("p2pHiddenOwner", out object rawOwner))
+            {
+                return;
+            }
+
+            int owner;
+            try
+            {
+                owner = Convert.ToInt32(rawOwner, CultureInfo.InvariantCulture);
+            }
+            catch (Exception)
+            {
+                return;
+            }
+
+            if (owner != 0 && owner != 1)
+            {
+                return;
+            }
+
+            bool ownerIsHost = owner == 1;
+
+            // A tombstone means the card has left a hidden zone. Do not consume
+            // its cached state here: BeforeSettingReceiveData still needs that
+            // state while replacing the card for this very action. Cleanup runs
+            // from the ReceivedMessage postfix after native processing succeeds.
+
+            if (!data.TryGetValue("p2pHiddenCards", out object rawCards) ||
+                rawCards is string || !(rawCards is IEnumerable cards))
+            {
+                return;
+            }
+
+            foreach (object rawCard in cards)
+            {
+                Dictionary<string, object> card =
+                    rawCard as Dictionary<string, object>;
+                if (card == null || !TryGetStateInt(card, "idx", out int index) ||
+                    index <= 0)
+                {
+                    continue;
+                }
+
+                string key = HiddenStateKey(ownerIsHost, index);
+                Dictionary<string, object> clone = P2PJson.CloneDictionary(card);
+                ReceivedHiddenCardStates[key] = clone;
+                ReceivedHiddenCardStateSignatures[key] =
+                    JsonConvert.SerializeObject(clone, P2PJson.Settings);
+            }
+        }
+
+        internal static void FinalizeReceivedHiddenCardRemovals(
+            Dictionary<string, object> data)
+        {
+            if (!IsActive || data == null ||
+                !data.TryGetValue("p2pHiddenOwner", out object rawOwner) ||
+                !data.TryGetValue("p2pHiddenRemoved", out object rawRemoved) ||
+                rawRemoved is string || !(rawRemoved is IEnumerable removed))
+            {
+                return;
+            }
+
+            int owner;
+            try
+            {
+                owner = Convert.ToInt32(rawOwner, CultureInfo.InvariantCulture);
+            }
+            catch (Exception)
+            {
+                return;
+            }
+            if (owner != 0 && owner != 1)
+            {
+                return;
+            }
+
+            bool ownerIsHost = owner == 1;
+            foreach (object rawIndex in removed)
+            {
+                int index;
+                try
+                {
+                    index = Convert.ToInt32(rawIndex,
+                        CultureInfo.InvariantCulture);
+                }
+                catch (Exception)
+                {
+                    continue;
+                }
+                if (index <= 0)
+                {
+                    continue;
+                }
+
+                string key = HiddenStateKey(ownerIsHost, index);
+                ReceivedHiddenCardStates.Remove(key);
+                ReceivedHiddenCardStateSignatures.Remove(key);
+                AppliedReceivedHiddenCardStates.Remove(key);
+            }
+        }
+
+        private static string HiddenStateKey(bool ownerIsHost, int index)
+        {
+            return (ownerIsHost ? "1:" : "0:") +
+                index.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static void RememberReceivedPlayerHistoryState(
+            Dictionary<string, object> data,
+            bool readyToApply)
+        {
+            if (data == null ||
+                !data.TryGetValue(PlayerHistoryStateKey, out object rawState) ||
+                !(rawState is Dictionary<string, object> state) ||
+                !TryGetStateInt(state, "owner", out int owner) ||
+                (owner != 0 && owner != 1) ||
+                !TryGetStateInt(state, "revision", out int revision) ||
+                revision <= 0)
+            {
+                return;
+            }
+
+            if (AppliedPlayerHistoryRevisions.TryGetValue(
+                    owner, out int appliedRevision) &&
+                revision <= appliedRevision)
+            {
+                return;
+            }
+
+            string key = PlayerHistoryStateKeyFor(owner, revision);
+            if (!ReceivedPlayerHistoryStates.TryGetValue(
+                    key, out PendingPlayerHistoryState pending))
+            {
+                pending = new PendingPlayerHistoryState
+                {
+                    Owner = owner,
+                    Revision = revision,
+                    State = P2PJson.CloneDictionary(state),
+                    FirstSeenUtc = DateTime.UtcNow
+                };
+                ReceivedPlayerHistoryStates[key] = pending;
+            }
+            if (readyToApply)
+            {
+                pending.ReadyToApply = true;
+            }
+        }
+
+        internal static void MarkReceivedPlayerHistoryStateReady(
+            Dictionary<string, object> data)
+        {
+            if (!IsActive)
+            {
+                return;
+            }
+            RememberReceivedPlayerHistoryState(data, true);
+        }
+
+        private static string PlayerHistoryStateKeyFor(int owner, int revision)
+        {
+            return owner.ToString(CultureInfo.InvariantCulture) + ":" +
+                revision.ToString(CultureInfo.InvariantCulture);
+        }
+
+        internal static void TryApplyPendingPlayerHistoryStates()
+        {
+            if (applyingReceivedPlayerHistoryStates ||
+                !IsActive || ReceivedPlayerHistoryStates.Count == 0 ||
+                !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
+                manager.BattlePlayer == null || manager.BattleEnemy == null ||
+                manager.VfxMgr == null || !manager.VfxMgr.IsEnd)
+            {
+                return;
+            }
+
+            applyingReceivedPlayerHistoryStates = true;
+            try
+            {
+                DateTime now = DateTime.UtcNow;
+                int localOwner = Role == P2PRole.Host ? 1 : 0;
+                List<PendingPlayerHistoryState> candidates =
+                    ReceivedPlayerHistoryStates.Values
+                        .Where(state => state.ReadyToApply &&
+                            state.Owner != localOwner &&
+                            state.NextAttemptUtc <= now)
+                        .GroupBy(state => state.Owner)
+                        .Select(group => group.OrderByDescending(
+                            state => state.Revision).First())
+                        .ToList();
+                foreach (PendingPlayerHistoryState pending in candidates)
+                {
+                    if (AppliedPlayerHistoryRevisions.TryGetValue(
+                            pending.Owner, out int appliedRevision) &&
+                        pending.Revision <= appliedRevision)
+                    {
+                        RemovePlayerHistoryStatesThrough(
+                            pending.Owner, appliedRevision);
+                        continue;
+                    }
+
+                    BattlePlayerBase target = pending.Owner == localOwner
+                        ? manager.BattlePlayer
+                        : manager.BattleEnemy;
+                    bool complete = ApplyPlayerHistoryState(
+                        target, pending.State, out string unresolved);
+                    pending.Attempts++;
+                    if (!complete)
+                    {
+                        pending.NextAttemptUtc = now.AddMilliseconds(100);
+                        if (!pending.WarningLogged &&
+                            now - pending.FirstSeenUtc >= TimeSpan.FromSeconds(5))
+                        {
+                            pending.WarningLogged = true;
+                            Plugin.Logger.LogWarning(
+                                $"[P2P] Player history revision {pending.Revision} " +
+                                $"is still waiting for card references: {unresolved}.");
+                        }
+                        continue;
+                    }
+
+                    AppliedPlayerHistoryRevisions[pending.Owner] = pending.Revision;
+                    RemovePlayerHistoryStatesThrough(
+                        pending.Owner, pending.Revision);
+                    Plugin.Logger.LogDebug(
+                        $"[P2P] Applied remote player history revision " +
+                        $"{pending.Revision}.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogDebug(
+                    "[P2P] Could not apply player history state: " + ex.Message);
+            }
+            finally
+            {
+                applyingReceivedPlayerHistoryStates = false;
+            }
+        }
+
+        private static void RemovePlayerHistoryStatesThrough(
+            int owner,
+            int revision)
+        {
+            foreach (string key in ReceivedPlayerHistoryStates
+                .Where(item => item.Value.Owner == owner &&
+                    item.Value.Revision <= revision)
+                .Select(item => item.Key)
+                .ToList())
+            {
+                ReceivedPlayerHistoryStates.Remove(key);
+            }
+        }
+
+        private static bool ApplyPlayerHistoryState(
+            BattlePlayerBase player,
+            Dictionary<string, object> state,
+            out string unresolved)
+        {
+            unresolved = string.Empty;
+            if (player == null || state == null)
+            {
+                unresolved = "player unavailable";
+                return false;
+            }
+
+            if (state.TryGetValue("scalars", out object rawScalars) &&
+                rawScalars is Dictionary<string, object> scalars)
+            {
+                ApplyPlayerHistoryScalars(player, scalars);
+            }
+            List<string> unresolvedLists = new List<string>();
+            if (state.TryGetValue("class", out object rawClassState) &&
+                rawClassState is Dictionary<string, object> classState &&
+                classState.Count > 0 &&
+                !ApplyPlayerClassState(player.Class, classState))
+            {
+                unresolvedLists.Add("class=card references or preprocess state");
+            }
+            if (!state.TryGetValue("lists", out object rawLists) ||
+                !(rawLists is Dictionary<string, object> lists))
+            {
+                unresolved = string.Join(", ", unresolvedLists);
+                return unresolvedLists.Count == 0;
+            }
+
+            foreach (KeyValuePair<string, object> listState in lists)
+            {
+                if (!PlayerHistoryListNameSet.Contains(listState.Key) ||
+                    !TryGetPlayerHistoryListMember(
+                        player, listState.Key, out Type listType,
+                        out object rawTarget) ||
+                    !listType.IsGenericType ||
+                    listType.GetGenericTypeDefinition() != typeof(List<>))
+                {
+                    continue;
+                }
+                if (!(rawTarget is IList target))
+                {
+                    continue;
+                }
+
+                Type elementType = listType.GetGenericArguments()[0];
+                if (!TryBuildPlayerHistoryList(
+                        listState.Value, elementType,
+                        out List<object> replacements,
+                        out string listUnresolved))
+                {
+                    unresolvedLists.Add(listState.Key + "=" + listUnresolved);
+                    continue;
+                }
+
+                target.Clear();
+                foreach (object replacement in replacements)
+                {
+                    target.Add(replacement);
+                }
+            }
+
+            unresolved = string.Join(", ", unresolvedLists);
+            return unresolvedLists.Count == 0;
+        }
+
+        private static bool ApplyPlayerClassState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            if (card == null || state == null)
+            {
+                return false;
+            }
+
+            ApplyNativeCompatibleState(card, state);
+            ApplyCardModifierState(card, state);
+            ApplyPrimitiveState(card, state, "p2pCardPrimitive");
+            ApplySkillPrimitiveState(card, state);
+            ApplyCardSkillState(card, state);
+            ApplyGenericState(card, state);
+            ApplyIntegerListState(card, state);
+            ApplyStructuredSkillCollectionState(card, state);
+            ApplyDamagedCounterState(card, state);
+            ApplyAttackCountState(card, state);
+            ApplySkillActivationState(card, state);
+            ApplySkillCounterState(card, state);
+            bool referencesComplete = ApplyCardReferenceState(card, state);
+            bool preprocessComplete = ApplyPreprocessState(card, state);
+            return ApplyFusionState(card, state) &&
+                referencesComplete && preprocessComplete;
+        }
+
+        private static void ApplyPlayerHistoryScalars(
+            BattlePlayerBase player,
+            Dictionary<string, object> scalars)
+        {
+            foreach (KeyValuePair<string, object> value in scalars)
+            {
+                if (!PlayerHistoryScalarNameSet.Contains(value.Key) ||
+                    !TryFindInstanceProperty(player.GetType(), value.Key,
+                        out PropertyInfo property) ||
+                    !IsSimpleStateType(property.PropertyType))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    object converted = ConvertStateValue(
+                        value.Value, property.PropertyType);
+                    if (TryFindBackingField(player.GetType(), value.Key,
+                            out FieldInfo backingField) &&
+                        !backingField.IsInitOnly && !backingField.IsLiteral)
+                    {
+                        backingField.SetValue(player, converted);
+                        continue;
+                    }
+
+                    string explicitFieldName = GetPlayerHistoryScalarFieldName(
+                        value.Key);
+                    if (!string.IsNullOrEmpty(explicitFieldName) &&
+                        TryFindInstanceField(player.GetType(), explicitFieldName,
+                            out FieldInfo explicitField) &&
+                        !explicitField.IsInitOnly && !explicitField.IsLiteral)
+                    {
+                        explicitField.SetValue(player, converted);
+                        continue;
+                    }
+
+                    MethodInfo setter = property.GetSetMethod(true);
+                    setter?.Invoke(player, new[] { converted });
+                }
+                catch (Exception)
+                {
+                }
+            }
+        }
+
+        private static string GetPlayerHistoryScalarFieldName(string propertyName)
+        {
+            switch (propertyName)
+            {
+                case "PpTotal":
+                    return "_ppTotal";
+                case "EpTotal":
+                    return "m_EpTotal";
+                case "GameUsedEpCount":
+                    return "_gameUsedEpCount";
+                case "TurnUsedEpCount":
+                    return "_turnUsedEpCount";
+                default:
+                    return string.Empty;
+            }
+        }
+
+        private static bool TryBuildPlayerHistoryList(
+            object rawList,
+            Type elementType,
+            out List<object> replacements,
+            out string unresolved)
+        {
+            replacements = new List<object>();
+            unresolved = string.Empty;
+            if (rawList is string || !(rawList is IEnumerable values))
+            {
+                return true;
+            }
+
+            int position = 0;
+            foreach (object rawValue in values)
+            {
+                if (elementType == typeof(BattleCardBase))
+                {
+                    if (!TryResolvePlayerHistoryCard(rawValue, out BattleCardBase card))
+                    {
+                        unresolved = DescribeUnresolvedCard(rawValue, position);
+                        return false;
+                    }
+                    replacements.Add(card);
+                }
+                else if (elementType == typeof(BattlePlayerBase.TurnAndCard))
+                {
+                    if (!(rawValue is Dictionary<string, object> item) ||
+                        !TryResolvePlayerHistoryCard(
+                            item.TryGetValue("card", out object rawCard)
+                                ? rawCard : null,
+                            out BattleCardBase card))
+                    {
+                        unresolved = DescribeUnresolvedCard(rawValue, position);
+                        return false;
+                    }
+                    TryGetStateInt(item, "turn", out int turn);
+                    TryGetStateInt(item, "end", out int end);
+                    replacements.Add(new BattlePlayerBase.TurnAndCard(
+                        turn, GetLocalTurnFlag(item), card, end != 0));
+                }
+                else if (elementType == typeof(BattlePlayerBase.CardAndTribe))
+                {
+                    if (!(rawValue is Dictionary<string, object> item) ||
+                        !TryResolvePlayerHistoryCard(
+                            item.TryGetValue("card", out object rawCard)
+                                ? rawCard : null,
+                            out BattleCardBase card))
+                    {
+                        unresolved = DescribeUnresolvedCard(rawValue, position);
+                        return false;
+                    }
+                    List<CardBasePrm.TribeType> tribes = item.TryGetValue(
+                            "tribes", out object rawTribes)
+                        ? ToIntArray(rawTribes)
+                            .Select(value => (CardBasePrm.TribeType)value)
+                            .ToList()
+                        : new List<CardBasePrm.TribeType>();
+                    replacements.Add(
+                        new BattlePlayerBase.CardAndTribe(card, tribes));
+                }
+                else if (elementType == typeof(BattlePlayerBase.CardAndId))
+                {
+                    if (!(rawValue is Dictionary<string, object> item) ||
+                        !TryResolvePlayerHistoryCard(
+                            item.TryGetValue("card", out object rawCard)
+                                ? rawCard : null,
+                            out BattleCardBase card))
+                    {
+                        unresolved = DescribeUnresolvedCard(rawValue, position);
+                        return false;
+                    }
+                    TryGetStateInt(item, "id", out int id);
+                    replacements.Add(new BattlePlayerBase.CardAndId(card, id));
+                }
+                else if (elementType == typeof(BattlePlayerBase.CardAndValue))
+                {
+                    if (!(rawValue is Dictionary<string, object> item) ||
+                        !TryResolvePlayerHistoryCard(
+                            item.TryGetValue("card", out object rawCard)
+                                ? rawCard : null,
+                            out BattleCardBase card))
+                    {
+                        unresolved = DescribeUnresolvedCard(rawValue, position);
+                        return false;
+                    }
+                    TryGetStateInt(item, "value", out int value);
+                    replacements.Add(
+                        new BattlePlayerBase.CardAndValue(card, value));
+                }
+                else if (elementType == typeof(TurnAndIntValue))
+                {
+                    if (!(rawValue is Dictionary<string, object> item))
+                    {
+                        position++;
+                        continue;
+                    }
+                    TryGetStateInt(item, "value", out int value);
+                    TryGetStateInt(item, "turn", out int turn);
+                    replacements.Add(
+                        new TurnAndIntValue(
+                            value, turn, GetLocalTurnFlag(item)));
+                }
+                else if (elementType == typeof(int))
+                {
+                    try
+                    {
+                        replacements.Add(Convert.ToInt32(
+                            rawValue, CultureInfo.InvariantCulture));
+                    }
+                    catch (Exception)
+                    {
+                        replacements.Add(0);
+                    }
+                }
+                else if (elementType == typeof(List<BattleCardBase>))
+                {
+                    List<BattleCardBase> nested = new List<BattleCardBase>();
+                    if (!(rawValue is string) && rawValue is IEnumerable rawCards)
+                    {
+                        foreach (object rawCard in rawCards)
+                        {
+                            if (!TryResolvePlayerHistoryCard(
+                                    rawCard, out BattleCardBase card))
+                            {
+                                unresolved = DescribeUnresolvedCard(
+                                    rawCard, position);
+                                return false;
+                            }
+                            nested.Add(card);
+                        }
+                    }
+                    replacements.Add(nested);
+                }
+                else
+                {
+                    return true;
+                }
+                position++;
+            }
+            return true;
+        }
+
+        private static bool GetLocalTurnFlag(
+            Dictionary<string, object> item)
+        {
+            if (TryGetStateInt(item, "turnOwner", out int turnOwner) &&
+                (turnOwner == 0 || turnOwner == 1))
+            {
+                bool turnOwnerIsHost = turnOwner == 1;
+                return turnOwnerIsHost == (Role == P2PRole.Host);
+            }
+            return TryGetStateInt(item, "self", out int legacySelf) &&
+                legacySelf != 0;
+        }
+
+        private static bool TryResolvePlayerHistoryCard(
+            object rawReference,
+            out BattleCardBase card)
+        {
+            card = null;
+            if (!(rawReference is Dictionary<string, object> reference) ||
+                !TryGetStateInt(reference, "idx", out int index))
+            {
+                return false;
+            }
+            if (index <= 0)
+            {
+                return true;
+            }
+            card = ResolveCardReference(reference);
+            return card != null;
+        }
+
+        private static string DescribeUnresolvedCard(object rawReference, int position)
+        {
+            Dictionary<string, object> reference = rawReference as
+                Dictionary<string, object>;
+            if (reference != null && reference.TryGetValue(
+                    "card", out object nested))
+            {
+                reference = nested as Dictionary<string, object>;
+            }
+            string owner = reference != null &&
+                reference.TryGetValue("owner", out object rawOwner)
+                    ? rawOwner?.ToString() ?? "?"
+                    : "?";
+            string index = reference != null &&
+                reference.TryGetValue("idx", out object rawIndex)
+                    ? rawIndex?.ToString() ?? "?"
+                    : "?";
+            return $"entry {position} owner={owner} idx={index}";
+        }
+
+        internal static void ApplyReceivedHiddenCardState(
+            BattleCardBase card,
+            bool nativeStateInherited = false)
+        {
+            if (!IsActive || card == null || card.Index <= 0)
+            {
+                return;
+            }
+
+            bool localOwnerIsHost = Role == P2PRole.Host;
+            bool ownerIsHost = card.IsPlayer ? localOwnerIsHost : !localOwnerIsHost;
+            string key = HiddenStateKey(ownerIsHost, card.Index);
+            if (!ReceivedHiddenCardStates.TryGetValue(
+                    key,
+                    out Dictionary<string, object> state))
+            {
+                return;
+            }
+
+            try
+            {
+                ReceivedHiddenCardStateSignatures.TryGetValue(
+                    key, out string signature);
+                AppliedReceivedHiddenCardStates.TryGetValue(
+                    key, out AppliedHiddenCardState previous);
+                bool sameCoreState = previous != null &&
+                    ReferenceEquals(previous.Card, card) &&
+                    string.Equals(previous.Signature, signature ?? string.Empty,
+                        StringComparison.Ordinal);
+
+                // Unresolved card references can remain pending for several frames.
+                // Apply absolute modifiers only once per card/signature and retry only
+                // the reference-bearing portions, otherwise an unresolved token would
+                // repeatedly clear and rebuild cost/attack/skill modifiers every frame.
+                if (!sameCoreState)
+                {
+                    ApplyNativeCompatibleState(card, state);
+                    ApplyCardModifierState(card, state);
+                    ApplyPrimitiveState(card, state, "p2pCardPrimitive");
+                    ApplySkillPrimitiveState(card, state);
+                    ApplyCardSkillState(card, state);
+                    ApplyGenericState(card, state);
+                    ApplyIntegerListState(card, state);
+                    ApplyStructuredSkillCollectionState(card, state);
+                    ApplyDamagedCounterState(card, state);
+                    ApplyAttackCountState(card, state);
+                    ApplySkillActivationState(card, state);
+                    ApplySkillCounterState(card, state);
+                }
+                bool referenceStateComplete = ApplyCardReferenceState(card, state);
+                bool preprocessStateComplete = ApplyPreprocessState(card, state);
+                bool nativeStateComplete = nativeStateInherited ||
+                    (sameCoreState && previous.NativeStateInherited);
+                bool stateComplete = ApplyFusionState(card, state) &&
+                    referenceStateComplete &&
+                    (preprocessStateComplete || nativeStateComplete);
+                AppliedReceivedHiddenCardStates[key] = new AppliedHiddenCardState
+                {
+                    Card = card,
+                    Signature = signature ?? string.Empty,
+                    NativeStateInherited = nativeStateComplete,
+                    StateComplete = stateComplete,
+                    NextRetryUtc = stateComplete
+                        ? DateTime.MinValue
+                        : DateTime.UtcNow.AddMilliseconds(100)
+                };
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[P2P] Could not apply hidden card state idx={card.Index}: " +
+                    ex.Message);
+            }
+        }
+
+        private static void ApplyNativeCompatibleState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            if (card == null || state == null)
+            {
+                return;
+            }
+
+            if (TryGetStateInt(state, "cardId", out int cardId) &&
+                cardId > 0 && card.CardId != cardId)
+            {
+                Plugin.Logger.LogDebug(
+                    $"[P2P] Deferred hidden state idx={card.Index} currently has " +
+                    $"cardId={card.CardId}; authoritative cardId={cardId}.");
+            }
+
+            if (TryGetStateInt(state, "spellboost", out int spellboost))
+            {
+                card.SetSpellChargeCount(spellboost);
+            }
+            if (TryGetStateInt(state, "cost", out int cost))
+            {
+                card.ClearCostModifier();
+                card.AddCostModifier(new CostSetModifier(Math.Max(0, cost), false),
+                    null, false);
+            }
+
+            SkillApplyInformation information =
+                card.SkillApplyInformation as SkillApplyInformation;
+            if (information == null)
+            {
+                return;
+            }
+
+            information.OffenseModifierList.Clear();
+            information.LifeModifierList.Clear();
+            information.ChantCountModifierList.Clear();
+            if (TryGetStateInt(state, "setAtk", out int attack))
+            {
+                information.AddOffenseModifier(new OffenseSetModifier(attack));
+            }
+            if (TryGetStateInt(state, "setLife", out int life))
+            {
+                information.AddLifeModifier(new LifeSetModifier(life));
+            }
+            if (TryGetStateInt(state, "setChantCount", out int chantCount))
+            {
+                information.GiveChantCount(
+                    new ChantCountSetModifier(chantCount));
+            }
+
+            if (state.ContainsKey("clan") || state.ContainsKey("tribe"))
+            {
+                information.ForceDepriveChangeAffiliation();
+                CardBasePrm.ClanType clan = card.BaseParameter.Clan;
+                if (TryGetStateInt(state, "clan", out int rawClan))
+                {
+                    clan = (CardBasePrm.ClanType)rawClan;
+                }
+                CardBasePrm.TribeInfo tribe = null;
+                if (state.TryGetValue("tribe", out object rawTribe) &&
+                    !string.IsNullOrEmpty(rawTribe?.ToString()) &&
+                    !string.Equals(rawTribe.ToString(), "NONE",
+                        StringComparison.Ordinal))
+                {
+                    tribe = new CardBasePrm.TribeInfo(
+                        CardParameter.CreateTribeList(rawTribe.ToString()),
+                        CardBasePrm.TribeChangeType.CHANGE);
+                }
+                information.GiveChangeAffiliation(clan, tribe, false);
+            }
+        }
+
+        private static void ApplySkillPrimitiveState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            ApplyPrimitiveState(card.SkillApplyInformation, state,
+                "p2pSkillPrimitive");
+        }
+
+        private static void ApplyCardSkillState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            if (TryGetStateInt(state, "p2pSkillActivatedCount",
+                    out int activatedCount))
+            {
+                card.SetSkillActivatedCount(activatedCount);
+            }
+            if (TryGetStateInt(state, "p2pSkillActivatedWrap",
+                    out int wrapValue))
+            {
+                card.SetSkillActivatedCountWrapValue(wrapValue);
+            }
+
+            SkillApplyInformation information =
+                card.SkillApplyInformation as SkillApplyInformation;
+            if (information == null)
+            {
+                return;
+            }
+            bool hasRandomArray = TryGetStateInt(state,
+                "p2pSkillRandomArrayPresent", out int randomArrayPresent) &&
+                randomArrayPresent != 0;
+            information.GiveSkillRandomArray(hasRandomArray &&
+                state.TryGetValue("p2pSkillRandomArray", out object rawRandomArray)
+                    ? ToIntArray(rawRandomArray)
+                    : null);
+        }
+
+        private static void ApplyPrimitiveState(
+            object target,
+            Dictionary<string, object> state,
+            string stateKey)
+        {
+            if (target == null || state == null ||
+                !(state.TryGetValue(stateKey, out object rawValues) &&
+                    rawValues is Dictionary<string, object> values))
+            {
+                return;
+            }
+
+            foreach (KeyValuePair<string, object> value in values)
+            {
+                if (!TryFindBackingField(target.GetType(), value.Key,
+                        out FieldInfo field) || field.IsInitOnly || field.IsLiteral ||
+                    !IsSimpleStateType(field.FieldType))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    object converted = ConvertStateValue(value.Value, field.FieldType);
+                    field.SetValue(target, converted);
+                }
+                catch (Exception)
+                {
+                    // A field may be a runtime-version-specific implementation
+                    // detail. Ignore only that field and keep the rest of the
+                    // snapshot usable.
+                }
+            }
+        }
+
+        private static void ApplyGenericState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            SkillApplyInformation information =
+                card.SkillApplyInformation as SkillApplyInformation;
+            if (information == null)
+            {
+                return;
+            }
+
+            bool hasArray = TryGetStateInt(state, "p2pGenericArrayPresent",
+                out int arrayPresent) && arrayPresent != 0;
+            if (hasArray && state.TryGetValue("p2pGenericArray", out object rawArray))
+            {
+                information.SetSkillGenericArray(ToIntArray(rawArray));
+            }
+            else
+            {
+                information.SetSkillGenericArray(null);
+            }
+
+            information.SkillGenericKeyAndValue.Clear();
+            if (state.TryGetValue("p2pGenericKeys", out object rawKeys) &&
+                rawKeys is Dictionary<string, object> keys)
+            {
+                foreach (KeyValuePair<string, object> key in keys)
+                {
+                    try
+                    {
+                        information.SetSkillGenericKeyAndValue(key.Key,
+                            Convert.ToInt32(key.Value, CultureInfo.InvariantCulture));
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+        }
+
+        private static void ApplyIntegerListState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            SkillApplyInformation information =
+                card.SkillApplyInformation as SkillApplyInformation;
+            if (information == null ||
+                !state.TryGetValue("p2pIntLists", out object rawLists) ||
+                !(rawLists is Dictionary<string, object> lists))
+            {
+                return;
+            }
+
+            ReplaceIntList(information.CantAtkUnitBaseCardIdList,
+                lists, "cantAtkBaseIds");
+            ReplaceIntList(information.DecreaseTurnStartPPList,
+                lists, "decreaseTurnStartPP");
+            ReplaceIntList(information.CantEvolutionList,
+                lists, "cantEvolution");
+            ReplaceIntList(information.SkillHealList,
+                lists, "skillHeal");
+        }
+
+        private static void ReplaceIntList(
+            List<int> target,
+            Dictionary<string, object> lists,
+            string key)
+        {
+            if (target == null || !lists.TryGetValue(key, out object rawValues))
+            {
+                return;
+            }
+            target.Clear();
+            target.AddRange(ToIntArray(rawValues));
+        }
+
+        private static void ApplyStructuredSkillCollectionState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            SkillApplyInformation information =
+                card.SkillApplyInformation as SkillApplyInformation;
+            if (information == null ||
+                !state.TryGetValue("p2pSkillCollections", out object rawState) ||
+                !(rawState is Dictionary<string, object> collections))
+            {
+                return;
+            }
+
+            information.TurnBuffCountList.Clear();
+            if (collections.TryGetValue("turnBuff", out object rawTurnBuff) &&
+                !(rawTurnBuff is string) && rawTurnBuff is IEnumerable turnBuffs)
+            {
+                foreach (object rawTurn in turnBuffs)
+                {
+                    if (!(rawTurn is Dictionary<string, object> turn) ||
+                        !TryGetStateInt(turn, "turn", out int turnNumber))
+                    {
+                        continue;
+                    }
+                    information.TurnBuffCountList.Add(
+                        new BuffCountInfo(turnNumber, GetLocalTurnFlag(turn)));
+                }
+            }
+
+            information.TokenDrawModifiers.Clear();
+            if (collections.TryGetValue("tokenDraw", out object rawTokenDraw) &&
+                !(rawTokenDraw is string) && rawTokenDraw is IEnumerable tokenDraws)
+            {
+                foreach (object rawModifier in tokenDraws)
+                {
+                    if (!(rawModifier is Dictionary<string, object> modifier) ||
+                        !TryGetStateInt(modifier, "cardId", out int cardId) ||
+                        !TryGetStateInt(modifier, "count", out int count))
+                    {
+                        continue;
+                    }
+                    information.TokenDrawModifiers.Add(
+                        new TokenDrawModifier(cardId, count));
+                }
+            }
+
+            if (!HasExactLifeModifierState(state) &&
+                collections.TryGetValue("lifeHistory", out object rawLifeHistory))
+            {
+                information.LifeModifierList.RemoveAll(modifier =>
+                    modifier is DamageCardParameterModifier ||
+                    modifier is HealCardParameterModifier ||
+                    modifier is HiddenCardLifeStateModifier);
+                if (!(rawLifeHistory is string) &&
+                    rawLifeHistory is IEnumerable lifeHistory)
+                {
+                    foreach (object rawModifier in lifeHistory)
+                    {
+                        if (!(rawModifier is Dictionary<string, object> modifier) ||
+                            !TryGetStateInt(modifier, "value", out int value) ||
+                            !TryGetStateInt(modifier, "turn", out int turn))
+                        {
+                            continue;
+                        }
+
+                        string kind = modifier.TryGetValue(
+                                "kind", out object rawKind)
+                            ? rawKind?.ToString()
+                            : string.Empty;
+                        if (string.Equals(kind, "damage",
+                                StringComparison.Ordinal))
+                        {
+                            information.LifeModifierList.Add(
+                                new DamageCardParameterModifier(
+                                    value, turn, GetLocalTurnFlag(modifier)));
+                        }
+                        else if (string.Equals(kind, "heal",
+                                     StringComparison.Ordinal))
+                        {
+                            information.LifeModifierList.Add(
+                                new HealCardParameterModifier(
+                                    value, turn, GetLocalTurnFlag(modifier)));
+                        }
+                    }
+                }
+
+                CorrectHiddenCardLifeState(card, information, state);
+            }
+
+            ReplaceTurnValueCollection(
+                information.CausedDamageModifierList,
+                collections,
+                "causedDamage",
+                (value, turn, isSelfTurn) =>
+                    new CausedDamageCardParameterModifier(
+                        value, turn, isSelfTurn));
+            ReplaceTurnValueCollection(
+                information.PpModifierList,
+                collections,
+                "ppAdd",
+                (value, turn, isSelfTurn) =>
+                    new PpAddModifier(value, turn, isSelfTurn));
+        }
+
+        private static bool HasExactLifeModifierState(
+            Dictionary<string, object> state)
+        {
+            return state.TryGetValue("p2pModifiers", out object rawModifiers) &&
+                rawModifiers is Dictionary<string, object> modifiers &&
+                modifiers.ContainsKey("life");
+        }
+
+        private static void ApplyCardModifierState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            if (card == null ||
+                !state.TryGetValue("p2pModifiers", out object rawModifiers) ||
+                !(rawModifiers is Dictionary<string, object> modifiers))
+            {
+                return;
+            }
+
+            SkillApplyInformation information =
+                card.SkillApplyInformation as SkillApplyInformation;
+            if (information == null)
+            {
+                return;
+            }
+
+            if (TryGetStateCollection(modifiers, "offense", out IEnumerable offense))
+            {
+                information.OffenseModifierList.Clear();
+                foreach (object rawModifier in offense)
+                {
+                    ICardOffenseModifier modifier =
+                        CreateOffenseModifier(rawModifier);
+                    if (modifier != null)
+                    {
+                        information.OffenseModifierList.Add(modifier);
+                    }
+                }
+            }
+
+            if (TryGetStateCollection(modifiers, "life", out IEnumerable life))
+            {
+                information.LifeModifierList.Clear();
+                foreach (object rawModifier in life)
+                {
+                    ICardLifeModifier modifier = CreateLifeModifier(rawModifier);
+                    if (modifier != null)
+                    {
+                        information.LifeModifierList.Add(modifier);
+                    }
+                }
+                CorrectHiddenCardLifeState(card, information, state);
+            }
+
+            if (TryGetStateCollection(modifiers, "cost", out IEnumerable cost))
+            {
+                card.CostModifierList.Clear();
+                foreach (object rawModifier in cost)
+                {
+                    ICardCostModifier modifier = CreateCostModifier(rawModifier);
+                    if (modifier != null)
+                    {
+                        card.CostModifierList.Add(modifier);
+                    }
+                }
+            }
+
+            if (TryGetStateCollection(modifiers, "chant", out IEnumerable chant))
+            {
+                information.ChantCountModifierList.Clear();
+                foreach (object rawModifier in chant)
+                {
+                    ICardChantCountModifier modifier =
+                        CreateChantCountModifier(rawModifier);
+                    if (modifier != null)
+                    {
+                        information.ChantCountModifierList.Add(modifier);
+                    }
+                }
+            }
+        }
+
+        private static bool TryGetStateCollection(
+            Dictionary<string, object> state,
+            string key,
+            out IEnumerable values)
+        {
+            values = null;
+            if (!state.TryGetValue(key, out object rawValues) ||
+                rawValues is string || !(rawValues is IEnumerable collection))
+            {
+                return false;
+            }
+            values = collection;
+            return true;
+        }
+
+        private static ICardOffenseModifier CreateOffenseModifier(object rawState)
+        {
+            if (!(rawState is Dictionary<string, object> state) ||
+                !TryGetModifierKindAndValue(state, out string kind, out int value))
+            {
+                return null;
+            }
+            switch (kind)
+            {
+                case "add":
+                    return new OffenseAddModifier(value);
+                case "set":
+                    return new OffenseSetModifier(value);
+                case "multiply":
+                    return new OffenseMultiplyModifier(value);
+                default:
+                    return null;
+            }
+        }
+
+        private static ICardLifeModifier CreateLifeModifier(object rawState)
+        {
+            if (!(rawState is Dictionary<string, object> state) ||
+                !TryGetModifierKindAndValue(state, out string kind, out int value))
+            {
+                return null;
+            }
+            switch (kind)
+            {
+                case "add":
+                    return new LifeAddModifier(value);
+                case "set":
+                    return new LifeSetModifier(value);
+                case "multiply":
+                    return new LifeMultiplyModifier(value);
+                case "damage":
+                    return TryGetStateInt(state, "turn", out int damageTurn)
+                        ? new DamageCardParameterModifier(
+                            value, damageTurn, GetLocalTurnFlag(state))
+                        : null;
+                case "heal":
+                    return TryGetStateInt(state, "turn", out int healTurn)
+                        ? new HealCardParameterModifier(
+                            value, healTurn, GetLocalTurnFlag(state))
+                        : null;
+                default:
+                    return null;
+            }
+        }
+
+        private static ICardCostModifier CreateCostModifier(object rawState)
+        {
+            if (!(rawState is Dictionary<string, object> state) ||
+                !state.TryGetValue("kind", out object rawKind))
+            {
+                return null;
+            }
+            string kind = rawKind?.ToString();
+            bool resident = TryGetStateInt(state, "resident", out int rawResident) &&
+                rawResident != 0;
+            switch (kind)
+            {
+                case "add":
+                    return TryGetStateInt(state, "value", out int add)
+                        ? new CostAddModifier(add, resident)
+                        : null;
+                case "set":
+                    return TryGetStateInt(state, "value", out int set)
+                        ? new CostSetModifier(set, resident)
+                        : null;
+                case "halfUp":
+                    return new CostHalfRoundUpModifier(resident);
+                case "halfDown":
+                    return new CostHalfRoundDownModifier(resident);
+                default:
+                    return null;
+            }
+        }
+
+        private static ICardChantCountModifier CreateChantCountModifier(
+            object rawState)
+        {
+            if (!(rawState is Dictionary<string, object> state) ||
+                !TryGetModifierKindAndValue(state, out string kind, out int value))
+            {
+                return null;
+            }
+            switch (kind)
+            {
+                case "add":
+                    return new ChantCountAddModifier(value);
+                case "set":
+                    return new ChantCountSetModifier(value);
+                default:
+                    return null;
+            }
+        }
+
+        private static bool TryGetModifierKindAndValue(
+            Dictionary<string, object> state,
+            out string kind,
+            out int value)
+        {
+            kind = null;
+            value = 0;
+            if (!state.TryGetValue("kind", out object rawKind) ||
+                !TryGetStateInt(state, "value", out value))
+            {
+                return false;
+            }
+            kind = rawKind?.ToString();
+            return !string.IsNullOrEmpty(kind);
+        }
+
+        private static void CorrectHiddenCardLifeState(
+            BattleCardBase card,
+            SkillApplyInformation information,
+            Dictionary<string, object> state)
+        {
+            if (!state.TryGetValue("p2pLifeState", out object rawLifeState) ||
+                !(rawLifeState is Dictionary<string, object> lifeState) ||
+                !TryGetStateInt(lifeState, "life", out int life) ||
+                !TryGetStateInt(lifeState, "maxLife", out int maxLife) ||
+                (card.Life == life && card.MaxLife == maxLife))
+            {
+                return;
+            }
+
+            // Damage and healing entries double as condition history and life
+            // modifiers. Their original ordering relative to max-life buffs is
+            // private, so retain the authoritative final life values as well.
+            information.LifeModifierList.Add(
+                new HiddenCardLifeStateModifier(life, maxLife));
+        }
+
+        private static void ReplaceTurnValueCollection<T>(
+            List<T> target,
+            Dictionary<string, object> collections,
+            string key,
+            Func<int, int, bool, T> create)
+        {
+            if (target == null || !collections.TryGetValue(key, out object rawValues))
+            {
+                return;
+            }
+
+            target.Clear();
+            if (rawValues is string || !(rawValues is IEnumerable values))
+            {
+                return;
+            }
+            foreach (object rawValue in values)
+            {
+                if (!(rawValue is Dictionary<string, object> value) ||
+                    !TryGetStateInt(value, "value", out int amount) ||
+                    !TryGetStateInt(value, "turn", out int turn))
+                {
+                    continue;
+                }
+                target.Add(create(amount, turn, GetLocalTurnFlag(value)));
+            }
+        }
+
+        private static void ApplyDamagedCounterState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            if (card?.DamagedCounter == null ||
+                !state.TryGetValue("p2pDamagedCounter", out object rawCounter) ||
+                !(rawCounter is Dictionary<string, object> counter))
+            {
+                return;
+            }
+
+            TryGetStateInt(counter, "selfTurn", out int selfTurn);
+            TryGetStateInt(counter, "opponentTurn", out int opponentTurn);
+            card.DamagedCounter.Clear();
+            for (int i = 0; i < Math.Max(0, selfTurn); i++)
+            {
+                card.DamagedCounter.AddDamageCount(true);
+            }
+            for (int i = 0; i < Math.Max(0, opponentTurn); i++)
+            {
+                card.DamagedCounter.AddDamageCount(false);
+            }
+        }
+
+        private static void ApplySkillActivationState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            if (card?.SkillActivationList == null ||
+                !state.TryGetValue("p2pSkillActivationIds", out object rawIds) ||
+                rawIds is string || !(rawIds is IEnumerable ids))
+            {
+                return;
+            }
+
+            card.SkillActivationList.Clear();
+            foreach (object rawId in ids)
+            {
+                try
+                {
+                    long id = Convert.ToInt64(
+                        rawId, CultureInfo.InvariantCulture);
+                    card.SkillActivationList.Add(
+                        new BattleCardBase.SkillActivationInfo(id, null));
+                }
+                catch (Exception)
+                {
+                }
+            }
+        }
+
+        private static void ApplyAttackCountState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            if (card?.attackCountinfo == null ||
+                !TryGetStateInt(state, "p2pMaxAttackableCount", out int count))
+            {
+                return;
+            }
+
+            card.attackCountinfo.Clear();
+            if (count != 1)
+            {
+                // Native replay data represents remote attack-count changes as
+                // one absolute SetAttackCountInfo entry too.
+                card.attackCountinfo.Add(
+                    new BattleCardBase.SetAttackCountInfo(null, count));
+            }
+        }
+
+        private static bool ApplyCardReferenceState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            SkillApplyInformation information =
+                card.SkillApplyInformation as SkillApplyInformation;
+            if (information == null ||
+                !state.TryGetValue("p2pCardReferences", out object rawLists) ||
+                !(rawLists is Dictionary<string, object> lists))
+            {
+                return true;
+            }
+
+            bool complete = true;
+            complete &= ReplaceCardReferenceList(
+                information.RandomSelectedCardList, lists, "randomSelected");
+            complete &= ReplaceCardReferenceList(
+                information.SkillDrewCardList, lists, "skillDrew");
+            complete &= ReplaceCardReferenceList(
+                information.SavedTargetList, lists, "savedTargets");
+            complete &= ReplaceCardReferenceList(
+                information.SavedBurialRiteTargetList, lists,
+                "savedBurialTargets");
+            complete &= ReplaceCardReferenceList(
+                information.LastBurialRiteCardList, lists,
+                "lastBurialTargets");
+            complete &= ReplaceCardReferenceList(
+                information.GetOnCards, lists, "getOn");
+            complete &= ReplaceCardReferenceList(
+                card.GetOffCards, lists, "getOff");
+
+            information.SavedTargetCardIdDict.Clear();
+            if (state.TryGetValue("p2pSavedTargetIds", out object rawSavedIds) &&
+                rawSavedIds is Dictionary<string, object> savedIds)
+            {
+                foreach (KeyValuePair<string, object> saved in savedIds)
+                {
+                    if (long.TryParse(saved.Key, NumberStyles.Integer,
+                            CultureInfo.InvariantCulture, out long id))
+                    {
+                        information.SavedTargetCardIdDict[id] =
+                            ToIntArray(saved.Value).ToList();
+                    }
+                }
+            }
+            return complete;
+        }
+
+        private static bool ApplyPreprocessState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            if (!state.TryGetValue("p2pPreprocess", out object rawState) ||
+                !(rawState is Dictionary<string, object> preprocessState))
+            {
+                return true;
+            }
+
+            bool normalComplete = ApplyPreprocessCollection(
+                card.NormalSkills, preprocessState, "normal");
+            bool evolutionComplete = ApplyPreprocessCollection(
+                card.EvolutionSkills, preprocessState, "evolution");
+            return normalComplete && evolutionComplete;
+        }
+
+        private static bool ApplyPreprocessCollection(
+            IEnumerable<SkillBase> skills,
+            Dictionary<string, object> preprocessState,
+            string key)
+        {
+            if (!preprocessState.TryGetValue(key, out object rawSkills) ||
+                rawSkills is string || !(rawSkills is IEnumerable skillStates))
+            {
+                return true;
+            }
+
+            List<SkillBase> actualSkills = skills?.ToList() ??
+                new List<SkillBase>();
+            List<object> expectedSkills = skillStates.Cast<object>().ToList();
+            bool complete = actualSkills.Count == expectedSkills.Count;
+            for (int i = 0; i < expectedSkills.Count; i++)
+            {
+                if (!(expectedSkills[i] is Dictionary<string, object> expected) ||
+                    i >= actualSkills.Count || actualSkills[i] == null)
+                {
+                    complete = false;
+                    continue;
+                }
+
+                SkillBase actual = actualSkills[i];
+                if (!expected.TryGetValue("type", out object rawType) ||
+                    !string.Equals(rawType?.ToString(),
+                        actual.GetType().FullName, StringComparison.Ordinal))
+                {
+                    complete = false;
+                    continue;
+                }
+                if (!expected.TryGetValue("items", out object rawItems) ||
+                    rawItems is string || !(rawItems is IEnumerable itemStates))
+                {
+                    continue;
+                }
+
+                List<SkillPreprocessBase> actualItems = actual.PreprocessList?
+                    .ToList() ?? new List<SkillPreprocessBase>();
+                List<object> expectedItems = itemStates.Cast<object>().ToList();
+                if (actualItems.Count != expectedItems.Count)
+                {
+                    complete = false;
+                }
+                for (int j = 0; j < expectedItems.Count; j++)
+                {
+                    if (!(expectedItems[j] is Dictionary<string, object> item) ||
+                        j >= actualItems.Count || actualItems[j] == null ||
+                        !item.TryGetValue("type", out object rawItemType) ||
+                        !string.Equals(rawItemType?.ToString(),
+                            actualItems[j].GetType().FullName,
+                            StringComparison.Ordinal))
+                    {
+                        complete = false;
+                        continue;
+                    }
+                    if (item.TryGetValue("fields", out object rawFields) &&
+                        rawFields is Dictionary<string, object> fields)
+                    {
+                        ApplyMutableSimpleFields(actualItems[j], fields);
+                    }
+                }
+            }
+            return complete;
+        }
+
+        private static void ApplyMutableSimpleFields(
+            object target,
+            Dictionary<string, object> values)
+        {
+            if (target == null || values == null)
+            {
+                return;
+            }
+            foreach (KeyValuePair<string, object> value in values)
+            {
+                if (!TryFindInstanceField(target.GetType(), value.Key,
+                        out FieldInfo field) || field.IsStatic || field.IsInitOnly ||
+                    field.IsLiteral || !IsSimpleStateType(field.FieldType))
+                {
+                    continue;
+                }
+                try
+                {
+                    field.SetValue(target,
+                        ConvertStateValue(value.Value, field.FieldType));
+                }
+                catch (Exception)
+                {
+                }
+            }
+        }
+
+        private static bool ReplaceCardReferenceList(
+            List<BattleCardBase> target,
+            Dictionary<string, object> lists,
+            string key)
+        {
+            if (target == null || !lists.TryGetValue(key, out object rawValues) ||
+                rawValues is string || !(rawValues is IEnumerable values))
+            {
+                return true;
+            }
+
+            List<BattleCardBase> replacements = new List<BattleCardBase>();
+            foreach (object rawValue in values)
+            {
+                BattleCardBase resolved = ResolveCardReference(
+                    rawValue as Dictionary<string, object>);
+                if (resolved == null)
+                {
+                    return false;
+                }
+                replacements.Add(resolved);
+            }
+            target.Clear();
+            target.AddRange(replacements);
+            return true;
+        }
+
+        private static BattleCardBase ResolveCardReference(
+            Dictionary<string, object> reference)
+        {
+            if (reference == null ||
+                !TryGetStateInt(reference, "idx", out int index) || index <= 0 ||
+                !TryGetStateInt(reference, "owner", out int owner) ||
+                (owner != 0 && owner != 1) ||
+                !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager))
+            {
+                return null;
+            }
+
+            bool ownerIsHost = owner == 1;
+            bool isLocalPlayer = ownerIsHost == (Role == P2PRole.Host);
+            BattlePlayerBase player = isLocalPlayer
+                ? manager.BattlePlayer
+                : manager.BattleEnemy;
+            if (player == null)
+            {
+                return null;
+            }
+
+            BattleCardBase resolved = player.AllCardsWithSkillIngredient?
+                .FirstOrDefault(candidate => candidate != null &&
+                    candidate.Index == index) ??
+                player.AllCards?.FirstOrDefault(candidate => candidate != null &&
+                    candidate.Index == index);
+            return resolved ?? FindCardInPlayerReferences(player, index);
+        }
+
+        private static BattleCardBase FindCardInPlayerReferences(
+            BattlePlayerBase player,
+            int index)
+        {
+            IEnumerable<IEnumerable<BattleCardBase>> coreLists =
+                new IEnumerable<BattleCardBase>[]
+                {
+                    player.HandCardList,
+                    player.DeckCardList,
+                    player.ClassAndInPlayCardList,
+                    player.CemeteryList,
+                    player.BanishList
+                };
+            foreach (IEnumerable<BattleCardBase> list in coreLists)
+            {
+                BattleCardBase coreCard = list?.FirstOrDefault(card =>
+                    card != null && card.Index == index);
+                if (coreCard != null)
+                {
+                    return coreCard;
+                }
+            }
+
+            foreach (string name in PlayerHistoryListNames)
+            {
+                if (!TryGetPlayerHistoryListMember(
+                        player, name, out _, out object rawList))
+                {
+                    continue;
+                }
+                BattleCardBase card = FindCardInHistoryValue(rawList, index);
+                if (card != null)
+                {
+                    return card;
+                }
+            }
+            return null;
+        }
+
+        private static BattleCardBase FindCardInHistoryValue(
+            object value,
+            int index)
+        {
+            if (value is BattleCardBase card)
+            {
+                return card.Index == index ? card : null;
+            }
+            if (value is BattlePlayerBase.TurnAndCard turnAndCard)
+            {
+                card = turnAndCard.Card as BattleCardBase;
+                return card != null && card.Index == index ? card : null;
+            }
+            if (value is BattlePlayerBase.CardAndTribe cardAndTribe)
+            {
+                card = cardAndTribe.Card as BattleCardBase;
+                return card != null && card.Index == index ? card : null;
+            }
+            if (value is BattlePlayerBase.CardAndId cardAndId)
+            {
+                card = cardAndId.Card as BattleCardBase;
+                return card != null && card.Index == index ? card : null;
+            }
+            if (value is BattlePlayerBase.CardAndValue cardAndValue)
+            {
+                card = cardAndValue.Card as BattleCardBase;
+                return card != null && card.Index == index ? card : null;
+            }
+            if (value is string || !(value is IEnumerable values))
+            {
+                return null;
+            }
+            foreach (object item in values)
+            {
+                card = FindCardInHistoryValue(item, index);
+                if (card != null)
+                {
+                    return card;
+                }
+            }
+            return null;
+        }
+
+        private static int[] ToIntArray(object raw)
+        {
+            if (raw == null || raw is string || !(raw is IEnumerable values))
+            {
+                return Array.Empty<int>();
+            }
+
+            List<int> result = new List<int>();
+            foreach (object value in values)
+            {
+                try
+                {
+                    result.Add(Convert.ToInt32(value, CultureInfo.InvariantCulture));
+                }
+                catch (Exception)
+                {
+                    result.Add(0);
+                }
+            }
+            return result.ToArray();
+        }
+
+        private static void ApplySkillCounterState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            SkillApplyInformation information =
+                card.SkillApplyInformation as SkillApplyInformation;
+            if (information == null)
+            {
+                return;
+            }
+
+            if (TryGetStateInt(state, "p2pUnionBurstCount", out int unionBurst))
+            {
+                information.UnionBurstCountModifierList.Clear();
+                information.GiveUnionBurstCount(
+                    new UnionBurstCountAddModifier(unionBurst - 10));
+            }
+            if (TryGetStateInt(state, "p2pSkyboundArtCount", out int skyboundArt))
+            {
+                information.SkyboundArtCountModifierList.Clear();
+                information.GiveSkyboundArtCount(
+                    new SkyboundArtCountAddModifier(skyboundArt - 10));
+            }
+            if (TryGetStateInt(state, "p2pSuperSkyboundArtCount",
+                    out int superSkyboundArt))
+            {
+                information.SuperSkyboundArtCountModifierList.Clear();
+                information.GiveSuperSkyboundArtCount(
+                    new SuperSkyboundArtCountAddModifier(superSkyboundArt - 15));
+            }
+        }
+
+        private static bool ApplyFusionState(
+            BattleCardBase card,
+            Dictionary<string, object> state)
+        {
+            SkillApplyInformation information =
+                card.SkillApplyInformation as SkillApplyInformation;
+            if (information == null)
+            {
+                return false;
+            }
+
+            if (!state.TryGetValue("p2pFusion", out object rawFusion) ||
+                rawFusion is string || !(rawFusion is IEnumerable ingredients))
+            {
+                information.FusionIngredients.Clear();
+                return true;
+            }
+
+            NetworkBattleManagerBase manager =
+                BattleManagerBase.GetIns() as NetworkBattleManagerBase;
+            BattlePlayerBase owner = manager == null
+                ? null
+                : (card.IsPlayer ? manager.BattlePlayer : manager.BattleEnemy);
+            if (owner == null)
+            {
+                return false;
+            }
+
+            List<FusionIngredientInfo> replacements =
+                new List<FusionIngredientInfo>();
+            foreach (object rawIngredient in ingredients)
+            {
+                Dictionary<string, object> ingredient =
+                    rawIngredient as Dictionary<string, object>;
+                if (ingredient == null ||
+                    !TryGetStateInt(ingredient, "idx", out int index))
+                {
+                    continue;
+                }
+
+                BattleCardBase ingredientCard = owner.AllCardsWithSkillIngredient
+                    ?.FirstOrDefault(candidate => candidate != null &&
+                        candidate.Index == index);
+                if (ingredientCard == null)
+                {
+                    return false;
+                }
+
+                int turn = owner.Turn;
+                TryGetStateInt(ingredient, "turn", out turn);
+                replacements.Add(
+                    new FusionIngredientInfo(turn, ingredientCard));
+            }
+            information.FusionIngredients.Clear();
+            information.FusionIngredients.AddRange(replacements);
+            return true;
+        }
+
+        internal static void TryApplyPendingHiddenCardStates()
+        {
+            if (applyingReceivedHiddenCardStates)
+            {
+                return;
+            }
+
+            applyingReceivedHiddenCardStates = true;
+            try
+            {
+                TryApplyPendingHiddenCardStatesCore();
+            }
+            finally
+            {
+                applyingReceivedHiddenCardStates = false;
+            }
+        }
+
+        private static void TryApplyPendingHiddenCardStatesCore()
+        {
+            if (!IsActive || ReceivedHiddenCardStates.Count == 0 ||
+                !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
+                manager.BattleEnemy == null)
+            {
+                return;
+            }
+
+            List<BattleCardBase> privateCards;
+            try
+            {
+                privateCards = EnumeratePrivateCards(manager.BattleEnemy).ToList();
+            }
+            catch (Exception)
+            {
+                return;
+            }
+
+            bool canReplace = manager.VfxMgr != null && manager.VfxMgr.IsEnd;
+            DateTime now = DateTime.UtcNow;
+            foreach (BattleCardBase card in privateCards)
+            {
+                if (card == null || card.Index <= 0)
+                {
+                    continue;
+                }
+
+                bool remoteOwnerIsHost = Role != P2PRole.Host;
+                string key = HiddenStateKey(remoteOwnerIsHost, card.Index);
+                if (!ReceivedHiddenCardStates.TryGetValue(
+                        key, out Dictionary<string, object> state) ||
+                    !ReceivedHiddenCardStateSignatures.TryGetValue(
+                        key, out string signature))
+                {
+                    continue;
+                }
+
+                AppliedReceivedHiddenCardStates.TryGetValue(
+                    key, out AppliedHiddenCardState applied);
+                bool sameApplication = applied != null &&
+                    ReferenceEquals(applied.Card, card) &&
+                    string.Equals(applied.Signature, signature,
+                        StringComparison.Ordinal);
+                bool retryDue = applied == null ||
+                    applied.NextRetryUtc <= now;
+                if (!sameApplication || (!applied.StateComplete && retryDue))
+                {
+                    ApplyReceivedHiddenCardState(card, false);
+                    AppliedReceivedHiddenCardStates.TryGetValue(key, out applied);
+                }
+
+                if (!canReplace || applied == null ||
+                    applied.NativeStateInherited ||
+                    !CanReplacePrivateCard(manager.BattleEnemy, card))
+                {
+                    continue;
+                }
+
+                TryReplacePendingHiddenCard(manager, state, key, card);
+            }
+        }
+
+        private static bool CanReplacePrivateCard(
+            BattlePlayerBase player,
+            BattleCardBase card)
+        {
+            return player.HandCardList.Contains(card) ||
+                player.DeckCardList.Contains(card) ||
+                player.ReservedCardList.Contains(card) ||
+                player.NecromanceZoneList.Contains(card);
+        }
+
+        private static void TryReplacePendingHiddenCard(
+            NetworkBattleManagerBase manager,
+            Dictionary<string, object> state,
+            string key,
+            BattleCardBase oldCard)
+        {
+            try
+            {
+                CardDataModel model = CreateHiddenCardDataModel(state);
+                if (model == null)
+                {
+                    return;
+                }
+
+                BattleCardBase replacement =
+                    new ReplaceReceivedCard(manager, model)
+                        .ReplaceCard(manager.BattleEnemy);
+                if (replacement == null)
+                {
+                    return;
+                }
+
+                if (!manager.IsRecovery && manager.VfxMgr != null)
+                {
+                    manager.VfxMgr.RegisterSequentialVfx<
+                        Wizard.Battle.View.Vfx.VfxBase>(
+                        manager.LoadCardResources(
+                            new List<BattleCardBase> { replacement }, false));
+                }
+                Plugin.Logger.LogDebug(
+                    $"[P2P] Replayed deferred hidden state idx={oldCard.Index}, " +
+                    $"cardId={replacement.CardId} after the card entered its zone.");
+            }
+            catch (Exception ex)
+            {
+                // Keep the entry pending. It can be retried after the next action
+                // instead of losing the authoritative state permanently.
+                AppliedReceivedHiddenCardStates.Remove(key);
+                Plugin.Logger.LogDebug(
+                    $"[P2P] Could not replay deferred hidden state idx={oldCard.Index}: " +
+                    ex.Message);
+            }
+        }
+
+        private static CardDataModel CreateHiddenCardDataModel(
+            Dictionary<string, object> state)
+        {
+            if (!TryGetStateInt(state, "idx", out int index) || index <= 0 ||
+                !TryGetStateInt(state, "cardId", out int cardId) || cardId <= 0)
+            {
+                return null;
+            }
+
+            CardDataModel model = new CardDataModel
+            {
+                Index = index,
+                CardId = cardId,
+                isOpponent = true
+            };
+            if (TryGetStateInt(state, "cost", out int cost))
+            {
+                model.playCardCost = cost;
+            }
+            if (TryGetStateInt(state, "spellboost", out int spellboost))
+            {
+                model.Spellboost = spellboost;
+            }
+            if (TryGetStateInt(state, "setAtk", out int attack))
+            {
+                model.SetAtk = attack;
+            }
+            if (TryGetStateInt(state, "setLife", out int life))
+            {
+                model.SetLife = life;
+            }
+            if (TryGetStateInt(state, "setChantCount", out int chantCount))
+            {
+                model.SetChantCount = chantCount;
+            }
+            if (TryGetStateInt(state, "unionburst", out int unionBurst))
+            {
+                model.UnionBurstCount = unionBurst;
+            }
+            if (TryGetStateInt(state, "skyboundArt", out int skyboundArt))
+            {
+                model.SkyboundArtCount = skyboundArt;
+            }
+            if (TryGetStateInt(state, "clan", out int clan))
+            {
+                model.Clan = clan;
+            }
+            if (state.TryGetValue("tribe", out object rawTribe))
+            {
+                model.Tribe = rawTribe?.ToString() ?? "NONE";
+            }
+            if (state.TryGetValue("attachTarget", out object rawAttach))
+            {
+                model.SetAttachTarget(rawAttach?.ToString() ?? string.Empty);
+            }
+            if (state.TryGetValue("fusion", out object rawFusion))
+            {
+                model.FusionIngredientList = ToIntArray(rawFusion).ToList();
+            }
+            return model;
+        }
+
+        private static bool TryGetStateInt(
+            Dictionary<string, object> data,
+            string key,
+            out int value)
+        {
+            value = 0;
+            if (data == null || !data.TryGetValue(key, out object rawValue))
+            {
+                return false;
+            }
+            try
+            {
+                value = Convert.ToInt32(rawValue, CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private static object ConvertStateValue(object value, Type targetType)
+        {
+            if (value == null)
+            {
+                return null;
+            }
+
+            Type underlyingType = Nullable.GetUnderlyingType(targetType);
+            Type effectiveType = underlyingType ?? targetType;
+            if (effectiveType.IsEnum)
+            {
+                return Enum.ToObject(effectiveType,
+                    Convert.ToInt32(value, CultureInfo.InvariantCulture));
+            }
+            if (effectiveType == typeof(string))
+            {
+                return value.ToString();
+            }
+            if (effectiveType == typeof(bool))
+            {
+                if (value is string text && int.TryParse(text,
+                        NumberStyles.Integer, CultureInfo.InvariantCulture,
+                        out int boolValue))
+                {
+                    return boolValue != 0;
+                }
+                return Convert.ToBoolean(value, CultureInfo.InvariantCulture);
+            }
+            return Convert.ChangeType(value, effectiveType,
+                CultureInfo.InvariantCulture);
+        }
+
+        private static bool IsSimpleStateType(Type type)
+        {
+            Type effectiveType = Nullable.GetUnderlyingType(type) ?? type;
+            return effectiveType.IsEnum || effectiveType == typeof(string) ||
+                effectiveType == typeof(decimal) ||
+                effectiveType.IsPrimitive;
+        }
+
+        private static bool TryFindBackingField(
+            Type type,
+            string propertyName,
+            out FieldInfo field)
+        {
+            return TryFindInstanceField(type,
+                "<" + propertyName + ">k__BackingField", out field);
+        }
+
+        private static bool TryFindInstanceProperty(
+            Type type,
+            string propertyName,
+            out PropertyInfo property)
+        {
+            property = null;
+            for (Type current = type; current != null; current = current.BaseType)
+            {
+                property = current.GetProperty(
+                    propertyName,
+                    BindingFlags.Instance | BindingFlags.Public |
+                        BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                if (property != null && property.GetIndexParameters().Length == 0)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool TryFindInstanceField(
+            Type type,
+            string fieldName,
+            out FieldInfo field)
+        {
+            field = null;
+            for (Type current = type; current != null; current = current.BaseType)
+            {
+                field = current.GetField(
+                    fieldName,
+                    BindingFlags.Instance | BindingFlags.Public |
+                        BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                if (field != null)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static int ReadPrivateIntField(
+            object target,
+            string fieldName,
+            int fallback)
+        {
+            if (target == null || !TryFindInstanceField(target.GetType(), fieldName,
+                    out FieldInfo field))
+            {
+                return fallback;
+            }
+            try
+            {
+                return Convert.ToInt32(field.GetValue(target),
+                    CultureInfo.InvariantCulture);
+            }
+            catch (Exception)
+            {
+                return fallback;
+            }
+        }
+
         private static void CacheLocalBattleCardIdentities()
         {
             if (!IsActive || !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
@@ -1815,6 +3978,1468 @@ namespace Shadowbus
             }
         }
 
+        private static void ObserveLocalHiddenCardStates()
+        {
+            if (!IsActive ||
+                !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
+                manager.BattlePlayer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                foreach (BattleCardBase card in EnumeratePrivateCards(
+                    manager.BattlePlayer))
+                {
+                    if (card == null || card.Index <= 0 || card.CardId <= 0)
+                    {
+                        continue;
+                    }
+                    LocalHiddenCardStates[card.Index] =
+                        P2PJson.CloneDictionary(CreateHiddenCardState(card));
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogDebug(
+                    "[P2P] Could not observe local hidden card state: " +
+                    ex.Message);
+            }
+        }
+
+        private static void AppendLocalHiddenCardState(
+            string uri,
+            Dictionary<string, object> data)
+        {
+            if (data == null || string.Equals(uri, P2PBattleProtocol.EchoUri,
+                    StringComparison.Ordinal) ||
+                !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
+                manager.BattlePlayer == null)
+            {
+                return;
+            }
+
+            // The first snapshot establishes a complete baseline. Afterwards the
+            // authenticated TCP stream is ordered and reliable, so only changed
+            // cards need to be sent. Replacing the whole private deck at every
+            // turn boundary repeatedly loads card resources and can stall Unity.
+            bool forceSnapshot = LocalHiddenCardStateSignatures.Count == 0;
+            HashSet<int> presentIndices = new HashSet<int>();
+            List<Dictionary<string, object>> changedCards =
+                new List<Dictionary<string, object>>();
+
+            try
+            {
+                foreach (BattleCardBase card in EnumeratePrivateCards(
+                    manager.BattlePlayer))
+                {
+                    if (card == null || card.Index <= 0 || card.CardId <= 0)
+                    {
+                        continue;
+                    }
+
+                    presentIndices.Add(card.Index);
+                    Dictionary<string, object> state;
+                    string signature;
+                    try
+                    {
+                        state = CreateHiddenCardState(card);
+                        signature = JsonConvert.SerializeObject(state,
+                            P2PJson.Settings);
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Logger.LogDebug(
+                            $"[P2P] Could not capture hidden card idx={card.Index}: " +
+                            ex.Message);
+                        continue;
+                    }
+                    LocalHiddenCardStates[card.Index] =
+                        P2PJson.CloneDictionary(state);
+                    if (!forceSnapshot && LocalHiddenCardStateSignatures.TryGetValue(
+                            card.Index, out string previousSignature) &&
+                        string.Equals(previousSignature, signature,
+                            StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    LocalHiddenCardStateSignatures[card.Index] = signature;
+                    changedCards.Add(state);
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogDebug(
+                    "[P2P] Could not capture hidden card state: " + ex.Message);
+                return;
+            }
+
+            List<int> removedIndices = LocalHiddenCardStateSignatures.Keys
+                .Where(index => !presentIndices.Contains(index))
+                .OrderBy(index => index)
+                .ToList();
+            foreach (int index in removedIndices)
+            {
+                // EmitMsg runs after the local action. Use the state observed
+                // before that action so a played or discarded card retains its
+                // hidden buffs, attached skills, counters, and saved targets
+                // while the peer performs the matching native replacement.
+                if (!IsAcceleratedOrCrystallizedDeparture(data, index) &&
+                    LocalHiddenCardStates.TryGetValue(
+                        index, out Dictionary<string, object> departedState))
+                {
+                    changedCards.Add(P2PJson.CloneDictionary(departedState));
+                }
+                LocalHiddenCardStateSignatures.Remove(index);
+                LocalHiddenCardStates.Remove(index);
+            }
+
+            if (changedCards.Count == 0 && removedIndices.Count == 0)
+            {
+                return;
+            }
+
+            if (changedCards.Count > 0)
+            {
+                List<object> knownList = GetOrCreateKnownList(data);
+                foreach (Dictionary<string, object> state in changedCards)
+                {
+                    MergeKnownCardState(knownList, state);
+                }
+                data["p2pHiddenCards"] = changedCards
+                    .Select(state => (object)P2PJson.CloneDictionary(state))
+                    .ToList();
+            }
+            data["p2pHiddenOwner"] = Role == P2PRole.Host ? 1 : 0;
+            if (removedIndices.Count > 0)
+            {
+                data["p2pHiddenRemoved"] = removedIndices
+                    .Select(index => (object)index)
+                    .ToList();
+            }
+
+            Plugin.Logger.LogDebug(
+                $"[P2P] Attached {changedCards.Count} hidden hand/deck state " +
+                $"snapshot(s) and {removedIndices.Count} tombstone(s) to {uri}" +
+                $"{(forceSnapshot ? " (checkpoint)" : string.Empty)}.");
+        }
+
+        private static bool IsAcceleratedOrCrystallizedDeparture(
+            Dictionary<string, object> data,
+            int index)
+        {
+            if (!TryGetStateInt(data, "playIdx", out int playIndex) ||
+                playIndex != index ||
+                !data.TryGetValue("keyAction", out object rawActions) ||
+                rawActions is string || !(rawActions is IEnumerable actions))
+            {
+                return false;
+            }
+
+            foreach (object rawAction in actions)
+            {
+                if (rawAction is Dictionary<string, object> action &&
+                    TryGetStateInt(action, "type", out int type) &&
+                    (type == (int)SendKeyActionDataManager.KeyActionType.Accelerated ||
+                     type == (int)SendKeyActionDataManager.KeyActionType.Crystallize))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static void AppendLocalPlayerHistoryState(
+            string uri,
+            Dictionary<string, object> data)
+        {
+            if (data == null || string.Equals(uri, P2PBattleProtocol.EchoUri,
+                    StringComparison.Ordinal) ||
+                !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
+                manager.BattlePlayer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                bool ownerIsHost = Role == P2PRole.Host;
+                Dictionary<string, object> state =
+                    CapturePlayerHistoryState(manager.BattlePlayer, ownerIsHost);
+                string signature = JsonConvert.SerializeObject(
+                    state, P2PJson.Settings);
+                if (string.Equals(signature, localPlayerHistoryStateSignature,
+                        StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                localPlayerHistoryStateSignature = signature;
+                state["revision"] = ++localPlayerHistoryRevision;
+                data[PlayerHistoryStateKey] = state;
+                Plugin.Logger.LogDebug(
+                    $"[P2P] Attached player history revision " +
+                    $"{localPlayerHistoryRevision} to {uri}.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogDebug(
+                    "[P2P] Could not capture player history state: " + ex.Message);
+            }
+        }
+
+        private static Dictionary<string, object> CapturePlayerHistoryState(
+            BattlePlayerBase player,
+            bool ownerIsHost)
+        {
+            Dictionary<string, object> scalars =
+                new Dictionary<string, object>();
+            foreach (string propertyName in PlayerHistoryScalarNames)
+            {
+                if (!TryFindInstanceProperty(player.GetType(), propertyName,
+                        out PropertyInfo property) ||
+                    !IsSimpleStateType(property.PropertyType))
+                {
+                    continue;
+                }
+                try
+                {
+                    scalars[propertyName] = property.GetValue(player, null);
+                }
+                catch (Exception)
+                {
+                }
+            }
+
+            Dictionary<string, object> lists =
+                new Dictionary<string, object>();
+            foreach (string propertyName in PlayerHistoryListNames)
+            {
+                if (!TryGetPlayerHistoryListMember(
+                        player, propertyName, out Type listType,
+                        out object listValue) ||
+                    !listType.IsGenericType ||
+                    listType.GetGenericTypeDefinition() != typeof(List<>))
+                {
+                    continue;
+                }
+                try
+                {
+                    Type elementType = listType.GetGenericArguments()[0];
+                    object captured = CapturePlayerHistoryList(
+                        listValue, elementType, ownerIsHost);
+                    if (captured != null)
+                    {
+                        lists[propertyName] = captured;
+                    }
+                }
+                catch (Exception)
+                {
+                }
+            }
+
+            return new Dictionary<string, object>
+            {
+                ["owner"] = ownerIsHost ? 1 : 0,
+                ["scalars"] = scalars,
+                ["lists"] = lists,
+                ["class"] = player.Class == null
+                    ? new Dictionary<string, object>()
+                    : CreateHiddenCardState(player.Class)
+            };
+        }
+
+        private static object CapturePlayerHistoryList(
+            object rawList,
+            Type elementType,
+            bool defaultOwnerIsHost)
+        {
+            if (!(rawList is IEnumerable values))
+            {
+                return new List<object>();
+            }
+
+            List<object> result = new List<object>();
+            if (elementType == typeof(BattleCardBase))
+            {
+                foreach (object value in values)
+                {
+                    result.Add(CapturePlayerCardReference(
+                        value as BattleCardBase, defaultOwnerIsHost));
+                }
+                return result;
+            }
+            if (elementType == typeof(BattlePlayerBase.TurnAndCard))
+            {
+                foreach (BattlePlayerBase.TurnAndCard value in values)
+                {
+                    if (value == null)
+                    {
+                        continue;
+                    }
+                    result.Add(new Dictionary<string, object>
+                    {
+                        ["card"] = CapturePlayerCardReference(
+                            value.Card as BattleCardBase, defaultOwnerIsHost),
+                        ["turn"] = value.Turn,
+                        ["turnOwner"] = GetAbsoluteTurnOwner(value.IsSelfTurn),
+                        ["end"] = value.IsTurnEnd ? 1 : 0
+                    });
+                }
+                return result;
+            }
+            if (elementType == typeof(BattlePlayerBase.CardAndTribe))
+            {
+                foreach (BattlePlayerBase.CardAndTribe value in values)
+                {
+                    if (value == null)
+                    {
+                        continue;
+                    }
+                    result.Add(new Dictionary<string, object>
+                    {
+                        ["card"] = CapturePlayerCardReference(
+                            value.Card as BattleCardBase, defaultOwnerIsHost),
+                        ["tribes"] = value.Tribes == null
+                            ? new List<object>()
+                            : value.Tribes.Select(tribe => (object)(int)tribe)
+                                .ToList()
+                    });
+                }
+                return result;
+            }
+            if (elementType == typeof(BattlePlayerBase.CardAndId))
+            {
+                foreach (BattlePlayerBase.CardAndId value in values)
+                {
+                    if (value == null)
+                    {
+                        continue;
+                    }
+                    result.Add(new Dictionary<string, object>
+                    {
+                        ["card"] = CapturePlayerCardReference(
+                            value.Card as BattleCardBase, defaultOwnerIsHost),
+                        ["id"] = value.Id
+                    });
+                }
+                return result;
+            }
+            if (elementType == typeof(BattlePlayerBase.CardAndValue))
+            {
+                foreach (BattlePlayerBase.CardAndValue value in values)
+                {
+                    if (value == null)
+                    {
+                        continue;
+                    }
+                    result.Add(new Dictionary<string, object>
+                    {
+                        ["card"] = CapturePlayerCardReference(
+                            value.Card as BattleCardBase, defaultOwnerIsHost),
+                        ["value"] = value.Value
+                    });
+                }
+                return result;
+            }
+            if (elementType == typeof(TurnAndIntValue))
+            {
+                foreach (TurnAndIntValue value in values)
+                {
+                    if (value == null)
+                    {
+                        continue;
+                    }
+                    result.Add(new Dictionary<string, object>
+                    {
+                        ["value"] = value.Value,
+                        ["turn"] = value.Turn,
+                        ["turnOwner"] = GetAbsoluteTurnOwner(value.IsSelfTurn)
+                    });
+                }
+                return result;
+            }
+            if (elementType == typeof(int))
+            {
+                foreach (object value in values)
+                {
+                    result.Add(Convert.ToInt32(value, CultureInfo.InvariantCulture));
+                }
+                return result;
+            }
+            if (elementType == typeof(List<BattleCardBase>))
+            {
+                foreach (object value in values)
+                {
+                    List<object> nested = new List<object>();
+                    if (value is IEnumerable cards)
+                    {
+                        foreach (object card in cards)
+                        {
+                            nested.Add(CapturePlayerCardReference(
+                                card as BattleCardBase, defaultOwnerIsHost));
+                        }
+                    }
+                    result.Add(nested);
+                }
+                return result;
+            }
+            return null;
+        }
+
+        private static int GetAbsoluteTurnOwner(bool isLocalPlayerTurn)
+        {
+            bool localOwnerIsHost = Role == P2PRole.Host;
+            bool turnOwnerIsHost = isLocalPlayerTurn
+                ? localOwnerIsHost
+                : !localOwnerIsHost;
+            return turnOwnerIsHost ? 1 : 0;
+        }
+
+        private static Dictionary<string, object> CapturePlayerCardReference(
+            BattleCardBase card,
+            bool defaultOwnerIsHost)
+        {
+            bool ownerIsHost = defaultOwnerIsHost;
+            if (card != null)
+            {
+                bool localOwnerIsHost = Role == P2PRole.Host;
+                ownerIsHost = card.IsPlayer
+                    ? localOwnerIsHost
+                    : !localOwnerIsHost;
+            }
+            return new Dictionary<string, object>
+            {
+                ["idx"] = card?.Index ?? 0,
+                ["cardId"] = card?.CardId ?? 0,
+                ["owner"] = ownerIsHost ? 1 : 0
+            };
+        }
+
+        private static IEnumerable<BattleCardBase> EnumeratePrivateCards(
+            BattlePlayerBase player)
+        {
+            HashSet<int> seen = new HashSet<int>();
+            IEnumerable<IEnumerable<BattleCardBase>> zones =
+                new IEnumerable<BattleCardBase>[]
+                {
+                    player.HandCardList,
+                    player.DeckCardList,
+                    player.FusionIngredientList,
+                    player.ReservedCardList,
+                    // Necromance cards are not always public in the local
+                    // network representation, but the original replacement
+                    // path can resolve this zone by index as well.
+                    player.NecromanceZoneList
+                };
+            foreach (IEnumerable<BattleCardBase> zone in zones)
+            {
+                if (zone == null)
+                {
+                    continue;
+                }
+                foreach (BattleCardBase card in zone)
+                {
+                    if (card != null && seen.Add(card.Index))
+                    {
+                        yield return card;
+                    }
+                }
+            }
+        }
+
+        private static Dictionary<string, object> CreateHiddenCardState(
+            BattleCardBase card)
+        {
+            Dictionary<string, object> state = new Dictionary<string, object>
+            {
+                ["idx"] = card.Index,
+                ["cardId"] = card.CardId,
+                ["isSelf"] = 1,
+                ["cost"] = card.Cost,
+                ["spellboost"] = card.SpellChargeCount
+            };
+
+            SkillApplyInformation skillInformation =
+                card.SkillApplyInformation as SkillApplyInformation;
+            state["p2pCardPrimitive"] = CaptureSimpleBackingProperties(
+                card, HiddenCardPrimitiveExclusions);
+            state["p2pSkillPrimitive"] = CaptureSimpleBackingProperties(
+                skillInformation, HiddenSkillPrimitiveExclusions);
+            state["p2pLifeState"] = new Dictionary<string, object>
+            {
+                ["life"] = card.Life,
+                ["maxLife"] = card.MaxLife
+            };
+            state["p2pDamagedCounter"] = new Dictionary<string, object>
+            {
+                ["selfTurn"] = card.DamagedCounter?.SelfTurnDamage ?? 0,
+                ["opponentTurn"] =
+                    card.DamagedCounter?.OpponentTurnDamage ?? 0
+            };
+            state["p2pModifiers"] = CaptureCardModifierState(
+                card, skillInformation);
+            state["p2pSkillActivationIds"] = card.SkillActivationList == null
+                ? new List<object>()
+                : card.SkillActivationList
+                    .Select(value => (object)value.SkillId)
+                    .ToList();
+            state["p2pMaxAttackableCount"] = card.MaxAttackableCount;
+            state["p2pSkillActivatedCount"] = card.SkillActivatedCount;
+            state["p2pSkillActivatedWrap"] = ReadPrivateIntField(
+                card, "_skillActivatedCountWrapValue", -1);
+            state["p2pSkillRandomArrayPresent"] =
+                skillInformation?.SkillRandomArray != null ? 1 : 0;
+            if (skillInformation?.SkillRandomArray != null)
+            {
+                state["p2pSkillRandomArray"] = skillInformation.SkillRandomArray
+                    .Select(value => (object)value).ToList();
+            }
+            state["p2pGenericArrayPresent"] =
+                skillInformation?.SkillGenericValueArray != null ? 1 : 0;
+            if (skillInformation?.SkillGenericValueArray != null)
+            {
+                state["p2pGenericArray"] = skillInformation.SkillGenericValueArray
+                    .Select(value => (object)value).ToList();
+            }
+            Dictionary<string, object> genericKeys = new Dictionary<string, object>();
+            if (skillInformation?.SkillGenericKeyAndValue != null)
+            {
+                foreach (KeyValuePair<string, int> key in
+                    skillInformation.SkillGenericKeyAndValue)
+                {
+                    genericKeys[key.Key] = key.Value;
+                }
+            }
+            state["p2pGenericKeys"] = genericKeys;
+            if (skillInformation != null)
+            {
+                state["p2pIntLists"] = new Dictionary<string, object>
+                {
+                    ["cantAtkBaseIds"] = ToObjectList(
+                        skillInformation.CantAtkUnitBaseCardIdList),
+                    ["decreaseTurnStartPP"] = ToObjectList(
+                        skillInformation.DecreaseTurnStartPPList),
+                    ["cantEvolution"] = ToObjectList(
+                        skillInformation.CantEvolutionList),
+                    ["skillHeal"] = ToObjectList(
+                        skillInformation.SkillHealList)
+                };
+                state["p2pSkillCollections"] =
+                    new Dictionary<string, object>
+                    {
+                        ["turnBuff"] = skillInformation.TurnBuffCountList
+                            .Where(value => value != null)
+                            .Select(value => (object)new Dictionary<string, object>
+                            {
+                                ["turn"] = value.Turn,
+                                ["turnOwner"] =
+                                    GetAbsoluteTurnOwner(value.IsSelfTurn)
+                            }).ToList(),
+                        ["tokenDraw"] = skillInformation.TokenDrawModifiers
+                            .Where(value => value != null)
+                            .Select(value => (object)new Dictionary<string, object>
+                            {
+                                ["cardId"] = value.CardId,
+                                ["count"] = value.MultiplyCount
+                            }).ToList(),
+                        ["lifeHistory"] = CaptureLifeHistory(
+                            skillInformation.LifeModifierList),
+                        ["causedDamage"] = CaptureTurnValueCollection(
+                            skillInformation.CausedDamageModifierList),
+                        ["ppAdd"] = CaptureTurnValueCollection(
+                            skillInformation.PpAddList)
+                    };
+                state["p2pCardReferences"] = new Dictionary<string, object>
+                {
+                    ["randomSelected"] = CaptureCardReferences(
+                        skillInformation.RandomSelectedCardList),
+                    ["skillDrew"] = CaptureCardReferences(
+                        skillInformation.SkillDrewCardList),
+                    ["savedTargets"] = CaptureCardReferences(
+                        skillInformation.SavedTargetList),
+                    ["savedBurialTargets"] = CaptureCardReferences(
+                        skillInformation.SavedBurialRiteTargetList),
+                    ["lastBurialTargets"] = CaptureCardReferences(
+                        skillInformation.LastBurialRiteCardList),
+                    ["getOn"] = CaptureCardReferences(
+                        skillInformation.GetOnCards),
+                    ["getOff"] = CaptureCardReferences(card.GetOffCards)
+                };
+                Dictionary<string, object> savedTargetIds =
+                    new Dictionary<string, object>();
+                foreach (KeyValuePair<long, List<int>> saved in
+                    skillInformation.SavedTargetCardIdDict.OrderBy(
+                        value => value.Key))
+                {
+                    savedTargetIds[saved.Key.ToString(
+                        CultureInfo.InvariantCulture)] = ToObjectList(saved.Value);
+                }
+                state["p2pSavedTargetIds"] = savedTargetIds;
+                state["p2pPreprocess"] = new Dictionary<string, object>
+                {
+                    ["normal"] = CapturePreprocessCollection(card.NormalSkills),
+                    ["evolution"] = CapturePreprocessCollection(
+                        card.EvolutionSkills)
+                };
+            }
+            if (skillInformation != null)
+            {
+                state["p2pUnionBurstCount"] = skillInformation.UnionBurstCount;
+                state["p2pSkyboundArtCount"] = skillInformation.SkyboundArtCount;
+                state["p2pSuperSkyboundArtCount"] =
+                    skillInformation.SuperSkyboundArtCount;
+
+                List<object> fusionState = new List<object>();
+                if (skillInformation.FusionIngredients != null)
+                {
+                    foreach (FusionIngredientInfo ingredient in
+                        skillInformation.FusionIngredients)
+                    {
+                        if (ingredient?.Card == null || ingredient.Card.Index <= 0)
+                        {
+                            continue;
+                        }
+                        fusionState.Add(new Dictionary<string, object>
+                        {
+                            ["idx"] = ingredient.Card.Index,
+                            ["cardId"] = ingredient.Card.CardId,
+                            ["turn"] = ingredient.FusionTurn
+                        });
+                    }
+                }
+                state["p2pFusion"] = fusionState;
+            }
+            else
+            {
+                state["p2pGenericKeys"] = genericKeys;
+                state["p2pUnionBurstCount"] = 10;
+                state["p2pSkyboundArtCount"] = 10;
+                state["p2pSuperSkyboundArtCount"] = 15;
+                state["p2pFusion"] = new List<object>();
+            }
+
+            CardParameter baseParameter = card.BaseParameter;
+            if (baseParameter == null)
+            {
+                return state;
+            }
+
+            // Use absolute values for the few card properties accepted by
+            // CardDataModel.  This makes repeated P2P snapshots idempotent even
+            // when the original modifier was an add/half/temporary modifier.
+            if (card.IsUnit && card.Atk != card.BaseAtk)
+            {
+                state["setAtk"] = card.Atk;
+            }
+            if (card.IsUnit && card.MaxLife != card.BaseMaxLife)
+            {
+                state["setLife"] = card.MaxLife;
+            }
+            if (card.ChantCount != baseParameter.ChantCount)
+            {
+                state["setChantCount"] = card.ChantCount;
+            }
+            // ReplaceReceivedCard interprets these two wire values as the
+            // reduction from the built-in defaults, rather than the remaining
+            // count.  Sending the current count here would apply the modifier
+            // twice and make hand/deck condition checks disagree.
+            if (card.HasUnionBurst &&
+                card.SkillApplyInformation != null &&
+                card.SkillApplyInformation.UnionBurstCount != 10)
+            {
+                state["unionburst"] = 10 -
+                    card.SkillApplyInformation.UnionBurstCount;
+            }
+            if (card.HasSkyboundArt &&
+                card.SkillApplyInformation != null &&
+                card.SkillApplyInformation.SkyboundArtCount != 10)
+            {
+                state["skyboundArt"] = 10 -
+                    card.SkillApplyInformation.SkyboundArtCount;
+            }
+            if (card.Clan != baseParameter.Clan)
+            {
+                state["clan"] = (int)card.Clan;
+            }
+            if (card.Tribe != null && baseParameter.Tribe != null &&
+                !card.Tribe.SequenceEqual(baseParameter.Tribe))
+            {
+                state["tribe"] = string.Join(",", card.Tribe.Select(
+                    tribe => tribe.ToString()));
+            }
+
+            string attachedSkills = GetAttachedSkillState(card);
+            if (!string.IsNullOrEmpty(attachedSkills))
+            {
+                state["attachTarget"] = attachedSkills;
+            }
+
+            List<BattleCardBase> fusionIngredients = card.FusionIngredients;
+            if (fusionIngredients != null && fusionIngredients.Count > 0)
+            {
+                state["fusion"] = fusionIngredients
+                    .Where(ingredient => ingredient != null && ingredient.Index > 0)
+                    .Select(ingredient => (object)ingredient.Index)
+                    .ToList();
+            }
+            return state;
+        }
+
+        private static Dictionary<string, object> CaptureCardModifierState(
+            BattleCardBase card,
+            SkillApplyInformation information)
+        {
+            return new Dictionary<string, object>
+            {
+                ["offense"] = CaptureOffenseModifiers(
+                    information?.OffenseModifierList),
+                ["life"] = CaptureLifeModifiers(
+                    information?.LifeModifierList),
+                ["cost"] = CaptureCostModifiers(card?.CostModifierList),
+                ["chant"] = CaptureChantCountModifiers(
+                    information?.ChantCountModifierList)
+            };
+        }
+
+        private static List<object> CaptureOffenseModifiers(
+            IEnumerable<ICardOffenseModifier> modifiers)
+        {
+            List<object> result = new List<object>();
+            if (modifiers == null)
+            {
+                return result;
+            }
+            foreach (ICardOffenseModifier modifier in modifiers)
+            {
+                if (modifier is OffenseAddModifier add)
+                {
+                    result.Add(CaptureModifier("add", add.Offense));
+                }
+                else if (modifier is OffenseSetModifier set)
+                {
+                    result.Add(CaptureModifier("set", set.Offense));
+                }
+                else if (modifier is OffenseMultiplyModifier multiply)
+                {
+                    result.Add(CaptureModifier("multiply", multiply.Multipli));
+                }
+            }
+            return result;
+        }
+
+        private static List<object> CaptureLifeModifiers(
+            IEnumerable<ICardLifeModifier> modifiers)
+        {
+            List<object> result = new List<object>();
+            if (modifiers == null)
+            {
+                return result;
+            }
+            foreach (ICardLifeModifier modifier in modifiers)
+            {
+                Dictionary<string, object> captured = null;
+                if (modifier is LifeAddModifier add)
+                {
+                    captured = CaptureModifier("add", add.Life);
+                }
+                else if (modifier is LifeSetModifier set)
+                {
+                    captured = CaptureModifier("set", set.Life);
+                }
+                else if (modifier is LifeMultiplyModifier multiply)
+                {
+                    captured = CaptureModifier("multiply", multiply.Multipli);
+                }
+                else if (modifier is DamageCardParameterModifier damage)
+                {
+                    captured = CaptureTurnModifier("damage", damage);
+                }
+                else if (modifier is HealCardParameterModifier heal)
+                {
+                    captured = CaptureTurnModifier("heal", heal);
+                }
+                if (captured != null)
+                {
+                    result.Add(captured);
+                }
+            }
+            return result;
+        }
+
+        private static List<object> CaptureCostModifiers(
+            IEnumerable<ICardCostModifier> modifiers)
+        {
+            List<object> result = new List<object>();
+            if (modifiers == null)
+            {
+                return result;
+            }
+            foreach (ICardCostModifier modifier in modifiers)
+            {
+                Dictionary<string, object> captured = null;
+                if (modifier is CostAddModifier add)
+                {
+                    captured = CaptureModifier("add", add.Cost);
+                }
+                else if (modifier is CostSetModifier set)
+                {
+                    captured = CaptureModifier("set", set.Cost);
+                }
+                else if (modifier is CostHalfRoundUpModifier)
+                {
+                    captured = new Dictionary<string, object>
+                    {
+                        ["kind"] = "halfUp"
+                    };
+                }
+                else if (modifier is CostHalfRoundDownModifier)
+                {
+                    captured = new Dictionary<string, object>
+                    {
+                        ["kind"] = "halfDown"
+                    };
+                }
+                if (captured != null)
+                {
+                    captured["resident"] = modifier.IsResidentModifier ? 1 : 0;
+                    result.Add(captured);
+                }
+            }
+            return result;
+        }
+
+        private static List<object> CaptureChantCountModifiers(
+            IEnumerable<ICardChantCountModifier> modifiers)
+        {
+            List<object> result = new List<object>();
+            if (modifiers == null)
+            {
+                return result;
+            }
+            foreach (ICardChantCountModifier modifier in modifiers)
+            {
+                if (modifier is ChantCountAddModifier add)
+                {
+                    result.Add(CaptureModifier("add", add.ChantCount));
+                }
+                else if (modifier is ChantCountSetModifier set)
+                {
+                    result.Add(CaptureModifier("set", set.ChantCount));
+                }
+            }
+            return result;
+        }
+
+        private static Dictionary<string, object> CaptureModifier(
+            string kind,
+            int value)
+        {
+            return new Dictionary<string, object>
+            {
+                ["kind"] = kind,
+                ["value"] = value
+            };
+        }
+
+        private static Dictionary<string, object> CaptureTurnModifier(
+            string kind,
+            TurnAndIntValue value)
+        {
+            Dictionary<string, object> result = CaptureModifier(kind, value.Value);
+            result["turn"] = value.Turn;
+            result["turnOwner"] = GetAbsoluteTurnOwner(value.IsSelfTurn);
+            return result;
+        }
+
+        private static List<object> CaptureLifeHistory(
+            IEnumerable<ICardLifeModifier> modifiers)
+        {
+            List<object> result = new List<object>();
+            if (modifiers == null)
+            {
+                return result;
+            }
+
+            foreach (ICardLifeModifier modifier in modifiers)
+            {
+                string kind;
+                TurnAndIntValue value;
+                if (modifier is DamageCardParameterModifier damage)
+                {
+                    kind = "damage";
+                    value = damage;
+                }
+                else if (modifier is HealCardParameterModifier heal)
+                {
+                    kind = "heal";
+                    value = heal;
+                }
+                else
+                {
+                    continue;
+                }
+                result.Add(new Dictionary<string, object>
+                {
+                    ["kind"] = kind,
+                    ["value"] = value.Value,
+                    ["turn"] = value.Turn,
+                    ["turnOwner"] = GetAbsoluteTurnOwner(value.IsSelfTurn)
+                });
+            }
+            return result;
+        }
+
+        private static List<object> CaptureTurnValueCollection(
+            IEnumerable<TurnAndIntValue> values)
+        {
+            return values == null
+                ? new List<object>()
+                : values.Where(value => value != null)
+                    .Select(value => (object)new Dictionary<string, object>
+                    {
+                        ["value"] = value.Value,
+                        ["turn"] = value.Turn,
+                        ["turnOwner"] = GetAbsoluteTurnOwner(value.IsSelfTurn)
+                    }).ToList();
+        }
+
+        private static List<object> ToObjectList(IEnumerable<int> values)
+        {
+            return values == null
+                ? new List<object>()
+                : values.Select(value => (object)value).ToList();
+        }
+
+        private static List<object> CaptureCardReferences(
+            IEnumerable<BattleCardBase> cards)
+        {
+            List<object> result = new List<object>();
+            if (cards == null)
+            {
+                return result;
+            }
+
+            bool localOwnerIsHost = Role == P2PRole.Host;
+            foreach (BattleCardBase referencedCard in cards)
+            {
+                if (referencedCard == null || referencedCard.Index <= 0)
+                {
+                    continue;
+                }
+                bool ownerIsHost = referencedCard.IsPlayer
+                    ? localOwnerIsHost
+                    : !localOwnerIsHost;
+                result.Add(new Dictionary<string, object>
+                {
+                    ["idx"] = referencedCard.Index,
+                    ["cardId"] = referencedCard.CardId,
+                    ["owner"] = ownerIsHost ? 1 : 0
+                });
+            }
+            return result;
+        }
+
+        private static List<object> CapturePreprocessCollection(
+            IEnumerable<SkillBase> skills)
+        {
+            List<object> result = new List<object>();
+            if (skills == null)
+            {
+                return result;
+            }
+
+            foreach (SkillBase skill in skills)
+            {
+                if (skill == null)
+                {
+                    result.Add(new Dictionary<string, object>());
+                    continue;
+                }
+
+                List<object> items = new List<object>();
+                foreach (SkillPreprocessBase preprocess in
+                    skill.PreprocessList ?? new List<SkillPreprocessBase>())
+                {
+                    if (preprocess == null)
+                    {
+                        items.Add(new Dictionary<string, object>());
+                        continue;
+                    }
+                    items.Add(new Dictionary<string, object>
+                    {
+                        ["type"] = preprocess.GetType().FullName,
+                        ["fields"] = CaptureMutableSimpleFields(preprocess)
+                    });
+                }
+                result.Add(new Dictionary<string, object>
+                {
+                    ["type"] = skill.GetType().FullName,
+                    ["items"] = items
+                });
+            }
+            return result;
+        }
+
+        private static Dictionary<string, object> CaptureMutableSimpleFields(
+            object target)
+        {
+            Dictionary<string, object> result =
+                new Dictionary<string, object>();
+            if (target == null)
+            {
+                return result;
+            }
+
+            for (Type current = target.GetType(); current != null;
+                current = current.BaseType)
+            {
+                foreach (FieldInfo field in current.GetFields(
+                    BindingFlags.Instance | BindingFlags.Public |
+                        BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
+                    .OrderBy(field => field.Name, StringComparer.Ordinal))
+                {
+                    if (field.IsStatic || field.IsInitOnly || field.IsLiteral ||
+                        !IsSimpleStateType(field.FieldType) ||
+                        result.ContainsKey(field.Name))
+                    {
+                        continue;
+                    }
+                    try
+                    {
+                        result[field.Name] = field.GetValue(target);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+            return result;
+        }
+
+        private static Dictionary<string, object> CaptureSimpleBackingProperties(
+            object target,
+            HashSet<string> excludedNames)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            if (target == null)
+            {
+                return result;
+            }
+
+            foreach (PropertyInfo property in target.GetType().GetProperties(
+                BindingFlags.Instance | BindingFlags.Public |
+                    BindingFlags.NonPublic))
+            {
+                if (property.GetIndexParameters().Length > 0 ||
+                    excludedNames.Contains(property.Name) ||
+                    !IsSimpleStateType(property.PropertyType) ||
+                    !TryFindBackingField(target.GetType(), property.Name,
+                        out FieldInfo field) || field.IsStatic || field.IsInitOnly ||
+                    field.IsLiteral)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    result[property.Name] = field.GetValue(target);
+                }
+                catch (Exception)
+                {
+                }
+            }
+            return result;
+        }
+
+        private static readonly HashSet<string> HiddenCardPrimitiveExclusions =
+            new HashSet<string>(StringComparer.Ordinal)
+            {
+                "CardId",
+                "IsPlayer",
+                "IsFirstTurn",
+                "IsOnMove",
+                "IsSelfTurn",
+                "IsTokenLoad",
+                "NormalIndividualId",
+                "EvolutionIndividualId",
+                "BaseAtk",
+                "BaseCost",
+                "BaseMaxLife",
+                "Atk",
+                "Cost",
+                "Life",
+                "MaxLife",
+                "SpellChargeCount",
+                "ChantCount",
+                "GenericValueArray"
+            };
+
+        private static readonly HashSet<string> HiddenSkillPrimitiveExclusions =
+            new HashSet<string>(StringComparer.Ordinal)
+            {
+                "Player",
+                "Enemy",
+                "SkillGenericValueArray",
+                "SkillGenericKeyAndValue",
+                "UnionBurstCount",
+                "SkyboundArtCount",
+                "SuperSkyboundArtCount",
+                "UnionBurstCountModifierList",
+                "SkyboundArtCountModifierList",
+                "SuperSkyboundArtCountModifierList",
+                "FusionIngredients",
+                "AttachedSkillsInfo",
+                "GetOnCards"
+            };
+
+        private static string GetAttachedSkillState(BattleCardBase card)
+        {
+            try
+            {
+                AttachedSkillInformation attached = card.SkillApplyInformation?
+                    .AttachedSkillsInfo;
+                if (attached?.CreatorSkillList == null)
+                {
+                    return string.Empty;
+                }
+
+                List<string> publishedSkills = new List<string>();
+                for (int i = 0; i < attached.CreatorSkillList.Count; i++)
+                {
+                    SkillBase skill = attached.CreatorSkillList[i];
+                    if (skill == null)
+                    {
+                        continue;
+                    }
+                    int count = NetworkBattleGenericTool.GetPublishSkillCount(skill);
+                    if (count >= 0)
+                    {
+                        publishedSkills.Add(count.ToString(
+                            System.Globalization.CultureInfo.InvariantCulture));
+                        continue;
+                    }
+
+                    // Private creator skills do not receive a published count.
+                    // ReplaceReceivedCard also accepts ownerCardId|skillIndex|evo,
+                    // which lets the peer reconstruct these attachments directly.
+                    if (i < attached.OwnerCardIdList.Count &&
+                        i < attached.CreatorSkillIndexList.Count)
+                    {
+                        int ownerCardId = attached.OwnerCardIdList[i];
+                        int skillIndex = attached.CreatorSkillIndexList[i];
+                        if (ownerCardId > 0 && skillIndex >= 0)
+                        {
+                            bool isEvolution = skill.SkillPrm?.ownerCard?.EvolutionSkills
+                                ?.Contains(skill) == true;
+                            publishedSkills.Add(string.Join("|", new[]
+                            {
+                                ownerCardId.ToString(
+                                    System.Globalization.CultureInfo.InvariantCulture),
+                                skillIndex.ToString(
+                                    System.Globalization.CultureInfo.InvariantCulture),
+                                isEvolution ? "1" : "0"
+                            }));
+                        }
+                    }
+                }
+                return string.Join(",", publishedSkills);
+            }
+            catch (Exception)
+            {
+                return string.Empty;
+            }
+        }
+
+        private static List<object> GetOrCreateKnownList(
+            Dictionary<string, object> data)
+        {
+            if (data.TryGetValue("knownList", out object rawKnownList) &&
+                rawKnownList is List<object> knownList)
+            {
+                return knownList;
+            }
+
+            List<object> result = new List<object>();
+            if (rawKnownList is IEnumerable enumerable && !(rawKnownList is string))
+            {
+                foreach (object item in enumerable)
+                {
+                    result.Add(item);
+                }
+            }
+            data["knownList"] = result;
+            return result;
+        }
+
+        private static void MergeKnownCardState(
+            List<object> knownList,
+            Dictionary<string, object> state)
+        {
+            int index = Convert.ToInt32(state["idx"]);
+            foreach (object item in knownList)
+            {
+                if (!(item is Dictionary<string, object> known) ||
+                    !IsSelfKnownCard(known) || !KnownCardContainsIndex(known, index))
+                {
+                    continue;
+                }
+
+                // Native messages may group several indices under idxList.  A
+                // snapshot carries one complete card state, so keep it as a
+                // separate entry instead of overwriting the group's scalar idx.
+                if (known.ContainsKey("idxList") && !known.ContainsKey("idx"))
+                {
+                    continue;
+                }
+
+                foreach (string stateKey in HiddenCardStateKeys)
+                {
+                    if (!state.ContainsKey(stateKey))
+                    {
+                        known.Remove(stateKey);
+                    }
+                }
+                foreach (KeyValuePair<string, object> field in state)
+                {
+                    known[field.Key] = field.Value;
+                }
+                return;
+            }
+            knownList.Add(state);
+        }
+
+        private static readonly string[] HiddenCardStateKeys =
+        {
+            "cost",
+            "spellboost",
+            "setAtk",
+            "setLife",
+            "setChantCount",
+            "unionburst",
+            "skyboundArt",
+            "clan",
+            "tribe",
+            "attachTarget",
+            "fusion",
+            "p2pCardPrimitive",
+            "p2pSkillPrimitive",
+            "p2pLifeState",
+            "p2pDamagedCounter",
+            "p2pModifiers",
+            "p2pSkillActivationIds",
+            "p2pMaxAttackableCount",
+            "p2pSkillActivatedCount",
+            "p2pSkillActivatedWrap",
+            "p2pSkillRandomArrayPresent",
+            "p2pSkillRandomArray",
+            "p2pGenericArrayPresent",
+            "p2pGenericArray",
+            "p2pGenericKeys",
+            "p2pIntLists",
+            "p2pSkillCollections",
+            "p2pCardReferences",
+            "p2pSavedTargetIds",
+            "p2pPreprocess",
+            "p2pUnionBurstCount",
+            "p2pSkyboundArtCount",
+            "p2pSuperSkyboundArtCount",
+            "p2pFusion"
+        };
+
+        private static readonly string[] PlayerHistoryListNames =
+        {
+            "HandCardList",
+            "DeckCardList",
+            "BattleStartDeckCardList",
+            "DeckSkillCardList",
+            "FusionIngredientList",
+            "TurnFusionCards",
+            "NecromanceZoneList",
+            "DiscardedCardList",
+            "FusionIngredientAndDiscardedCardList",
+            "ReservedCardList",
+            "UniteList",
+            "GetOnList",
+            "BlackHole",
+            "ChoiceBraveCardList",
+            "PredictionCemeteryRandomCards",
+            "PredictionDamageRandomCards",
+            "PredictionBanishRandomCards",
+            "ReturnList",
+            "LastTargetCardsList",
+            "InHandCards",
+            "SkillDiscards",
+            "SelfDiscardList",
+            "SkillBanishCards",
+            "HealingCards",
+            "SkillSummonedCards",
+            "SummonedCards",
+            "EvolvedCards",
+            "DestroyedWhenDestroyCards",
+            "TurnPlayCardCountInfo",
+            "TurnFusionCountInfo",
+            "TurnEvolveCardCountInfo",
+            "TurnPlayCards",
+            "TurnDrawCards",
+            "TurnDrawTokenCardsWithId",
+            "GameDrawCards",
+            "GameDrawTokenCards",
+            "GameAddUpdateDeckCards",
+            "GameSummonCards",
+            "GameSummonMomentTribe",
+            "GamePlayMomentTribe",
+            "GamePlayMomentSpellChargeCards",
+            "GameUpdateDeckMomentTribe",
+            "GamePlayCards",
+            "GameTurnPlayCards",
+            "GameEnhancePlayCards",
+            "GameCrystallizedPlayCards",
+            "GameLeftCards",
+            "GameTurnLeftCards",
+            "GameReturnedCards",
+            "GameSuperSkyboundArtCards",
+            "GameInplayMetamorphoseCards",
+            "TurnDestroyCards",
+            "TurnWhenHealingCount",
+            "GameBurialRiteCards",
+            "TurnBurialRiteCards",
+            "BurialRiteOrDiscardCardHandIndexList",
+            "GameReanimatedCards",
+            "AddToDeckCardList",
+            "TurnStartLifeList",
+            "GameSkillReturnCardCountList",
+            "GameSkillDiscardCountList",
+            "GameSkillBuffCountList",
+            "GameSkillMetamorphoseCountList",
+            "GameQuickAttackCards"
+        };
+
+        private static readonly HashSet<string> PlayerHistoryListNameSet =
+            new HashSet<string>(PlayerHistoryListNames, StringComparer.Ordinal);
+
+        private static readonly string[] PlayerHistoryScalarNames =
+        {
+            "Pp",
+            "PpTotal",
+            "Bp",
+            "EpTotal",
+            "CurrentEpCount",
+            "EvolveWaitTurnCount",
+            "NowTurnEvol",
+            "IsEpEvolveThisTurn",
+            "GameUsedEpCount",
+            "TurnUsedEpCount",
+            "IsAlreadyChoiceBraveInThisTurn",
+            "IsChoiceBraveEffectTiming",
+            "TurnNecromanceCount",
+            "GameNecromanceCount",
+            "GameUsedPpCount",
+            "RallyCount",
+            "DeckBanishCount",
+            "GameResonanceStartCount",
+            "TurnResonanceStartCount",
+            "GameUsedWhiteRitualCount",
+            "LastInplayWhiteRitualStack",
+            "GameSkillDiscardCount",
+            "IsShortageDeck",
+            "IsShortageDeckLose",
+            "extraTurnCount",
+            "cardTotalNum",
+            "_cumulativeEvolutionCount"
+        };
+
+        private static readonly HashSet<string> PlayerHistoryScalarNameSet =
+            new HashSet<string>(PlayerHistoryScalarNames, StringComparer.Ordinal);
+
+        private static bool TryGetPlayerHistoryListMember(
+            BattlePlayerBase player,
+            string name,
+            out Type listType,
+            out object value)
+        {
+            listType = null;
+            value = null;
+            if (player == null || !PlayerHistoryListNameSet.Contains(name))
+            {
+                return false;
+            }
+            try
+            {
+                if (TryFindInstanceProperty(player.GetType(), name,
+                        out PropertyInfo property))
+                {
+                    listType = property.PropertyType;
+                    value = property.GetValue(player, null);
+                    return true;
+                }
+                if (TryFindInstanceField(player.GetType(), name,
+                        out FieldInfo field))
+                {
+                    listType = field.FieldType;
+                    value = field.GetValue(player);
+                    return true;
+                }
+            }
+            catch (Exception)
+            {
+            }
+            return false;
+        }
+
+        private static bool IsSelfKnownCard(Dictionary<string, object> known)
+        {
+            if (known == null || !known.TryGetValue("isSelf", out object rawSelf))
+            {
+                return false;
+            }
+            try
+            {
+                return Convert.ToInt32(rawSelf) != 0;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private static bool KnownCardContainsIndex(
+            Dictionary<string, object> known,
+            int index)
+        {
+            if (known.TryGetValue("idx", out object rawIndex))
+            {
+                try
+                {
+                    return Convert.ToInt32(rawIndex) == index;
+                }
+                catch (Exception)
+                {
+                }
+            }
+            if (!known.TryGetValue("idxList", out object rawIndices) ||
+                rawIndices is string || !(rawIndices is IEnumerable enumerable))
+            {
+                return false;
+            }
+            foreach (object rawValue in enumerable)
+            {
+                try
+                {
+                    if (Convert.ToInt32(rawValue) == index)
+                    {
+                        return true;
+                    }
+                }
+                catch (Exception)
+                {
+                }
+            }
+            return false;
+        }
+
         private static Dictionary<string, object> CaptureBattleState()
         {
             if (!(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
@@ -1839,6 +5464,10 @@ namespace Shadowbus
         private static Dictionary<string, object> CapturePlayerState(
             BattlePlayerBase player)
         {
+            bool localOwnerIsHost = Role == P2PRole.Host;
+            bool ownerIsHost = player.IsPlayer
+                ? localOwnerIsHost
+                : !localOwnerIsHost;
             return new Dictionary<string, object>
             {
                 ["life"] = player.Class?.Life ?? 0,
@@ -1850,11 +5479,68 @@ namespace Shadowbus
                 ["isTurn"] = player.IsSelfTurn,
                 ["deckCount"] = player.DeckCardList?.Count ?? 0,
                 ["deck"] = FormatCardIndices(player.DeckCardList),
+                ["deckState"] = FormatPrivateCardStates(player.DeckCardList),
                 ["hand"] = FormatCardIndices(player.HandCardList),
+                ["handState"] = FormatPrivateCardStates(player.HandCardList),
                 ["cemetery"] = FormatPublicCards(player.CemeteryList),
                 ["banish"] = FormatCardIndices(player.BanishList),
-                ["field"] = FormatFieldCards(player.InPlayCards)
+                ["field"] = FormatFieldCards(player.InPlayCards),
+                ["history"] = CapturePlayerHistoryDiagnosticState(
+                    player, ownerIsHost)
             };
+        }
+
+        private static Dictionary<string, object>
+            CapturePlayerHistoryDiagnosticState(
+                BattlePlayerBase player,
+                bool ownerIsHost)
+        {
+            Dictionary<string, object> state =
+                CapturePlayerHistoryState(player, ownerIsHost);
+            Dictionary<string, object> result =
+                new Dictionary<string, object>();
+            if (state.TryGetValue("scalars", out object rawScalars) &&
+                rawScalars is Dictionary<string, object> scalars)
+            {
+                foreach (KeyValuePair<string, object> value in scalars)
+                {
+                    result["scalar." + value.Key] = value.Value;
+                }
+            }
+            if (state.TryGetValue("lists", out object rawLists) &&
+                rawLists is Dictionary<string, object> lists)
+            {
+                foreach (KeyValuePair<string, object> value in lists)
+                {
+                    result["list." + value.Key] = JsonConvert.SerializeObject(
+                        value.Value, P2PJson.Settings);
+                }
+            }
+            if (state.TryGetValue("class", out object rawClass) &&
+                rawClass is Dictionary<string, object> classState)
+            {
+                result["class"] = NormalizeDiagnosticValue(classState);
+            }
+            return result;
+        }
+
+        private static object NormalizeDiagnosticValue(object value)
+        {
+            if (value is Dictionary<string, object> dictionary)
+            {
+                Dictionary<string, object> normalized =
+                    new Dictionary<string, object>();
+                foreach (KeyValuePair<string, object> item in dictionary)
+                {
+                    normalized[item.Key] = NormalizeDiagnosticValue(item.Value);
+                }
+                return normalized;
+            }
+            if (!(value is string) && value is IEnumerable)
+            {
+                return JsonConvert.SerializeObject(value, P2PJson.Settings);
+            }
+            return value;
         }
 
         private static string FormatCardIndices(IEnumerable<BattleCardBase> cards)
@@ -1862,8 +5548,154 @@ namespace Shadowbus
             return cards == null
                 ? string.Empty
                 : string.Join(",", cards.Where(card => card != null)
-                    .OrderBy(card => card.Index)
                     .Select(card => $"{card.Index}:{card.CardId}"));
+        }
+
+        private static string FormatPrivateCardStates(
+            IEnumerable<BattleCardBase> cards)
+        {
+            if (cards == null)
+            {
+                return string.Empty;
+            }
+
+            List<string> states = new List<string>();
+            foreach (BattleCardBase card in cards.Where(card => card != null)
+                .OrderBy(card => card.Index))
+            {
+                try
+                {
+                    string attach = GetAttachedSkillState(card);
+                    string tribe = card.Tribe == null
+                        ? string.Empty
+                        : string.Join(",", card.Tribe.Select(value => value.ToString()));
+                    SkillApplyInformation skillInformation =
+                        card.SkillApplyInformation as SkillApplyInformation;
+                    string fusion = skillInformation?.FusionIngredients == null
+                        ? string.Empty
+                        : string.Join(",", skillInformation.FusionIngredients
+                            .Where(value => value?.Card != null)
+                            .Select(value => value.Card.Index.ToString(
+                                CultureInfo.InvariantCulture) + "@" +
+                                value.FusionTurn.ToString(CultureInfo.InvariantCulture)));
+                    string genericArray = skillInformation?.SkillGenericValueArray == null
+                        ? "-"
+                        : string.Join(",", skillInformation.SkillGenericValueArray
+                            .Select(value => value.ToString(CultureInfo.InvariantCulture)));
+                    string genericKeys = skillInformation?.SkillGenericKeyAndValue == null
+                        ? string.Empty
+                        : string.Join(",", skillInformation.SkillGenericKeyAndValue
+                            .OrderBy(value => value.Key, StringComparer.Ordinal)
+                            .Select(value => value.Key + "=" +
+                                value.Value.ToString(CultureInfo.InvariantCulture)));
+                    string randomArray = skillInformation?.SkillRandomArray == null
+                        ? "-"
+                        : string.Join(",", skillInformation.SkillRandomArray
+                            .Select(value => value.ToString(CultureInfo.InvariantCulture)));
+                    string referenceState = skillInformation == null
+                        ? string.Empty
+                        : string.Join("|", new[]
+                        {
+                            "random=" + FormatCardReferences(
+                                skillInformation.RandomSelectedCardList),
+                            "drew=" + FormatCardReferences(
+                                skillInformation.SkillDrewCardList),
+                            "saved=" + FormatCardReferences(
+                                skillInformation.SavedTargetList),
+                            "burial=" + FormatCardReferences(
+                                skillInformation.LastBurialRiteCardList),
+                            "getOn=" + FormatCardReferences(
+                                skillInformation.GetOnCards),
+                            "getOff=" + FormatCardReferences(card.GetOffCards)
+                        });
+                    string savedTargetIds = skillInformation == null
+                        ? string.Empty
+                        : string.Join(",", skillInformation.SavedTargetCardIdDict
+                            .OrderBy(value => value.Key)
+                            .Select(value => value.Key.ToString(
+                                    CultureInfo.InvariantCulture) + "=" +
+                                string.Join("/", value.Value)));
+                    string modifierState = FormatCardModifierDiagnosticState(
+                        card, skillInformation);
+                    string turnHistory = skillInformation == null
+                        ? string.Empty
+                        : "caused=" + JsonConvert.SerializeObject(
+                            CaptureTurnValueCollection(
+                                skillInformation.CausedDamageModifierList),
+                            P2PJson.Settings) + ",ppAdd=" +
+                            JsonConvert.SerializeObject(
+                                CaptureTurnValueCollection(
+                                    skillInformation.PpAddList),
+                                P2PJson.Settings);
+                    string activationIds = card.SkillActivationList == null
+                        ? string.Empty
+                        : string.Join(",", card.SkillActivationList
+                            .Select(value => value.SkillId.ToString(
+                                CultureInfo.InvariantCulture)));
+                    states.Add(
+                        $"idx={card.Index}[id={card.CardId},cost={card.Cost}," +
+                        $"spellboost={card.SpellChargeCount},atk={card.Atk}," +
+                        $"life={card.Life}/{card.MaxLife},chant={card.ChantCount}," +
+                        $"union={skillInformation?.UnionBurstCount.ToString(CultureInfo.InvariantCulture) ?? "-"}," +
+                        $"skybound={skillInformation?.SkyboundArtCount.ToString(CultureInfo.InvariantCulture) ?? "-"}," +
+                        $"superSkybound={skillInformation?.SuperSkyboundArtCount.ToString(CultureInfo.InvariantCulture) ?? "-"}," +
+                        $"clan={(int)card.Clan},tribe={tribe},attach={attach}," +
+                        $"fusion={fusion},skillCount={card.SkillActivatedCount}," +
+                        $"generic=[{genericArray}],genericKeys=[{genericKeys}]," +
+                        $"random=[{randomArray}],refs=[{referenceState}]," +
+                        $"savedIds=[{savedTargetIds}],mods=[{modifierState}]," +
+                        $"turnHistory=[{turnHistory}],damageCount=" +
+                        $"{card.DamagedCounter?.SelfTurnDamage ?? 0}/" +
+                        $"{card.DamagedCounter?.OpponentTurnDamage ?? 0}," +
+                        $"maxAttackCount={card.MaxAttackableCount}," +
+                        $"activationIds=[{activationIds}]]");
+                }
+                catch (Exception ex)
+                {
+                    // A partially initialized token should not prevent the
+                    // remaining battle state from being compared or logged.
+                    states.Add($"{card.Index}:{card.CardId}:state-error:{ex.GetType().Name}");
+                }
+            }
+            return string.Join(";", states);
+        }
+
+        private static string FormatCardModifierDiagnosticState(
+            BattleCardBase card,
+            SkillApplyInformation information)
+        {
+            Dictionary<string, object> modifiers =
+                CaptureCardModifierState(card, information);
+            List<string> result = new List<string>();
+            foreach (KeyValuePair<string, object> entry in modifiers)
+            {
+                if (entry.Value is ICollection collection && collection.Count == 0)
+                {
+                    continue;
+                }
+                result.Add(entry.Key + "=" + JsonConvert.SerializeObject(
+                    entry.Value, P2PJson.Settings));
+            }
+            return string.Join("|", result);
+        }
+
+        private static string FormatCardReferences(
+            IEnumerable<BattleCardBase> cards)
+        {
+            if (cards == null)
+            {
+                return string.Empty;
+            }
+            bool localOwnerIsHost = Role == P2PRole.Host;
+            return string.Join(",", cards.Where(card => card != null)
+                .Select(card =>
+                {
+                    bool ownerIsHost = card.IsPlayer
+                        ? localOwnerIsHost
+                        : !localOwnerIsHost;
+                    return (ownerIsHost ? "H" : "G") + ":" +
+                        card.Index.ToString(CultureInfo.InvariantCulture);
+                }));
         }
 
         private static string FormatPublicCards(IEnumerable<BattleCardBase> cards)
@@ -2417,6 +6249,44 @@ namespace Shadowbus
             internal Dictionary<string, object> Expected { get; }
             internal DateTime DeadlineUtc { get; }
             internal string InjectionError { get; set; }
+        }
+
+        private sealed class AppliedHiddenCardState
+        {
+            internal BattleCardBase Card { get; set; }
+            internal string Signature { get; set; }
+            internal bool NativeStateInherited { get; set; }
+            internal bool StateComplete { get; set; }
+            internal DateTime NextRetryUtc { get; set; }
+        }
+
+        private sealed class HiddenCardLifeStateModifier : ICardLifeModifier
+        {
+            private readonly int life;
+            private readonly int maxLife;
+
+            internal HiddenCardLifeStateModifier(int life, int maxLife)
+            {
+                this.life = life;
+                this.maxLife = maxLife;
+            }
+
+            public bool IsChangeMaxLife => false;
+            public bool IsClearBeforeModifier => false;
+            public int CalcLife(int baseLife) => life;
+            public int CalcMaxLife(int baseMaxLife) => maxLife;
+        }
+
+        private sealed class PendingPlayerHistoryState
+        {
+            internal int Owner { get; set; }
+            internal int Revision { get; set; }
+            internal Dictionary<string, object> State { get; set; }
+            internal bool ReadyToApply { get; set; }
+            internal int Attempts { get; set; }
+            internal DateTime FirstSeenUtc { get; set; }
+            internal DateTime NextAttemptUtc { get; set; }
+            internal bool WarningLogged { get; set; }
         }
     }
 }

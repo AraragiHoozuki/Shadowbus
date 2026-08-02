@@ -477,10 +477,28 @@ namespace Shadowbus
                 {
                     dictionary[key] = FlipSideValue(value);
                 }
+                else if (string.Equals(key, "skillTarget", StringComparison.Ordinal) ||
+                    string.Equals(key, "skillTargetList", StringComparison.Ordinal))
+                {
+                    // SkillTargetId embeds the source player's perspective in its
+                    // ten-thousands digit. Unlike targetList.isSelf, this side is
+                    // absolute to the message viewer and must be flipped.
+                    dictionary[key] = FlipSkillTargetValue(value);
+                }
                 else if (string.Equals(key, "targetList", StringComparison.Ordinal) ||
                     string.Equals(key, "oppoTargetList", StringComparison.Ordinal))
                 {
                     // Target sides are relative to the acting player, not the receiver.
+                }
+                else if (string.Equals(key, "p2pHiddenCards", StringComparison.Ordinal) ||
+                    string.Equals(key, "p2pHiddenRemoved", StringComparison.Ordinal) ||
+                    string.Equals(key, "p2pHiddenOwner", StringComparison.Ordinal) ||
+                    string.Equals(key, "p2pPlayerHistory", StringComparison.Ordinal))
+                {
+                    // P2P private snapshots use absolute host/guest ownership and
+                    // are consumed by the mod before/after the native receiver.
+                    // Perspective conversion would corrupt history flags and
+                    // generic keys such as "isSelf".
                 }
                 else
                 {
@@ -500,6 +518,80 @@ namespace Shadowbus
             {
                 dictionary["idxChangeSeed"] = opponentSeed;
             }
+        }
+
+        private static object FlipSkillTargetValue(object value)
+        {
+            if (value is List<object> list)
+            {
+                List<object> flipped = new List<object>(list.Count);
+                foreach (object item in list)
+                {
+                    flipped.Add(FlipSkillTargetValue(item));
+                }
+                return flipped;
+            }
+            if (value is Dictionary<string, object> dictionary)
+            {
+                Dictionary<string, object> flipped = P2PJson.CloneDictionary(dictionary);
+                FlipDictionary(flipped);
+                return flipped;
+            }
+
+            string text = value as string;
+            if (text != null)
+            {
+                if (!TryFlipSkillTargetString(text, out string flippedText))
+                {
+                    return value;
+                }
+                return flippedText;
+            }
+
+            if (value is int || value is long || value is short ||
+                value is byte || value is uint || value is ulong)
+            {
+                if (!TryConvertInt(value, out int encoded) ||
+                    !TryFlipSkillTargetId(encoded, out int flippedId))
+                {
+                    return value;
+                }
+                return flippedId;
+            }
+
+            return value;
+        }
+
+        private static bool TryFlipSkillTargetString(
+            string value,
+            out string flipped)
+        {
+            flipped = value;
+            if (string.IsNullOrEmpty(value))
+            {
+                return false;
+            }
+            if (!int.TryParse(value, NumberStyles.Integer,
+                    CultureInfo.InvariantCulture, out int encoded) ||
+                !TryFlipSkillTargetId(encoded, out int flippedId))
+            {
+                return false;
+            }
+            flipped = flippedId.ToString(CultureInfo.InvariantCulture);
+            return true;
+        }
+
+        private static bool TryFlipSkillTargetId(int encoded, out int flipped)
+        {
+            flipped = encoded;
+            if (encoded <= 0 || encoded >= 20000)
+            {
+                return false;
+            }
+
+            int side = encoded >= 10000 ? 1 : 0;
+            flipped = (side == 0 ? 1 : 0) * 10000 + encoded % 10000;
+            return true;
         }
 
         private static void FlipNestedValue(object value)

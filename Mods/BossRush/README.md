@@ -35,6 +35,7 @@ Mods/BossRush/
 - 只有一个有效配置时直接使用；有多个配置时，进入前使用游戏现有滚轮对话框选择。
 - `selected.txt` 保存上次选择的配置 ID。
 - 配置 ID 对应独立状态文件，不同配置的进度、牌组和能力不会互相覆盖。
+- 每次点击 BossRush 入口都会重新扫描配置目录；运行中新增、删除或修改配置后，无需重启游戏。
 
 ## 完整结构
 
@@ -64,8 +65,8 @@ Mods/BossRush/
 | `display_name` | string | 否 | 游戏内 BossRush 卡片名称、大厅顶栏名称和多配置选择名称；为空时使用 `id`。 |
 | `detail_title` | string | 否 | 大厅“详情”按钮打开的本地对话框标题；为空时使用 `display_name`。 |
 | `detail_text` | string | 否 | 详情正文。JSON 中使用 `\n` 换行；为空时保留游戏原本的“无详情”提示。 |
-| `ui_theme` | string | 否 | 大厅视觉主题，选项见下表。默认 `grand_prix_1`。 |
-| `lobby_background` | string | 否 | 直接指定现有大厅背景资源名；非空时覆盖 `ui_theme`。不要带 `ui_` 前缀和 `.unity3d` 后缀。 |
+| `ui_theme` | string | 否 | 大厅信息面板配色，选项见下表。默认 `grand_prix_1`。 |
+| `lobby_background` | string | 否 | 可选的现有大厅背景资源名，与 `ui_theme` 相互独立。不要带 `ui_` 前缀和 `.unity3d` 后缀。 |
 | `default_player_life` | int | 否 | 新挑战的玩家初始及最大生命，必须大于 `0`，默认 `20`。 |
 | `initial_progress` | int | 否 | 初始 Boss 索引，从 `0` 开始。通常保持 `0`。 |
 | `abilities` | array | 否 | 可选 Buff 池，每次从符合条件的能力中随机生成候选。 |
@@ -74,21 +75,24 @@ Mods/BossRush/
 
 ## BossRush UI 主题
 
-反编译源码中只有一个 `BossRushLobby` 布局 prefab，服务器响应也没有 UI 类型字段。
-所谓主题切换由 Shadowbus 在本地替换大厅背景实现；按钮、Boss 面板、加护面板和进度球仍使用
-原版 BossRush 布局。选择不同配置后，进入大厅时会立即应用该配置的主题。
+反编译源码中只有一个 `BossRushLobby` 布局 prefab，服务器响应也没有 UI 类型字段，因此不能
+从官方资源切换成另一套面板结构。Shadowbus 的 `ui_theme` 会改变原版信息面板的深色配色，
+并把面板内所有标签统一设为带描边的浅色文字；按钮、Boss 面板和进度球的位置保持原版布局。
+每次在 Quest 选择页点击 BossRush 配置时都会重新读取对应的 `bossrush.json`，因此修改
+`ui_theme` 或 `lobby_background` 后不需要重启游戏；需要先退出当前大厅再重新选择配置。
+日志中的 `Selected config ... ui_theme ... lobby background ...` 会显示实际生效的值和资源名。
 
-| `ui_theme` | 背景资源 | 说明 |
-| --- | --- | --- |
-| `grand_prix_1` | `bg_gp_special_01` | 默认。与 BossRush 原版使用的 GrandPrixSpecial Atlas 最接近。 |
-| `grand_prix_2` | `bg_gp_special_02` | Grand Prix 特殊背景第二种。 |
-| `colosseum_1` | `bg_colosseum_01` | 竞技场背景第一种。 |
-| `colosseum_2` | `bg_colosseum_02` | 竞技场背景第二种。 |
-| `two_pick` | `bg_2pick` | 双选模式背景。 |
-| `quest` | `bg_quest` | 普通 Quest 背景，资源缺失时也作为最终回退。 |
-| `classic` | `bg_boss_rush` | 客户端源码中的原始名称；部分关服后的本地资源包不包含它。 |
+| `ui_theme` | 信息面板配色 |
+| --- | --- |
+| `grand_prix_1` | 深青灰，默认主题。 |
+| `grand_prix_2` | 深紫灰。 |
+| `colosseum_1` | 深绿灰。 |
+| `colosseum_2` | 深红灰。 |
+| `two_pick` | 深蓝灰。 |
+| `quest` | 中性灰绿。 |
+| `classic` | 深炭紫。 |
 
-也可以绕过预设直接指定已存在的背景：
+背景不再由 `ui_theme` 改变。需要背景时可以单独指定现有资源：
 
 ```json
 {
@@ -97,8 +101,9 @@ Mods/BossRush/
 }
 ```
 
-无效或缺失的背景会记录 `[BossRush]` 警告并回退到 `bg_quest`。自定义背景只引用已有资源，
-Shadowbus 不会从图片文件创建新的 Unity 资源包。
+`lobby_background` 为空时使用原版的 `bg_boss_rush`。无效或缺失的背景会记录 `[BossRush]`
+警告，并使用中性深色背景兜底。自定义背景只引用已有资源，Shadowbus 不会从图片文件创建
+新的 Unity 资源包。
 
 ## Boss 字段
 

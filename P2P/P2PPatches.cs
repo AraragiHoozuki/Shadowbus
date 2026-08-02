@@ -753,7 +753,16 @@ namespace Shadowbus
         private static void NetworkBattleManagerBase_ConductReceiveData_Prefix(
             NetworkBattleReceiver.ReceiveData receiveData)
         {
-            if (!P2PRuntime.IsActive || receiveData == null ||
+            if (!P2PRuntime.IsActive)
+            {
+                return;
+            }
+
+            // The receiver only starts a new operation after the previous VFX
+            // queue is idle. Apply that previous operation's full history first,
+            // so conditions in this operation see the authoritative counters.
+            P2PRuntime.TryApplyPendingPlayerHistoryStates();
+            if (receiveData == null ||
                 !receiveData.IsAcceleratedOrCrystallize)
             {
                 return;
@@ -767,6 +776,121 @@ namespace Shadowbus
                 $"originalCardId={receiveData.transformBeforeCardId}, " +
                 $"mutationCardId={receiveData.mutationAfterCardId}, " +
                 $"replacementCost={playCard?.playCardCost ?? -1}.");
+        }
+
+        [HarmonyPatch(
+            typeof(NetworkBattleReceiver),
+            nameof(NetworkBattleReceiver.ReceivedMessage))]
+        [HarmonyPostfix]
+        private static void NetworkBattleReceiver_ReceivedMessage_Postfix(
+            Dictionary<string, object> data,
+            bool __result)
+        {
+            if (P2PRuntime.IsActive && __result)
+            {
+                // The payload is a post-action snapshot. It must not become
+                // eligible until the matching native operation was accepted.
+                P2PRuntime.MarkReceivedPlayerHistoryStateReady(data);
+                P2PRuntime.FinalizeReceivedHiddenCardRemovals(data);
+            }
+        }
+
+        [HarmonyPatch(typeof(ReplaceReceivedCard), "InheritedCardData")]
+        [HarmonyPostfix]
+        private static void ReplaceReceivedCard_InheritedCardData_Postfix(
+            BattleCardBase receivedCard)
+        {
+            if (!P2PRuntime.IsActive || receivedCard == null)
+            {
+                return;
+            }
+
+            // The native CardDataModel cannot carry generic skill values,
+            // fusion turns, or Super Skybound Art. Apply the P2P snapshot after
+            // the native replacement has copied all public fields and attached
+            // skills, so the resulting card is authoritative before it enters
+            // the hand/deck list.
+            P2PRuntime.ApplyReceivedHiddenCardState(receivedCard, true);
+        }
+
+        [HarmonyPatch(
+            typeof(NetworkExecutionInfoCreator),
+            nameof(NetworkExecutionInfoCreator.CheckCondition),
+            new[]
+            {
+                typeof(BattlePlayerReadOnlyInfoPair),
+                typeof(SkillConditionCheckerOption),
+                typeof(bool),
+                typeof(bool)
+            })]
+        [HarmonyPostfix]
+        private static void NetworkExecutionInfoCreator_CheckCondition_Postfix(
+            NetworkExecutionInfoCreator __instance,
+            BattlePlayerReadOnlyInfoPair playerInfoPair,
+            SkillConditionCheckerOption option,
+            bool isPrePlay,
+            bool isSkipTarget,
+            ref bool __result)
+        {
+            if (!P2PRuntime.IsActive || __instance == null)
+            {
+                return;
+            }
+
+            try
+            {
+                SkillBase skill = AccessTools.Field(
+                        typeof(ExecutionInfoCreatorBase), "_skill")?
+                    .GetValue(__instance) as SkillBase;
+                if (skill?.SkillPrm?.ownerCard == null ||
+                    skill.SkillPrm.ownerCard.IsPlayer ||
+                    !UsesPrivateCardInformation(skill))
+                {
+                    return;
+                }
+
+                // The official server supplies activate/count/highlander results
+                // for private zones. P2P deliberately shares those zones, so the
+                // peer can evaluate the original condition against the complete
+                // synchronized hand/deck instead of waiting for a server-only flag.
+                P2PRuntime.TryApplyPendingHiddenCardStates();
+                P2PRuntime.TryApplyPendingPlayerHistoryStates();
+                bool localResult = skill.ConditionFilterCollection.Filtering(
+                    playerInfoPair,
+                    skill.SkillPrm.ownerCard,
+                    option,
+                    skill.OptionValue,
+                    isPrePlay,
+                    skill,
+                    isSkipTarget);
+                if (__result != localResult)
+                {
+                    Plugin.Logger.LogDebug(
+                        $"[P2P] Replaced server-only private condition result for " +
+                        $"card idx={skill.SkillPrm.ownerCard.Index}, " +
+                        $"skill={skill.GetType().Name}: received={__result}, " +
+                        $"local={localResult}.");
+                }
+                __result = localResult;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogDebug(
+                    "[P2P] Could not evaluate a private hand/deck condition locally: " +
+                    ex.Message);
+            }
+        }
+
+        private static bool UsesPrivateCardInformation(SkillBase skill)
+        {
+            return RegisterSkillConditionCheck.IsSkillConditionCheck(skill) ||
+                RegisterSkillConditionCheck.IsPreprocessConditionCheck(skill) ||
+                RegisterSkillConditionCheck.DoesSkillUsePrivateCount(
+                    skill, false, false) ||
+                RegisterSkillConditionCheck.IsHighlander(
+                    skill.ConditionFilterCollection) ||
+                RegisterSkillConditionCheck.IsHighlanderPreprocessConditionCheck(
+                    skill);
         }
 
         [HarmonyPatch(typeof(ActionProcessor), "SetSkillConditionCheckeroptionSelectCards")]
