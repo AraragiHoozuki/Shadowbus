@@ -8,7 +8,7 @@ using System.Linq;
 
 namespace Shadowbus;
 
-[BepInPlugin("08c8e386-a794-442f-a98c-aec65a183898", "GeorgesZebit.Shadowbus", "2.3.0")]
+[BepInPlugin("08c8e386-a794-442f-a98c-aec65a183898", "GeorgesZebit.Shadowbus", "2.2.0")]
 public class Plugin : BaseUnityPlugin
 {
     public static new ManualLogSource Logger;
@@ -22,6 +22,7 @@ public class Plugin : BaseUnityPlugin
     private ConfigEntry<string> p2pBindAddress;
     private ConfigEntry<string> p2pAdvertisedAddress;
     private ConfigEntry<int> p2pPort;
+    private ConfigEntry<float> aiStallTimeout;
 
     private void Awake()
     {
@@ -49,10 +50,14 @@ public class Plugin : BaseUnityPlugin
             p2pBindAddress.Value,
             p2pAdvertisedAddress.Value,
             p2pPort.Value);
+        aiStallTimeout = Config.Bind(
+            "AI",
+            "StallTimeoutSeconds",
+            30f,
+            "Seconds the enemy AI may make no progress before its turn is force ended. Use 0 to disable.");
+        AITurnGuard.Configure(aiStallTimeout.Value);
         CustomFormats.Initialize();
         P2PTwoPickRules.Initialize();
-        BossRushOfflineData.Initialize();
-        BossRushReferenceExporter.Export();
 
         try
         {
@@ -66,9 +71,17 @@ public class Plugin : BaseUnityPlugin
                 $"[DeckListHotReload] Harmony registration complete: " +
                 $"{deckListHotReloadHarmony.GetPatchedMethods().Count()} game method(s) patched.");
             Harmony.CreateAndPatchAll(typeof(FakeConnect));
-            Harmony.CreateAndPatchAll(typeof(BossRushPatches));
             Harmony.CreateAndPatchAll(typeof(AIManager));
-            Harmony.CreateAndPatchAll(typeof(BossRushReferenceExporter));
+            try
+            {
+                // Isolated: these patches bind to private and virtual game methods, and a
+                // binding failure must not take down the patches that follow.
+                Harmony.CreateAndPatchAll(typeof(AITurnGuard));
+            }
+            catch (System.Exception exception)
+            {
+                Logger.LogError($"[AITurnGuard] FAILED to apply the AI stall patches: {exception}");
+            }
             Harmony.CreateAndPatchAll(typeof(ActiveSkill));
             Harmony.CreateAndPatchAll(typeof(GeminizeSkillPatcher));
             Harmony.CreateAndPatchAll(typeof(AcquireSkillsSkillPatcher));
@@ -99,6 +112,7 @@ public class Plugin : BaseUnityPlugin
     private void Update()
     {
         P2PRuntime.Update();
+        AITurnGuard.Update();
     }
 
     private void OnDestroy()
