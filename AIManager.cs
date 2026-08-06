@@ -505,7 +505,7 @@ namespace Shadowbus
                     : AI_LOGIC_LV.STRONG;
         }
 
-        private static string RegisterLocalDeckCsv(string path)
+        internal static string RegisterLocalDeckCsv(string path)
         {
             if (string.IsNullOrEmpty(path))
             {
@@ -520,7 +520,7 @@ namespace Shadowbus
             return key;
         }
 
-        private static string RegisterLocalStyleCsv(string path)
+        internal static string RegisterLocalStyleCsv(string path)
         {
             if (string.IsNullOrEmpty(path))
             {
@@ -536,7 +536,7 @@ namespace Shadowbus
             return key;
         }
 
-        private static string RegisterLocalEmoteCsv(string path, string leaderVoiceId, ClassCharacterMasterData leader)
+        internal static string RegisterLocalEmoteCsv(string path, string leaderVoiceId, ClassCharacterMasterData leader)
         {
             if (string.IsNullOrEmpty(path))
             {
@@ -554,6 +554,11 @@ namespace Shadowbus
             Data.Master.AIEmoteDic ??= new Dictionary<string, List<AIEmoteDataAsset>>();
             Data.Master.AIEmoteDic[key] = data;
             return key;
+        }
+
+        internal static string RegisterLocalEmoteCsv(string path)
+        {
+            return RegisterLocalEmoteCsv(path, null, null);
         }
 
         /// <summary>
@@ -935,12 +940,34 @@ namespace Shadowbus
         [HarmonyPostfix]
         public static void Master_StartLoadAIIndividualData_Postfix(Master __instance)
         {
-            File.WriteAllText(Path.Combine(PathHelper.AIDataPath, "ai_basic.json"), JsonConvert.SerializeObject(__instance.AIBasicDataList));
-            File.WriteAllText(Path.Combine(PathHelper.AIDataPath, "ai_common.json"), JsonConvert.SerializeObject(__instance.AICommonDataList));
-            File.WriteAllText(Path.Combine(PathHelper.AIDataPath, "ai_ally_common.json"), JsonConvert.SerializeObject(__instance.AIAllyCommonDataList));
-            File.WriteAllText(Path.Combine(PathHelper.AIDataPath, "ai_deck.json"), JsonConvert.SerializeObject(__instance.AIDeckDic));
-            File.WriteAllText(Path.Combine(PathHelper.AIDataPath, "ai_emote.json"), JsonConvert.SerializeObject(__instance.AIEmoteDic));
-            File.WriteAllText(Path.Combine(PathHelper.AIDataPath, "ai_style.json"), JsonConvert.SerializeObject(__instance.AIStyleDic));
+            // These files are diagnostic/reference data for the local Practice AI editor.
+            // Do not overwrite them on every master reload: users may edit or annotate the
+            // exported JSON, and Master.StartLoadAIIndividualData can run more than once.
+            ExportPracticeAIJsonIfMissing("ai_basic.json", __instance.AIBasicDataList);
+            ExportPracticeAIJsonIfMissing("ai_common.json", __instance.AICommonDataList);
+            ExportPracticeAIJsonIfMissing("ai_ally_common.json", __instance.AIAllyCommonDataList);
+            ExportPracticeAIJsonIfMissing("ai_deck.json", __instance.AIDeckDic);
+            ExportPracticeAIJsonIfMissing("ai_emote.json", __instance.AIEmoteDic);
+            ExportPracticeAIJsonIfMissing("ai_style.json", __instance.AIStyleDic);
+        }
+
+        private static void ExportPracticeAIJsonIfMissing(string fileName, object value)
+        {
+            try
+            {
+                string path = Path.Combine(PathHelper.AIDataPath, fileName);
+                if (File.Exists(path))
+                {
+                    return;
+                }
+
+                File.WriteAllText(path, JsonConvert.SerializeObject(value));
+                Plugin.Logger.LogInfo($"[AIManager] Exported Practice AI reference: {fileName}");
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogWarning($"[AIManager] Failed to export Practice AI reference '{fileName}': {exception.Message}");
+            }
         }
 
     }

@@ -493,12 +493,15 @@ namespace Shadowbus
                 else if (string.Equals(key, "p2pHiddenCards", StringComparison.Ordinal) ||
                     string.Equals(key, "p2pHiddenRemoved", StringComparison.Ordinal) ||
                     string.Equals(key, "p2pHiddenOwner", StringComparison.Ordinal) ||
-                    string.Equals(key, "p2pPlayerHistory", StringComparison.Ordinal))
+                    string.Equals(key, "p2pPlayerHistory", StringComparison.Ordinal) ||
+                    string.Equals(key, "p2pFusionActions", StringComparison.Ordinal) ||
+                    string.Equals(key, "p2pMetamorphoses", StringComparison.Ordinal))
                 {
                     // P2P private snapshots use absolute host/guest ownership and
                     // are consumed by the mod before/after the native receiver.
                     // Perspective conversion would corrupt history flags and
-                    // generic keys such as "isSelf".
+                    // generic keys such as "isSelf". Fusion/transform metadata uses
+                    // the same absolute owner convention.
                 }
                 else
                 {

@@ -1,5 +1,6 @@
 using Newtonsoft.Json;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -11,10 +12,15 @@ namespace Shadowbus
 {
     internal sealed class P2PTransport : IDisposable
     {
-        private const int MaxFrameLength = 1024 * 1024;
+        // The initial trusted private-state exchange contains the complete hand,
+        // deck, and mutable card metadata. Allow a larger single frame for that
+        // one-time snapshot; ordinary action frames remain small.
+        private const int MaxFrameLength = 8 * 1024 * 1024;
 
         private readonly object sendLock = new object();
         private readonly object stateLock = new object();
+        private readonly AutoResetEvent sendSignal = new AutoResetEvent(false);
+        private readonly Queue<byte[]> pendingSends = new Queue<byte[]>();
         private TcpListener listener;
         private TcpClient client;
         private NetworkStream stream;
@@ -22,6 +28,7 @@ namespace Shadowbus
         private bool isHost;
         private bool handshakeComplete;
         private volatile bool stopped = true;
+        private int connectionGeneration;
 
         internal event Action Connected;
         internal event Action<P2PWireMessage> MessageReceived;
@@ -115,17 +122,9 @@ namespace Shadowbus
                     {
                         return false;
                     }
-                    byte[] length =
-                    {
-                        (byte)(payload.Length >> 24),
-                        (byte)(payload.Length >> 16),
-                        (byte)(payload.Length >> 8),
-                        (byte)payload.Length
-                    };
-                    stream.Write(length, 0, length.Length);
-                    stream.Write(payload, 0, payload.Length);
-                    stream.Flush();
+                    pendingSends.Enqueue(payload);
                 }
+                sendSignal.Set();
                 return true;
             }
             catch (Exception ex)
@@ -142,6 +141,7 @@ namespace Shadowbus
             {
                 shouldNotify = notify && !stopped;
                 stopped = true;
+                connectionGeneration++;
                 try { stream?.Close(); } catch { }
                 try { client?.Close(); } catch { }
                 try { listener?.Stop(); } catch { }
@@ -150,6 +150,11 @@ namespace Shadowbus
                 listener = null;
                 BoundPort = 0;
             }
+            lock (sendLock)
+            {
+                pendingSends.Clear();
+            }
+            sendSignal.Set();
             if (shouldNotify)
             {
                 Disconnected?.Invoke("P2P session closed.");
@@ -184,6 +189,7 @@ namespace Shadowbus
 
         private void AttachClient(TcpClient newClient)
         {
+            int generation;
             lock (stateLock)
             {
                 if (stopped)
@@ -195,8 +201,62 @@ namespace Shadowbus
                 client.NoDelay = true;
                 client.ReceiveTimeout = 10000;
                 stream = client.GetStream();
+                generation = ++connectionGeneration;
             }
+            Task.Run(() => SendLoop(generation));
             Task.Run((Action)ReadLoop);
+        }
+
+        private void SendLoop(int generation)
+        {
+            try
+            {
+                while (!stopped && generation == connectionGeneration)
+                {
+                    byte[] payload = null;
+                    lock (sendLock)
+                    {
+                        if (pendingSends.Count > 0)
+                        {
+                            payload = pendingSends.Dequeue();
+                        }
+                    }
+
+                    if (payload == null)
+                    {
+                        sendSignal.WaitOne(1000);
+                        continue;
+                    }
+
+                    NetworkStream currentStream;
+                    lock (stateLock)
+                    {
+                        if (stopped || generation != connectionGeneration ||
+                            stream == null)
+                        {
+                            continue;
+                        }
+                        currentStream = stream;
+                    }
+
+                    byte[] length =
+                    {
+                        (byte)(payload.Length >> 24),
+                        (byte)(payload.Length >> 16),
+                        (byte)(payload.Length >> 8),
+                        (byte)payload.Length
+                    };
+                    currentStream.Write(length, 0, length.Length);
+                    currentStream.Write(payload, 0, payload.Length);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!stopped && generation == connectionGeneration)
+                {
+                    Fail("P2P send failed: " + ex.Message);
+                }
+            }
         }
 
         private void ReadLoop()
@@ -328,12 +388,18 @@ namespace Shadowbus
         {
             lock (stateLock)
             {
+                connectionGeneration++;
                 try { stream?.Close(); } catch { }
                 try { client?.Close(); } catch { }
                 stream = null;
                 client = null;
                 handshakeComplete = false;
             }
+            lock (sendLock)
+            {
+                pendingSends.Clear();
+            }
+            sendSignal.Set();
         }
 
         private byte[] ReadExact(int count)
@@ -359,6 +425,7 @@ namespace Shadowbus
             {
                 notify = !stopped;
                 stopped = true;
+                connectionGeneration++;
                 try { stream?.Close(); } catch { }
                 try { client?.Close(); } catch { }
                 try { listener?.Stop(); } catch { }
@@ -367,6 +434,11 @@ namespace Shadowbus
                 listener = null;
                 BoundPort = 0;
             }
+            lock (sendLock)
+            {
+                pendingSends.Clear();
+            }
+            sendSignal.Set();
             if (notify)
             {
                 Disconnected?.Invoke(error);

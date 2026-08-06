@@ -2,6 +2,10 @@
 
 Shadowverse 国际服的单机化与卡牌 Mod 工具，基于 BepInEx 6 开发。
 
+本仓库同时提供可部署到 GitHub Pages 的[一体化 Web 配置编辑器](WebEditor/README.md)，
+支持用中文表单编辑 AIData、BossRush、CardMaster、Format 和 TwoPick 配置，并可直接
+读写本地 Mods 目录或导出完整 ZIP。
+
 ## 功能
 
 - 单机模式：支持主界面、无限制卡组编辑、CPU 对战和开包动画。
@@ -115,6 +119,20 @@ P2P 模式不提供账号服务、房间列表、STUN 打洞或 TURN 中继。�
 `skill_mirror` 支持 `all=true/false`、`include_self=true/false` 和 `ability=true/false`。前两项控制追加效果应用于随机一个或全部随从，以及镜像目标自身能否成为追加目标；`ability=true` 时，除法术外，其他明确指定本随从的单体能力也能触发，随机和群体效果不会触发。默认值依次为 `false`、`true` 和 `false`。
 
 具体配置可参考 `Mods/CardMaster/` 下的示例和现有卡牌文件。更多技能时点说明见 [Mods/readme.md](Mods/readme.md)。
+
+### CardMaster 攻击特效
+
+`attackEffectFields` 可设置卡牌攻击时的普通/进化两套演出数据。字段值均为 `[普通, 进化]`：`effectPath`（特效路径）、`se`（音效路径）、`moveType`（移动类型）、`effectEnginType`（引擎类型 `NONE`/`SHURIKEN`/`FLATOUT`/`SOLID`）和 `time`（时长）。字段留空时保留模板卡牌原值。
+
+```json
+"attackEffectFields": {
+  "effectPath": ["btl_attack_1", "btl_attack_2"],
+  "se": ["se_btl_attack_1", "se_btl_attack_2"],
+  "moveType": ["DIRECT", "DIRECT"],
+  "effectEnginType": ["SHURIKEN", "SHURIKEN"],
+  "time": [0.5, 0.5]
+}
+```
 
 ## 构建
 

@@ -1575,8 +1575,95 @@ namespace Shadowbus
             };
             tracker.PrepareOutgoingAction(true, ordinaryDraw, out _, out _,
                 drawIndex => drawIndex == 1 ? 101 : 0);
-            Assert(!ordinaryDraw.ContainsKey("knownList"),
-                "An ordinary deck draw incorrectly revealed the card identity.");
+            known = (List<object>)ordinaryDraw["knownList"];
+            Assert(known.Count == 1,
+                "An ordinary deck draw did not synchronize its private identity.");
+            Dictionary<string, object> privateDrawCard =
+                (Dictionary<string, object>)known[0];
+            Assert(Convert.ToInt32(privateDrawCard["cardId"]) == 101 &&
+                Convert.ToInt32(privateDrawCard["is_open"]) == 0 &&
+                Convert.ToInt32(privateDrawCard["from"]) == 0 &&
+                Convert.ToInt32(privateDrawCard["to"]) == 10,
+                "An ordinary draw was exposed visually or lost its real identity.");
+
+            Dictionary<string, object> receivedPrivateDraw =
+                P2PMessageTransform.PrepareOpponentBattleMessage(ordinaryDraw);
+            Dictionary<string, object> receivedPrivateDrawCard =
+                (Dictionary<string, object>)
+                ((List<object>)receivedPrivateDraw["knownList"])[0];
+            Assert(Convert.ToInt32(receivedPrivateDrawCard["isSelf"]) == 0 &&
+                Convert.ToInt32(receivedPrivateDrawCard["is_open"]) == 0,
+                "A private draw has the wrong receiver perspective or visibility.");
+
+            Dictionary<string, object> generatedHandCard =
+                new Dictionary<string, object>
+                {
+                    ["uri"] = "PlayActions",
+                    ["orderList"] = new List<object>
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["add"] = new Dictionary<string, object>
+                            {
+                                ["idx"] = new List<object> { 44 },
+                                ["isSelf"] = 1,
+                                ["card"] = new Dictionary<string, object>
+                                {
+                                    ["cardId"] = 888
+                                }
+                            }
+                        },
+                        new Dictionary<string, object>
+                        {
+                            ["move"] = new Dictionary<string, object>
+                            {
+                                ["idx"] = new List<object> { 44 },
+                                ["from"] = 50,
+                                ["to"] = 10,
+                                ["isSelf"] = 1
+                            }
+                        }
+                    }
+                };
+            tracker.PrepareOutgoingAction(true, generatedHandCard, out _, out _);
+            Dictionary<string, object> generatedKnown =
+                (Dictionary<string, object>)
+                ((List<object>)generatedHandCard["knownList"])[0];
+            Assert(Convert.ToInt32(generatedKnown["idx"]) == 44 &&
+                Convert.ToInt32(generatedKnown["cardId"]) == 888 &&
+                Convert.ToInt32(generatedKnown["is_open"]) == 0 &&
+                Convert.ToInt32(generatedKnown["from"]) == 50 &&
+                Convert.ToInt32(generatedKnown["to"]) == 10,
+                "A generated private-zone card lost its identity or became public.");
+
+            Dictionary<string, object> returnedHandCard =
+                new Dictionary<string, object>
+                {
+                    ["uri"] = "PlayActions",
+                    ["orderList"] = new List<object>
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["move"] = new Dictionary<string, object>
+                            {
+                                ["idx"] = new List<object> { 3 },
+                                ["from"] = 20,
+                                ["to"] = 10,
+                                ["isSelf"] = 1
+                            }
+                        }
+                    }
+                };
+            tracker.PrepareOutgoingAction(true, returnedHandCard, out _, out _,
+                movedIndex => movedIndex == 3 ? 103 : 0);
+            Dictionary<string, object> returnedKnown =
+                (Dictionary<string, object>)
+                ((List<object>)returnedHandCard["knownList"])[0];
+            Assert(Convert.ToInt32(returnedKnown["cardId"]) == 103 &&
+                Convert.ToInt32(returnedKnown["is_open"]) == 0 &&
+                Convert.ToInt32(returnedKnown["from"]) == 20 &&
+                Convert.ToInt32(returnedKnown["to"]) == 10,
+                "A card returned to hand lost its private identity.");
 
             Dictionary<string, object> openDraw = new Dictionary<string, object>
             {
@@ -1600,10 +1687,16 @@ namespace Shadowbus
                 drawIndex => drawIndex == 2 ? 777 : 101,
                 drawIndex => drawIndex == 2 ? 7 : 1);
             known = (List<object>)openDraw["knownList"];
-            Assert(known.Count == 1,
-                "An open draw revealed the wrong number of cards.");
-            Dictionary<string, object> openedDrawCard =
+            Assert(known.Count == 2,
+                "A mixed private/open draw did not synchronize every card identity.");
+            Dictionary<string, object> hiddenDrawCard =
                 (Dictionary<string, object>)known[0];
+            Dictionary<string, object> openedDrawCard =
+                (Dictionary<string, object>)known[1];
+            Assert(Convert.ToInt32(hiddenDrawCard["idx"]) == 1 &&
+                Convert.ToInt32(hiddenDrawCard["cardId"]) == 101 &&
+                Convert.ToInt32(hiddenDrawCard["is_open"]) == 0,
+                "The private card in a mixed draw was exposed or lost its identity.");
             Assert(Convert.ToInt32(openedDrawCard["idx"]) == 2 &&
                 Convert.ToInt32(openedDrawCard["cardId"]) == 777 &&
                 Convert.ToInt32(openedDrawCard["isSelf"]) == 1 &&
@@ -1617,7 +1710,7 @@ namespace Shadowbus
                 P2PMessageTransform.PrepareOpponentBattleMessage(openDraw);
             Dictionary<string, object> receivedOpenDrawCard =
                 (Dictionary<string, object>)
-                ((List<object>)receivedOpenDraw["knownList"])[0];
+                ((List<object>)receivedOpenDraw["knownList"])[1];
             Assert(Convert.ToInt32(receivedOpenDrawCard["isSelf"]) == 0 &&
                 Convert.ToInt32(receivedOpenDrawCard["cardId"]) == 777 &&
                 Convert.ToInt32(receivedOpenDrawCard["cost"]) == 7,
@@ -1715,6 +1808,25 @@ namespace Shadowbus
                 Convert.ToInt32(secondIngredient["cardId"]) == 103 &&
                 Convert.ToInt32(secondIngredient["cost"]) == 5,
                 "Fusion ingredients retained dummy identities or stale costs.");
+
+            List<object> fusionActions = (List<object>)fusion["p2pFusionActions"];
+            Assert(fusionActions.Count == 1,
+                "Fusion did not publish its target and ingredient metadata.");
+            Dictionary<string, object> fusionAction =
+                (Dictionary<string, object>)fusionActions[0];
+            Assert(Convert.ToInt32(fusionAction["owner"]) == 1 &&
+                Convert.ToInt32(fusionAction["targetIdx"]) == 2 &&
+                ((List<object>)fusionAction["ingredients"]).Count == 2,
+                "Fusion metadata lost its absolute owner, target, or ingredients.");
+
+            Dictionary<string, object> receivedFusion =
+                P2PMessageTransform.PrepareOpponentBattleMessage(fusion);
+            Dictionary<string, object> receivedFusionAction =
+                (Dictionary<string, object>)((List<object>)
+                    receivedFusion["p2pFusionActions"])[0];
+            Assert(Convert.ToInt32(receivedFusionAction["owner"]) == 1 &&
+                Convert.ToInt32(receivedFusionAction["targetIdx"]) == 2,
+                "Fusion metadata ownership was incorrectly perspective-flipped.");
         }
 
         private static void TestBattleStateDiagnostics()

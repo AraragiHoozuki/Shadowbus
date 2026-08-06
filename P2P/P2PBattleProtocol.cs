@@ -623,6 +623,9 @@ namespace Shadowbus
             ObserveKnownCards(sourceIsHost, data, "knownList");
             ObserveKnownCards(sourceIsHost, data, "uList");
             ObserveOrderList(sourceIsHost, data);
+            RevealMetamorphoses(sourceIsHost, data,
+                sourceCardIdResolver, sourceCardCostResolver,
+                diagnosticLogger);
             RevealPublicMoves(sourceIsHost, data,
                 sourceCardIdResolver, sourceCardCostResolver, diagnosticLogger);
             RevealFusionIngredients(sourceIsHost, data,
@@ -1065,6 +1068,7 @@ namespace Shadowbus
                 return;
             }
 
+            List<object> fusionActions = new List<object>();
             foreach (object item in Enumerate(rawOrderList))
             {
                 Dictionary<string, object> order = item as Dictionary<string, object>;
@@ -1075,6 +1079,7 @@ namespace Shadowbus
                     continue;
                 }
 
+                List<object> actionIngredients = new List<object>();
                 foreach (object rawIndex in Enumerate(rawIngredients))
                 {
                     if (!TryConvertInt(rawIndex, out int index) ||
@@ -1087,7 +1092,88 @@ namespace Shadowbus
                     int? cost = ResolveSourceCardCost(
                         sourceIsHost, index, sourceCardCostResolver);
                     RevealKnownCard(data, index, cardId, true, cost, 10, 60);
+                    actionIngredients.Add(new Dictionary<string, object>
+                    {
+                        ["idx"] = index,
+                        ["cardId"] = cardId,
+                        ["cost"] = cost ?? -1
+                    });
                 }
+
+                List<int> targetIndices = GetIndices(fusion).ToList();
+                if (targetIndices.Count > 0 && actionIngredients.Count > 0)
+                {
+                    Dictionary<string, object> action =
+                        new Dictionary<string, object>
+                        {
+                            ["owner"] = sourceIsHost ? 1 : 0,
+                            ["targetIdx"] = targetIndices[0],
+                            ["ingredients"] = actionIngredients
+                        };
+                    if (TryResolveSourceCardId(sourceIsHost, targetIndices[0],
+                        sourceCardIdResolver, out int targetCardId))
+                    {
+                        action["targetCardId"] = targetCardId;
+                    }
+                    fusionActions.Add(action);
+                }
+            }
+
+            if (fusionActions.Count > 0)
+            {
+                data["p2pFusionActions"] = fusionActions;
+            }
+        }
+
+        private void RevealMetamorphoses(
+            bool sourceIsHost,
+            Dictionary<string, object> data,
+            Func<int, int> sourceCardIdResolver,
+            Func<int, int> sourceCardCostResolver,
+            Action<string> diagnosticLogger)
+        {
+            if (!data.TryGetValue("orderList", out object rawOrderList))
+            {
+                return;
+            }
+
+            List<object> metamorphoses = new List<object>();
+            foreach (object item in Enumerate(rawOrderList))
+            {
+                Dictionary<string, object> order = item as Dictionary<string, object>;
+                if (order == null ||
+                    !(order.TryGetValue("metamorphose", out object rawMetamorphose)) ||
+                    !(rawMetamorphose is Dictionary<string, object> metamorphose) ||
+                    !(metamorphose.TryGetValue("after", out object rawAfter)) ||
+                    !(rawAfter is Dictionary<string, object> after) ||
+                    !TryGetInt(after, "cardId", out int cardId) || cardId <= 0)
+                {
+                    continue;
+                }
+
+                bool isSelf = IsSelf(metamorphose);
+                bool ownerIsHost = isSelf ? sourceIsHost : !sourceIsHost;
+                foreach (int index in GetIndices(metamorphose))
+                {
+                    int resolvedCardId = cardId;
+
+                    int? cost = ResolveSourceCardCost(
+                        sourceIsHost, index, sourceCardCostResolver);
+                    RevealKnownCard(data, index, resolvedCardId, isSelf,
+                        cost, null, null, true);
+                    metamorphoses.Add(new Dictionary<string, object>
+                    {
+                        ["owner"] = ownerIsHost ? 1 : 0,
+                        ["idx"] = index,
+                        ["cardId"] = resolvedCardId,
+                        ["cost"] = cost ?? -1
+                    });
+                }
+            }
+
+            if (metamorphoses.Count > 0)
+            {
+                data["p2pMetamorphoses"] = metamorphoses;
             }
         }
 
@@ -1106,14 +1192,21 @@ namespace Shadowbus
                 return;
             }
 
-            IEnumerable<int> revealedIndices;
+            List<int> revealedIndices;
+            HashSet<int> openIndices;
             if (IsHiddenToPublicMove(from, to))
             {
-                revealedIndices = GetIndices(move);
+                revealedIndices = GetIndices(move).ToList();
+                openIndices = new HashSet<int>(revealedIndices);
             }
-            else if (from == 0 && to == 10)
+            else if (IsPrivateDestination(to))
             {
-                revealedIndices = GetOpenMoveIndices(move);
+                // Friends-only P2P shares private identities. Keep the visual
+                // visibility flag from the action, but always provide the real
+                // card ID so cards drawn, generated, returned, or shuffled into
+                // a private zone never become Dummy cards on the peer.
+                revealedIndices = GetIndices(move).ToList();
+                openIndices = new HashSet<int>(GetOpenMoveIndices(move));
             }
             else
             {
@@ -1127,7 +1220,8 @@ namespace Shadowbus
                 {
                     int? cost = ResolveSourceCardCost(
                         sourceIsHost, index, sourceCardCostResolver);
-                    RevealKnownCard(data, index, cardId, true, cost, from, to);
+                    RevealKnownCard(data, index, cardId, true, cost, from, to,
+                        false, openIndices.Contains(index));
                 }
                 else
                 {
@@ -1179,6 +1273,16 @@ namespace Shadowbus
                 (to == Field || to == Cemetery || to == Banish);
         }
 
+        private static bool IsPrivateDestination(int to)
+        {
+            const int Deck = 0;
+            const int Hand = 10;
+            const int FusionIngredient = 60;
+            const int Reservation = 80;
+            return to == Deck || to == Hand ||
+                to == FusionIngredient || to == Reservation;
+        }
+
         private static void RevealKnownCard(
             Dictionary<string, object> data,
             int index,
@@ -1187,7 +1291,8 @@ namespace Shadowbus
             int? cost = null,
             int? from = null,
             int? to = null,
-            bool prioritize = false)
+            bool prioritize = false,
+            bool isOpen = true)
         {
             List<object> knownList = GetOrCreateObjectList(data, "knownList");
             for (int i = 0; i < knownList.Count; i++)
@@ -1200,7 +1305,7 @@ namespace Shadowbus
                     continue;
                 }
                 known["cardId"] = cardId;
-                known["is_open"] = 1;
+                known["is_open"] = isOpen ? 1 : 0;
                 AddKnownCardState(known, cost, from, to);
                 if (prioritize && i > 0)
                 {
@@ -1214,7 +1319,7 @@ namespace Shadowbus
                 ["idx"] = index,
                 ["cardId"] = cardId,
                 ["isSelf"] = isSelf ? 1 : 0,
-                ["is_open"] = 1
+                ["is_open"] = isOpen ? 1 : 0
             };
             AddKnownCardState(revealed, cost, from, to);
             if (prioritize)

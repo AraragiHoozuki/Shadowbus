@@ -761,6 +761,7 @@ namespace Shadowbus
             // The receiver only starts a new operation after the previous VFX
             // queue is idle. Apply that previous operation's full history first,
             // so conditions in this operation see the authoritative counters.
+            P2PRuntime.TryApplyPendingHiddenCardStates();
             P2PRuntime.TryApplyPendingPlayerHistoryStates();
             if (receiveData == null ||
                 !receiveData.IsAcceleratedOrCrystallize)
@@ -791,6 +792,7 @@ namespace Shadowbus
                 // The payload is a post-action snapshot. It must not become
                 // eligible until the matching native operation was accepted.
                 P2PRuntime.MarkReceivedPlayerHistoryStateReady(data);
+                P2PRuntime.ApplyReceivedFusionAction(data);
                 P2PRuntime.FinalizeReceivedHiddenCardRemovals(data);
             }
         }
@@ -855,6 +857,7 @@ namespace Shadowbus
                 // synchronized hand/deck instead of waiting for a server-only flag.
                 P2PRuntime.TryApplyPendingHiddenCardStates();
                 P2PRuntime.TryApplyPendingPlayerHistoryStates();
+                P2PRuntime.WarnIfPrivateConditionHasDummyCards(skill);
                 bool localResult = skill.ConditionFilterCollection.Filtering(
                     playerInfoPair,
                     skill.SkillPrm.ownerCard,

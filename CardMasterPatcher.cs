@@ -4,6 +4,7 @@ using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using UnityEngine;
@@ -32,6 +33,7 @@ namespace Shadowbus
         public Dictionary<string, string> stringAppendFields = [];
         public Dictionary<string, string[]> stringArrayFields = [];
         public Dictionary<string, string> localizationFields = [];
+        public AttackEffectParameterPatch attackEffectFields = new AttackEffectParameterPatch();
 
         public void PatchTemplate(CardParameter card, bool preserveVariantIdentity = false)
         {
@@ -66,6 +68,8 @@ namespace Shadowbus
                 }
             }
 
+            ApplyAttackEffectFields(card);
+
             if (localizationFields != null)
             {
                 foreach (var kvp in localizationFields)
@@ -76,6 +80,102 @@ namespace Shadowbus
                     }
                 }
             }
+        }
+
+        private void ApplyAttackEffectFields(CardParameter card)
+        {
+            if (attackEffectFields == null || card?.AtkEffectParameter == null)
+            {
+                return;
+            }
+
+            if (attackEffectFields.effectPath != null)
+            {
+                card.AtkEffectParameter._effectPath = ToStringPairList(attackEffectFields.effectPath);
+            }
+
+            if (attackEffectFields.se != null)
+            {
+                card.AtkEffectParameter._se = ToStringPairList(attackEffectFields.se);
+            }
+
+            if (attackEffectFields.moveType != null)
+            {
+                card.AtkEffectParameter._moveType = ToPairList(
+                    attackEffectFields.moveType,
+                    value => ParseEnum(value, EffectMgr.MoveType.NONE));
+            }
+
+            if (attackEffectFields.effectEnginType != null)
+            {
+                card.AtkEffectParameter._effectEnginType = ToPairList(
+                    attackEffectFields.effectEnginType,
+                    value => ParseEnum(value, EffectMgr.EngineType.NONE));
+            }
+
+            if (attackEffectFields.time != null)
+            {
+                card.AtkEffectParameter._time = ToPairList(attackEffectFields.time, value => value);
+            }
+        }
+
+        private static List<string> ToStringPairList(IEnumerable<string> values)
+        {
+            List<string> list = values == null
+                ? new List<string>()
+                : values.Select(value => value ?? string.Empty).ToList();
+            if (list.Count == 0)
+            {
+                return new List<string> { string.Empty, string.Empty };
+            }
+
+            if (list.Count == 1)
+            {
+                list.Add(list[0]);
+            }
+            else if (list.Count > 2)
+            {
+                list = list.Take(2).ToList();
+            }
+
+            return list;
+        }
+
+        private static List<TOut> ToPairList<TIn, TOut>(IEnumerable<TIn> values, Func<TIn, TOut> converter)
+        {
+            List<TOut> list = values == null
+                ? new List<TOut>()
+                : values.Select(converter).ToList();
+            if (list.Count == 0)
+            {
+                return new List<TOut> { default(TOut), default(TOut) };
+            }
+
+            if (list.Count == 1)
+            {
+                list.Add(list[0]);
+            }
+            else if (list.Count > 2)
+            {
+                list = list.Take(2).ToList();
+            }
+
+            return list;
+        }
+
+        private static T ParseEnum<T>(string value, T fallback) where T : struct
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return fallback;
+            }
+
+            if (int.TryParse(value, out int number))
+            {
+                return (T)Enum.ToObject(typeof(T), number);
+            }
+
+            return Enum.TryParse(value, true, out T parsed) ? parsed : fallback;
         }
 
         private void ApplyFields<T>(
@@ -181,7 +281,53 @@ namespace Shadowbus
                     this.intFields[property.Name] = (int)value;
                 }
             }
+
+            if (original.AtkEffectParameter != null)
+            {
+                this.attackEffectFields = new AttackEffectParameterPatch
+                {
+                    effectPath = new[]
+                    {
+                        original.AtkEffectParameter.GetEffectPath(false),
+                        original.AtkEffectParameter.GetEffectPath(true)
+                    },
+                    se = new[]
+                    {
+                        original.AtkEffectParameter.GetSe(false),
+                        original.AtkEffectParameter.GetSe(true)
+                    },
+                    moveType = new[]
+                    {
+                        original.AtkEffectParameter.GetMoveType(false).ToString(),
+                        original.AtkEffectParameter.GetMoveType(true).ToString()
+                    },
+                    effectEnginType = new[]
+                    {
+                        original.AtkEffectParameter.GetEffectEnginType(false).ToString(),
+                        original.AtkEffectParameter.GetEffectEnginType(true).ToString()
+                    },
+                    time = new[]
+                    {
+                        original.AtkEffectParameter.GetTime(false),
+                        original.AtkEffectParameter.GetTime(true)
+                    }
+                };
+            }
         }
+    }
+
+    /// <summary>
+    /// The game's attack effect data is stored in a nested AttackEffectParameter
+    /// rather than as writable CardParameter properties. Keep it as a small,
+    /// human-editable pair of normal/evolved values in the patch JSON.
+    /// </summary>
+    public class AttackEffectParameterPatch
+    {
+        public string[] effectPath;
+        public string[] se;
+        public string[] moveType;
+        public string[] effectEnginType;
+        public float[] time;
     }
     public class CardMasterPatcher
     {
@@ -406,15 +552,47 @@ namespace Shadowbus
                     else
                     {
                         Plugin.Logger.LogInfo($"adding new card {patch.cardId} with tempalte: {template.CardId}");
-                        var newCard = CardParameterCloner.DeepClone(template);
-                        patch.PatchTemplate(newCard);
-                        if (!masterDict.ContainsKey(patch.cardId))
+                        if (masterDict.ContainsKey(patch.cardId))
                         {
-                            masterDict.Add(patch.cardId, newCard);
+                            Plugin.Logger.LogWarning($"card {patch.cardId} already exists, skipping");
                         }
                         else
                         {
-                            Plugin.Logger.LogWarning($"card {patch.cardId} already exists, skipping");
+                            var newCard = CardParameterCloner.DeepClone(template);
+
+                            // Battle image refreshes (evolve, recovery and return-to-hand)
+                            // resolve the card through BaseParameter.CardId. A cloned card
+                            // must not keep the template's internal identity even though it
+                            // is inserted into the master dictionary under patch.cardId.
+                            // Set it before PatchTemplate so localizationFields are also
+                            // registered under the new card's ID.
+                            newCard.CardId = patch.cardId;
+                            patch.PatchTemplate(newCard);
+                            if (HasExplicitIntField(patch, nameof(CardParameter.CardId)) &&
+                                newCard.CardId != patch.cardId)
+                            {
+                                Plugin.Logger.LogWarning(
+                                    $"new card {patch.cardId} ignores intFields.CardId={newCard.CardId}; " +
+                                    "the card's internal CardId must match its master key");
+                            }
+
+                            newCard.CardId = patch.cardId;
+                            if (!HasExplicitIntField(patch, nameof(CardParameter.BaseCardId)))
+                            {
+                                newCard.BaseCardId = patch.cardId;
+                            }
+
+                            if (!HasExplicitIntField(patch, nameof(CardParameter.NormalCardId)))
+                            {
+                                newCard.NormalCardId = patch.cardId;
+                            }
+
+                            if (!HasExplicitIntField(patch, nameof(CardParameter.FoilCardId)))
+                            {
+                                newCard.FoilCardId = patch.cardId;
+                            }
+
+                            masterDict.Add(patch.cardId, newCard);
                         }
                     }
                 }
@@ -430,6 +608,11 @@ namespace Shadowbus
                 Data.Load.data.UserCardList.Add(userCard);
             }
             Plugin.Logger.LogInfo("[End apply CardMaster mods]");
+        }
+
+        private static bool HasExplicitIntField(CardParameterPatch patch, string fieldName)
+        {
+            return patch.intFields != null && patch.intFields.ContainsKey(fieldName);
         }
 
         [HarmonyPatch(typeof(Wizard.CardMaster), "CreateCardMaster")]

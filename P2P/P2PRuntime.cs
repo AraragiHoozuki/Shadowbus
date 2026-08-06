@@ -84,6 +84,17 @@ namespace Shadowbus
         private static readonly Dictionary<string, AppliedHiddenCardState>
             AppliedReceivedHiddenCardStates =
             new Dictionary<string, AppliedHiddenCardState>();
+        private static readonly HashSet<string> PrivateConditionWarnings =
+            new HashSet<string>(StringComparer.Ordinal);
+        // Both clients are trusted in a friends-only room. Exchange the complete
+        // private-zone baseline once so ordinary actions do not carry the same
+        // hand/deck state over and over again.
+        private static bool localPrivateStateSent;
+        private static bool remotePrivateStateReceived;
+        private static readonly Queue<Dictionary<string, object>> PendingFusionActions =
+            new Queue<Dictionary<string, object>>();
+        private static readonly HashSet<string> PendingFusionActionSignatures =
+            new HashSet<string>(StringComparer.Ordinal);
         private const string PlayerHistoryStateKey = "p2pPlayerHistory";
         private static readonly Dictionary<string, PendingPlayerHistoryState>
             ReceivedPlayerHistoryStates =
@@ -161,8 +172,10 @@ namespace Shadowbus
                 }
             }
             TrySynchronizeOpponentRoomState();
+            TrySendInitialPrivateStateSnapshot();
             TryApplyPendingHiddenCardStates();
             TryApplyPendingPlayerHistoryStates();
+            TryApplyPendingFusionActions();
             ObserveLocalHiddenCardStates();
             TryCheckPendingBattleStates();
             if (!peerDisconnected)
@@ -609,6 +622,11 @@ namespace Shadowbus
             ReceivedHiddenCardStates.Clear();
             ReceivedHiddenCardStateSignatures.Clear();
             AppliedReceivedHiddenCardStates.Clear();
+            PrivateConditionWarnings.Clear();
+            localPrivateStateSent = false;
+            remotePrivateStateReceived = false;
+            PendingFusionActions.Clear();
+            PendingFusionActionSignatures.Clear();
             ReceivedPlayerHistoryStates.Clear();
             AppliedPlayerHistoryRevisions.Clear();
             localPlayerHistoryStateSignature = string.Empty;
@@ -828,6 +846,19 @@ namespace Shadowbus
                         else
                         {
                             Inject(message.Data);
+                        }
+                    }
+                    break;
+                case "private_state":
+                    if (message.Data != null)
+                    {
+                        RememberReceivedPrivateStateSnapshot(message.Data);
+                        // The host answers the guest's baseline with its own
+                        // baseline. If cards are not loaded yet, Update() will
+                        // retry this after the battle manager becomes ready.
+                        if (Role == P2PRole.Host)
+                        {
+                            TrySendInitialPrivateStateSnapshot();
                         }
                     }
                     break;
@@ -1781,6 +1812,8 @@ namespace Shadowbus
             }
             RememberReceivedHiddenCardStates(data);
             RememberReceivedPlayerHistoryState(data, false);
+            TryApplyPendingHiddenCardStates();
+            ApplyReceivedFusionAction(data);
             if (string.Equals(
                     uri,
                     NetworkBattleDefine.NetworkBattleURI.JudgeResult.ToString(),
@@ -1867,6 +1900,163 @@ namespace Shadowbus
             }
         }
 
+        private static bool IsPrivateStateSyncActive =>
+            localPrivateStateSent && remotePrivateStateReceived;
+
+        private static void TrySendInitialPrivateStateSnapshot()
+        {
+            if (!IsActive || localPrivateStateSent || transport == null ||
+                !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
+                manager.BattlePlayer == null)
+            {
+                return;
+            }
+
+            List<Dictionary<string, object>> cards = new List<Dictionary<string, object>>();
+            HashSet<int> initializedDeckIndices = new HashSet<int>();
+            try
+            {
+                if (manager.BattlePlayer.AllCards != null)
+                {
+                    foreach (BattleCardBase card in manager.BattlePlayer.AllCards)
+                    {
+                        if (card != null && card.Index > 0 && card.CardId > 0)
+                        {
+                            initializedDeckIndices.Add(card.Index);
+                        }
+                    }
+                }
+                foreach (BattleCardBase card in EnumeratePrivateCards(
+                    manager.BattlePlayer))
+                {
+                    if (card == null || card.Index <= 0 || card.CardId <= 0)
+                    {
+                        continue;
+                    }
+                    cards.Add(CreateHiddenCardState(card));
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogDebug(
+                    "[P2P] Could not capture the initial private state: " + ex.Message);
+                return;
+            }
+
+            int expectedCardCount = LocalDeck?.Cards?.Count ?? 0;
+            if (expectedCardCount <= 0 || cards.Count == 0 ||
+                Enumerable.Range(1, expectedCardCount)
+                    .Any(index => !initializedDeckIndices.Contains(index)))
+            {
+                // BattlePlayer becomes visible before all deck and hand cards
+                // have necessarily been created. Sending at that point would
+                // permanently establish an incomplete one-shot baseline.
+                return;
+            }
+
+            Dictionary<string, object> history =
+                CapturePlayerHistoryState(manager.BattlePlayer,
+                    Role == P2PRole.Host);
+            string historySignature = JsonConvert.SerializeObject(
+                history, P2PJson.Settings);
+            if (!string.Equals(historySignature,
+                    localPlayerHistoryStateSignature, StringComparison.Ordinal))
+            {
+                localPlayerHistoryStateSignature = historySignature;
+                history["revision"] = ++localPlayerHistoryRevision;
+            }
+            else if (localPlayerHistoryRevision <= 0)
+            {
+                history["revision"] = ++localPlayerHistoryRevision;
+            }
+            else
+            {
+                history["revision"] = localPlayerHistoryRevision;
+            }
+
+            Dictionary<string, object> payload = new Dictionary<string, object>
+            {
+                ["owner"] = Role == P2PRole.Host ? 1 : 0,
+                ["cards"] = cards.Select(card => (object)card).ToList(),
+                ["history"] = history
+            };
+            if (!SendWire(new P2PWireMessage
+            {
+                Type = "private_state",
+                ViewerId = LocalProfile?.ViewerId ?? P2PIdentity.ViewerId,
+                BattleId = BattleId,
+                Data = payload
+            }))
+            {
+                return;
+            }
+
+            localPrivateStateSent = true;
+            foreach (Dictionary<string, object> card in cards)
+            {
+                if (!TryGetStateInt(card, "idx", out int index) || index <= 0)
+                {
+                    continue;
+                }
+                LocalHiddenCardStates[index] = P2PJson.CloneDictionary(card);
+                LocalHiddenCardStateSignatures[index] =
+                    JsonConvert.SerializeObject(card, P2PJson.Settings);
+            }
+            Plugin.Logger.LogInfo(
+                $"[P2P] Sent initial private state ({cards.Count} cards, " +
+                $"owner={(Role == P2PRole.Host ? "Host" : "Guest")}); " +
+                $"incremental snapshots active={IsPrivateStateSyncActive}.");
+        }
+
+        private static void RememberReceivedPrivateStateSnapshot(
+            Dictionary<string, object> payload)
+        {
+            if (!IsActive || payload == null ||
+                !TryGetStateInt(payload, "owner", out int owner) ||
+                (owner != 0 && owner != 1) ||
+                owner == (Role == P2PRole.Host ? 1 : 0))
+            {
+                return;
+            }
+
+            bool ownerIsHost = owner == 1;
+            if (payload.TryGetValue("cards", out object rawCards) &&
+                rawCards is IEnumerable cards && !(rawCards is string))
+            {
+                foreach (object rawCard in cards)
+                {
+                    if (!(rawCard is Dictionary<string, object> card) ||
+                        !TryGetStateInt(card, "idx", out int index) || index <= 0)
+                    {
+                        continue;
+                    }
+                    StoreReceivedHiddenCardState(ownerIsHost, card);
+                }
+            }
+
+            if (payload.TryGetValue("history", out object rawHistory) &&
+                rawHistory is Dictionary<string, object> history)
+            {
+                Dictionary<string, object> historyCopy =
+                    P2PJson.CloneDictionary(history);
+                if (!TryGetStateInt(historyCopy, "revision", out int revision) ||
+                    revision <= 0)
+                {
+                    historyCopy["revision"] = 1;
+                }
+                Dictionary<string, object> wrapper = new Dictionary<string, object>
+                {
+                    [PlayerHistoryStateKey] = historyCopy
+                };
+                RememberReceivedPlayerHistoryState(wrapper, true);
+            }
+
+            remotePrivateStateReceived = true;
+            Plugin.Logger.LogInfo(
+                $"[P2P] Received initial private state from {SideName(ownerIsHost)}; " +
+                $"incremental snapshots active={IsPrivateStateSyncActive}.");
+        }
+
         private static void RememberReceivedHiddenCardStates(
             Dictionary<string, object> data)
         {
@@ -1914,12 +2104,24 @@ namespace Shadowbus
                     continue;
                 }
 
-                string key = HiddenStateKey(ownerIsHost, index);
-                Dictionary<string, object> clone = P2PJson.CloneDictionary(card);
-                ReceivedHiddenCardStates[key] = clone;
-                ReceivedHiddenCardStateSignatures[key] =
-                    JsonConvert.SerializeObject(clone, P2PJson.Settings);
+                StoreReceivedHiddenCardState(ownerIsHost, card);
             }
+        }
+
+        private static void StoreReceivedHiddenCardState(
+            bool ownerIsHost,
+            Dictionary<string, object> card)
+        {
+            if (card == null || !TryGetStateInt(card, "idx", out int index) ||
+                index <= 0)
+            {
+                return;
+            }
+            string key = HiddenStateKey(ownerIsHost, index);
+            Dictionary<string, object> clone = P2PJson.CloneDictionary(card);
+            ReceivedHiddenCardStates[key] = clone;
+            ReceivedHiddenCardStateSignatures[key] =
+                JsonConvert.SerializeObject(clone, P2PJson.Settings);
         }
 
         internal static void FinalizeReceivedHiddenCardRemovals(
@@ -2550,6 +2752,149 @@ namespace Shadowbus
                     $"[P2P] Could not apply hidden card state idx={card.Index}: " +
                     ex.Message);
             }
+        }
+
+        internal static void ApplyReceivedFusionAction(
+            Dictionary<string, object> data)
+        {
+            if (!IsActive || data == null ||
+                !data.TryGetValue("p2pFusionActions", out object rawActions) ||
+                rawActions is string)
+            {
+                return;
+            }
+
+            if (rawActions is Dictionary<string, object> singleAction)
+            {
+                QueueOrApplyFusionAction(singleAction);
+                return;
+            }
+            if (!(rawActions is IEnumerable actions))
+            {
+                return;
+            }
+            foreach (object rawAction in actions)
+            {
+                if (rawAction is Dictionary<string, object> action)
+                {
+                    QueueOrApplyFusionAction(action);
+                }
+            }
+        }
+
+        private static void QueueOrApplyFusionAction(
+            Dictionary<string, object> action)
+        {
+            if (TryApplyFusionAction(action))
+            {
+                PendingFusionActionSignatures.Remove(
+                    JsonConvert.SerializeObject(action, P2PJson.Settings));
+                return;
+            }
+            Dictionary<string, object> copy = P2PJson.CloneDictionary(action);
+            string signature = JsonConvert.SerializeObject(copy, P2PJson.Settings);
+            if (PendingFusionActionSignatures.Add(signature))
+            {
+                PendingFusionActions.Enqueue(copy);
+            }
+        }
+
+        private static void TryApplyPendingFusionActions()
+        {
+            if (!IsActive || PendingFusionActions.Count == 0)
+            {
+                return;
+            }
+
+            int count = PendingFusionActions.Count;
+            for (int i = 0; i < count; i++)
+            {
+                Dictionary<string, object> action = PendingFusionActions.Dequeue();
+                if (!TryApplyFusionAction(action))
+                {
+                    PendingFusionActions.Enqueue(action);
+                    continue;
+                }
+                PendingFusionActionSignatures.Remove(
+                    JsonConvert.SerializeObject(action, P2PJson.Settings));
+            }
+        }
+
+        private static bool TryApplyFusionAction(
+            Dictionary<string, object> action)
+        {
+            if (action == null ||
+                !TryGetStateInt(action, "owner", out int owner) ||
+                (owner != 0 && owner != 1) ||
+                !TryGetStateInt(action, "targetIdx", out int targetIndex) ||
+                targetIndex <= 0 || !(BattleManagerBase.GetIns() is
+                    NetworkBattleManagerBase manager))
+            {
+                return true;
+            }
+
+            bool ownerIsHost = owner == 1;
+            bool localOwnerIsHost = Role == P2PRole.Host ? true : false;
+            if (ownerIsHost == localOwnerIsHost)
+            {
+                return true;
+            }
+
+            BattleCardBase target = ResolveCardReference(new Dictionary<string, object>
+            {
+                ["idx"] = targetIndex,
+                ["owner"] = owner
+            });
+            if (target == null ||
+                !(action.TryGetValue("ingredients", out object rawIngredients)) ||
+                rawIngredients is string || !(rawIngredients is IEnumerable ingredients))
+            {
+                return target == null ? false : true;
+            }
+
+            BattlePlayerBase ownerPlayer = ownerIsHost == localOwnerIsHost
+                ? manager.BattlePlayer : manager.BattleEnemy;
+            if (ownerPlayer == null)
+            {
+                return false;
+            }
+
+            SkillApplyInformation information =
+                target.SkillApplyInformation as SkillApplyInformation;
+            if (information == null)
+            {
+                return false;
+            }
+
+            List<FusionIngredientInfo> replacements =
+                new List<FusionIngredientInfo>();
+            foreach (object rawIngredient in ingredients)
+            {
+                if (!(rawIngredient is Dictionary<string, object> ingredient) ||
+                    !TryGetStateInt(ingredient, "idx", out int index) || index <= 0)
+                {
+                    continue;
+                }
+
+                BattleCardBase ingredientCard = ResolveCardReference(
+                    new Dictionary<string, object>
+                    {
+                        ["idx"] = index,
+                        ["owner"] = owner
+                    });
+                if (ingredientCard == null)
+                {
+                    return false;
+                }
+
+                int turn = ownerPlayer.Turn;
+                TryGetStateInt(ingredient, "turn", out turn);
+                replacements.Add(new FusionIngredientInfo(turn, ingredientCard));
+            }
+
+            information.FusionIngredients.Clear();
+            information.FusionIngredients.AddRange(replacements);
+            return true;
         }
 
         private static void ApplyNativeCompatibleState(
@@ -3580,12 +3925,26 @@ namespace Shadowbus
                 return true;
             }
 
-            NetworkBattleManagerBase manager =
-                BattleManagerBase.GetIns() as NetworkBattleManagerBase;
-            BattlePlayerBase owner = manager == null
-                ? null
-                : (card.IsPlayer ? manager.BattlePlayer : manager.BattleEnemy);
-            if (owner == null)
+            bool ownerIsHost = card.IsPlayer == (Role == P2PRole.Host);
+            return TryApplyFusionIngredients(card, ownerIsHost, ingredients);
+        }
+
+        private static bool TryApplyFusionIngredients(
+            BattleCardBase card,
+            bool ownerIsHost,
+            IEnumerable ingredients)
+        {
+            if (card == null || ingredients == null ||
+                !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager))
+            {
+                return false;
+            }
+
+            BattlePlayerBase owner = ownerIsHost == (Role == P2PRole.Host)
+                ? manager.BattlePlayer : manager.BattleEnemy;
+            SkillApplyInformation information =
+                card.SkillApplyInformation as SkillApplyInformation;
+            if (owner == null || information == null)
             {
                 return false;
             }
@@ -3602,9 +3961,12 @@ namespace Shadowbus
                     continue;
                 }
 
-                BattleCardBase ingredientCard = owner.AllCardsWithSkillIngredient
-                    ?.FirstOrDefault(candidate => candidate != null &&
-                        candidate.Index == index);
+                BattleCardBase ingredientCard = ResolveCardReference(
+                    new Dictionary<string, object>
+                    {
+                        ["idx"] = index,
+                        ["owner"] = ownerIsHost ? 1 : 0
+                    });
                 if (ingredientCard == null)
                 {
                     return false;
@@ -3612,8 +3974,7 @@ namespace Shadowbus
 
                 int turn = owner.Turn;
                 TryGetStateInt(ingredient, "turn", out turn);
-                replacements.Add(
-                    new FusionIngredientInfo(turn, ingredientCard));
+                replacements.Add(new FusionIngredientInfo(turn, ingredientCard));
             }
             information.FusionIngredients.Clear();
             information.FusionIngredients.AddRange(replacements);
@@ -3638,6 +3999,58 @@ namespace Shadowbus
             }
         }
 
+        internal static void WarnIfPrivateConditionHasDummyCards(
+            SkillBase skill)
+        {
+            if (!IsActive || skill?.SkillPrm?.ownerCard == null)
+            {
+                return;
+            }
+
+            BattlePlayerBase owner = skill.SkillPrm.ownerCard.SelfBattlePlayer;
+            if (owner == null)
+            {
+                return;
+            }
+
+            List<int> hand = FindUnresolvedPrivateCardIndices(owner.HandCardList);
+            List<int> deck = FindUnresolvedPrivateCardIndices(owner.DeckCardList);
+            if (hand.Count == 0 && deck.Count == 0)
+            {
+                return;
+            }
+
+            string warningKey = skill.SkillPrm.ownerCard.Index + ":" +
+                skill.GetType().FullName + ":" + string.Join(",", hand) + ":" +
+                string.Join(",", deck);
+            if (!PrivateConditionWarnings.Add(warningKey))
+            {
+                return;
+            }
+
+            Plugin.Logger.LogWarning(
+                $"[P2P] Private hand/deck condition still contains unresolved " +
+                $"Dummy cards: ownerIdx={skill.SkillPrm.ownerCard.Index}, " +
+                $"skill={skill.GetType().Name}, handIdx=[{string.Join(",", hand)}], " +
+                $"deckIdx=[{string.Join(",", deck)}].");
+        }
+
+        private static List<int> FindUnresolvedPrivateCardIndices(
+            IEnumerable<BattleCardBase> cards)
+        {
+            if (cards == null)
+            {
+                return new List<int>();
+            }
+            return cards
+                .Where(card => card != null && card.Index > 0 &&
+                    (card is NullBattleCard || card.CardId <= 0))
+                .Select(card => card.Index)
+                .Distinct()
+                .OrderBy(index => index)
+                .ToList();
+        }
+
         private static void TryApplyPendingHiddenCardStatesCore()
         {
             if (!IsActive || ReceivedHiddenCardStates.Count == 0 ||
@@ -3659,6 +4072,8 @@ namespace Shadowbus
 
             bool canReplace = manager.VfxMgr != null && manager.VfxMgr.IsEnd;
             DateTime now = DateTime.UtcNow;
+            List<BattleCardBase> replacementsToLoad =
+                new List<BattleCardBase>();
             foreach (BattleCardBase card in privateCards)
             {
                 if (card == null || card.Index <= 0)
@@ -3697,7 +4112,23 @@ namespace Shadowbus
                     continue;
                 }
 
-                TryReplacePendingHiddenCard(manager, state, key, card);
+                BattleCardBase replacement = TryReplacePendingHiddenCard(
+                    manager, state, key, card);
+                if (replacement != null)
+                {
+                    replacementsToLoad.Add(replacement);
+                }
+            }
+
+            if (replacementsToLoad.Count > 0 && !manager.IsRecovery &&
+                manager.VfxMgr != null)
+            {
+                // A complete baseline can replace an entire enemy deck at once.
+                // Load all resulting card resources through one sequential job
+                // instead of creating one loader per card.
+                manager.VfxMgr.RegisterSequentialVfx<
+                    Wizard.Battle.View.Vfx.VfxBase>(
+                    manager.LoadCardResources(replacementsToLoad, false));
             }
         }
 
@@ -3711,7 +4142,7 @@ namespace Shadowbus
                 player.NecromanceZoneList.Contains(card);
         }
 
-        private static void TryReplacePendingHiddenCard(
+        private static BattleCardBase TryReplacePendingHiddenCard(
             NetworkBattleManagerBase manager,
             Dictionary<string, object> state,
             string key,
@@ -3722,7 +4153,7 @@ namespace Shadowbus
                 CardDataModel model = CreateHiddenCardDataModel(state);
                 if (model == null)
                 {
-                    return;
+                    return null;
                 }
 
                 BattleCardBase replacement =
@@ -3730,19 +4161,12 @@ namespace Shadowbus
                         .ReplaceCard(manager.BattleEnemy);
                 if (replacement == null)
                 {
-                    return;
-                }
-
-                if (!manager.IsRecovery && manager.VfxMgr != null)
-                {
-                    manager.VfxMgr.RegisterSequentialVfx<
-                        Wizard.Battle.View.Vfx.VfxBase>(
-                        manager.LoadCardResources(
-                            new List<BattleCardBase> { replacement }, false));
+                    return null;
                 }
                 Plugin.Logger.LogDebug(
                     $"[P2P] Replayed deferred hidden state idx={oldCard.Index}, " +
                     $"cardId={replacement.CardId} after the card entered its zone.");
+                return replacement;
             }
             catch (Exception ex)
             {
@@ -3752,6 +4176,7 @@ namespace Shadowbus
                 Plugin.Logger.LogDebug(
                     $"[P2P] Could not replay deferred hidden state idx={oldCard.Index}: " +
                     ex.Message);
+                return null;
             }
         }
 
@@ -3981,6 +4406,7 @@ namespace Shadowbus
         private static void ObserveLocalHiddenCardStates()
         {
             if (!IsActive ||
+                IsPrivateStateSyncActive ||
                 !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
                 manager.BattlePlayer == null)
             {
@@ -4020,12 +4446,18 @@ namespace Shadowbus
                 return;
             }
 
-            // The first snapshot establishes a complete baseline. Afterwards the
-            // authenticated TCP stream is ordered and reliable, so only changed
-            // cards need to be sent. Replacing the whole private deck at every
-            // turn boundary repeatedly loads card resources and can stall Unity.
-            bool forceSnapshot = LocalHiddenCardStateSignatures.Count == 0;
-            HashSet<int> presentIndices = new HashSet<int>();
+            // The initial private_state message establishes the complete baseline.
+            // Normal operations only inspect cards referenced by that operation;
+            // checkpoints scan every private card as a safety net for effects whose
+            // native order data omitted a hidden target.
+            bool sendCompleteSnapshot = LocalHiddenCardStateSignatures.Count == 0;
+            bool scanAllCards = sendCompleteSnapshot ||
+                P2PBattleProtocol.CarriesBattleStateCheckpoint(uri);
+            HashSet<int> candidateIndices = scanAllCards
+                ? null
+                : CollectLocalCardIndices(data);
+            Dictionary<int, BattleCardBase> presentCards =
+                new Dictionary<int, BattleCardBase>();
             List<Dictionary<string, object>> changedCards =
                 new List<Dictionary<string, object>>();
 
@@ -4039,7 +4471,11 @@ namespace Shadowbus
                         continue;
                     }
 
-                    presentIndices.Add(card.Index);
+                    presentCards[card.Index] = card;
+                    if (!scanAllCards && !candidateIndices.Contains(card.Index))
+                    {
+                        continue;
+                    }
                     Dictionary<string, object> state;
                     string signature;
                     try
@@ -4057,7 +4493,8 @@ namespace Shadowbus
                     }
                     LocalHiddenCardStates[card.Index] =
                         P2PJson.CloneDictionary(state);
-                    if (!forceSnapshot && LocalHiddenCardStateSignatures.TryGetValue(
+                    if (!sendCompleteSnapshot &&
+                        LocalHiddenCardStateSignatures.TryGetValue(
                             card.Index, out string previousSignature) &&
                         string.Equals(previousSignature, signature,
                             StringComparison.Ordinal))
@@ -4076,8 +4513,13 @@ namespace Shadowbus
                 return;
             }
 
-            List<int> removedIndices = LocalHiddenCardStateSignatures.Keys
-                .Where(index => !presentIndices.Contains(index))
+            IEnumerable<int> removalCandidates = scanAllCards
+                ? LocalHiddenCardStateSignatures.Keys.ToList()
+                : candidateIndices;
+            List<int> removedIndices = removalCandidates
+                .Where(index => LocalHiddenCardStateSignatures.ContainsKey(index) &&
+                    !presentCards.ContainsKey(index))
+                .Distinct()
                 .OrderBy(index => index)
                 .ToList();
             foreach (int index in removedIndices)
@@ -4123,7 +4565,113 @@ namespace Shadowbus
             Plugin.Logger.LogDebug(
                 $"[P2P] Attached {changedCards.Count} hidden hand/deck state " +
                 $"snapshot(s) and {removedIndices.Count} tombstone(s) to {uri}" +
-                $"{(forceSnapshot ? " (checkpoint)" : string.Empty)}.");
+                $"{(scanAllCards ? " (full scan)" : string.Empty)}.");
+        }
+
+        private static HashSet<int> CollectLocalCardIndices(
+            Dictionary<string, object> data)
+        {
+            HashSet<int> indices = new HashSet<int>();
+            CollectLocalCardIndices(data, true, indices);
+            return indices;
+        }
+
+        private static void CollectLocalCardIndices(
+            object value,
+            bool inheritedIsLocal,
+            HashSet<int> indices)
+        {
+            if (value == null || indices == null || value is string)
+            {
+                return;
+            }
+
+            if (value is Dictionary<string, object> dictionary)
+            {
+                bool isLocal = inheritedIsLocal;
+                if (dictionary.TryGetValue("isSelf", out object rawSide))
+                {
+                    try
+                    {
+                        isLocal = Convert.ToInt32(rawSide,
+                            CultureInfo.InvariantCulture) != 0;
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+
+                if (isLocal)
+                {
+                    AddCardIndices(dictionary, "idx", indices);
+                    AddCardIndices(dictionary, "idxList", indices);
+                    AddCardIndices(dictionary, "playIdx", indices);
+                    AddCardIndices(dictionary, "targetIdx", indices);
+                    AddCardIndices(dictionary, "ingredients", indices);
+                    AddCardIndices(dictionary, "baseIdx", indices);
+                    AddCardIndices(dictionary, "baseCardIdx", indices);
+                    AddCardIndices(dictionary, "handIdxList", indices);
+                    AddCardIndices(dictionary, "skillKeyCardIdx", indices);
+                    AddCardIndices(dictionary, "randomTargetIdx", indices);
+                    AddCardIndices(dictionary, "hasGuard", indices);
+                }
+
+                foreach (KeyValuePair<string, object> field in dictionary)
+                {
+                    CollectLocalCardIndices(field.Value, isLocal, indices);
+                }
+                return;
+            }
+
+            if (value is IEnumerable enumerable)
+            {
+                foreach (object item in enumerable)
+                {
+                    CollectLocalCardIndices(item, inheritedIsLocal, indices);
+                }
+            }
+        }
+
+        private static void AddCardIndices(
+            Dictionary<string, object> data,
+            string key,
+            HashSet<int> indices)
+        {
+            if (!data.TryGetValue(key, out object rawIndices) ||
+                rawIndices == null || rawIndices is string)
+            {
+                if (TryGetStateInt(data, key, out int singleIndex) &&
+                    singleIndex > 0)
+                {
+                    indices.Add(singleIndex);
+                }
+                return;
+            }
+
+            if (rawIndices is IEnumerable values)
+            {
+                foreach (object rawIndex in values)
+                {
+                    try
+                    {
+                        int index = Convert.ToInt32(rawIndex,
+                            CultureInfo.InvariantCulture);
+                        if (index > 0)
+                        {
+                            indices.Add(index);
+                        }
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+                return;
+            }
+
+            if (TryGetStateInt(data, key, out int indexValue) && indexValue > 0)
+            {
+                indices.Add(indexValue);
+            }
         }
 
         private static bool IsAcceleratedOrCrystallizedDeparture(
@@ -4157,6 +4705,8 @@ namespace Shadowbus
         {
             if (data == null || string.Equals(uri, P2PBattleProtocol.EchoUri,
                     StringComparison.Ordinal) ||
+                (IsPrivateStateSyncActive &&
+                    !P2PBattleProtocol.CarriesBattleStateCheckpoint(uri)) ||
                 !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
                 manager.BattlePlayer == null)
             {
@@ -5884,12 +6434,14 @@ namespace Shadowbus
             }
         }
 
-        private static void SendWire(P2PWireMessage message)
+        private static bool SendWire(P2PWireMessage message)
         {
             if (transport == null || !transport.Send(message))
             {
                 LastError = "The P2P connection is not available.";
+                return false;
             }
+            return true;
         }
 
         private static void HandlePeerDisconnected(string error)
