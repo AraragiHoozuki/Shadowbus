@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
 import { Button, Input, InputNumber, Space, Typography } from "antd";
-import { Card, CardIdTooltip, Field, Section } from "./Fields";
+import { Card, CardIdTooltip, Field, Section, SkillDslField } from "./Fields";
 
 function parseNumbers(text: string) {
   return text.split(/[\s,;，；]+/).map(Number).filter((value) => Number.isFinite(value));
@@ -24,12 +24,17 @@ export function NumberListEditor({ label, field, value, onChange, max, hint, car
   </Section>;
 }
 
-export function StringListEditor({ label, field, value, onChange, multiline = true }: { label: string; field?: string; value: string[]; onChange: (value: string[]) => void; multiline?: boolean }) {
+export function StringListEditor({ label, field, value, onChange, multiline = true, dsl = false }: { label: string; field?: string; value: string[]; onChange: (value: string[]) => void; multiline?: boolean; dsl?: boolean }) {
   return <Section title={label} description={`${field ?? "列表"} · ${value.length} 项`} collapsible defaultOpen={false}>
     <div className="stack">
-      {value.map((item, index) => <Space.Compact className="list-row" key={index}>{multiline ? <Input.TextArea autoSize={{ minRows: 2, maxRows: 6 }} value={item} onChange={(event) => { const next = [...value]; next[index] = event.target.value; onChange(next); }} /> : <Input value={item} onChange={(event) => { const next = [...value]; next[index] = event.target.value; onChange(next); }} />}<Button danger icon={<DeleteOutlined />} onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))}>删除</Button></Space.Compact>)}
+      {value.map((item, index) => dsl
+        ? <div className="skill-dsl-list-row" key={index}>
+          <SkillDslField label={`技能 ${index + 1}`} value={item} onChange={(nextValue) => { const next = [...value]; next[index] = nextValue; onChange(next); }} />
+          <Button danger icon={<DeleteOutlined />} onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))}>删除</Button>
+        </div>
+        : <Space.Compact className="list-row" key={index}>{multiline ? <Input.TextArea autoSize={{ minRows: 2, maxRows: 6 }} value={item} onChange={(event) => { const next = [...value]; next[index] = event.target.value; onChange(next); }} /> : <Input value={item} onChange={(event) => { const next = [...value]; next[index] = event.target.value; onChange(next); }} />}<Button danger icon={<DeleteOutlined />} onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))}>删除</Button></Space.Compact>)}
     </div>
-    <Button icon={<PlusOutlined />} onClick={() => onChange([...value, ""])}>新增项目</Button>
+    <Button icon={<PlusOutlined />} onClick={() => onChange([...value, ""])}>{dsl ? "新增技能 DSL" : "新增项目"}</Button>
   </Section>;
 }
 

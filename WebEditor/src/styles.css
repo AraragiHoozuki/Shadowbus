@@ -109,6 +109,44 @@ code { color: #175cd3; font-family: "Cascadia Code", Consolas, monospace; font-s
 .field-hint { display: block; margin-top: 5px; font-size: 12px; line-height: 1.4; }
 .full-number, .field .ant-select, .field .ant-input-number { width: 100%; }
 .nullable-input { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 12px; }
+.dsl-editor-trigger { width: 100%; display: flex; align-items: stretch; justify-content: space-between; gap: 14px; padding: 0; overflow: hidden; text-align: left; border: 1px solid #b7d4ff !important; border-radius: 8px !important; background: linear-gradient(135deg, #f8fbff 0%, #fff 100%) !important; box-shadow: inset 0 1px 0 #fff; transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease; }
+.dsl-editor-trigger:hover:not(:disabled) { color: inherit !important; border-color: #84adf7 !important; background: linear-gradient(135deg, #f2f7ff 0%, #fff 100%) !important; box-shadow: 0 4px 12px #1677ff1c; transform: translateY(-1px); }
+.dsl-editor-trigger:focus-visible { outline: 2px solid #1677ff; outline-offset: 2px; }
+.dsl-editor-trigger-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 7px; padding: 11px 13px; }
+.dsl-editor-preview { display: -webkit-box; max-height: 68px; overflow: hidden; color: #344054; font: 12px/1.6 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.dsl-editor-preview-empty { color: #98a2b3; font-family: inherit; }
+.dsl-editor-meta { color: #667085; font-size: 11px; line-height: 1.35; }
+.dsl-editor-trigger-action { display: inline-flex; align-items: center; gap: 6px; padding: 0 14px; color: #175cd3; border-left: 1px solid #d6e4ff; background: #f2f7ff; white-space: nowrap; }
+.dsl-editor-modal .ant-modal-content { overflow: hidden; border: 1px solid #d6e4ff; box-shadow: 0 18px 50px #1018282b; }
+.dsl-editor-modal .ant-modal-body { max-height: calc(100vh - 190px); overflow-y: auto; }
+.dsl-editor-modal-title { display: inline-flex; align-items: center; gap: 7px; }
+.dsl-editor-help { display: flex; align-items: center; flex-wrap: wrap; gap: 0 4px; margin-bottom: 10px; }
+.dsl-editor-field-hint { margin-left: auto; }
+.dsl-editor-textarea { min-height: 310px; padding: 12px 13px; color: #1d2939; background: #fbfcfe; border-color: #b7d4ff; font: 13px/1.7 "Cascadia Code", Consolas, monospace; resize: vertical; tab-size: 2; }
+.dsl-editor-textarea:focus { background: #fff; }
+.dsl-editor-counter { margin-top: 7px; color: #98a2b3; font-size: 11px; text-align: right; }
+.dsl-editor-mode-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid #eaecf0; }
+.dsl-editor-mode-bar .ant-btn { min-width: 112px; }
+.dsl-editor-alert { margin-bottom: 12px; }
+.dsl-structured-editor { display: flex; flex-direction: column; gap: 12px; }
+.dsl-editor-empty { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 32px 18px; border: 1px dashed #b7d4ff; border-radius: 9px; background: #f8fbff; text-align: center; }
+.dsl-group-list { display: flex; flex-direction: column; gap: 12px; }
+.dsl-group-card { padding: 12px; border: 1px solid #d6e4ff; border-radius: 9px; background: linear-gradient(135deg, #f8fbff 0%, #fff 100%); }
+.dsl-group-heading, .dsl-block-heading { display: flex; align-items: center; gap: 8px; }
+.dsl-group-heading { justify-content: space-between; margin-bottom: 10px; }
+.dsl-block-list { display: flex; flex-direction: column; gap: 9px; }
+.dsl-block-card { padding: 9px; border: 1px solid #e4e7ec; border-radius: 8px; background: #fff; }
+.dsl-block-heading .ant-input { min-width: 160px; flex: 1; font-family: "Cascadia Code", Consolas, monospace; }
+.dsl-block-order { display: inline-grid; width: 24px; height: 24px; place-items: center; color: #667085; background: #f2f4f7; border-radius: 999px; font-size: 11px; }
+.dsl-block-value { margin-top: 8px; color: #1d2939; background: #fbfcfe; border-color: #d0d5dd; font: 12px/1.6 "Cascadia Code", Consolas, monospace; }
+.dsl-block-preview { display: block; max-height: 42px; margin-top: 6px; overflow: hidden; color: #667085; white-space: pre-wrap; overflow-wrap: anywhere; text-overflow: ellipsis; }
+.dsl-add-block, .dsl-add-group { width: 100%; }
+.dsl-add-block { margin-top: 10px; }
+.dsl-format-preview { padding: 10px 12px; border: 1px solid #eaecf0; border-radius: 8px; background: #f8fafc; }
+.dsl-format-preview pre { max-height: 120px; margin: 7px 0 0; overflow: auto; color: #344054; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.6 "Cascadia Code", Consolas, monospace; }
+.skill-dsl-list-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; }
+.skill-dsl-list-row .field { margin-bottom: 0 !important; }
+.skill-dsl-list-row > .ant-btn { margin-top: 31px; }
 .editor-card { border-color: #e4e7ec; background: #fff; box-shadow: none; }
 .editor-card { transition: box-shadow .2s ease, border-color .2s ease; }
 .editor-card:hover { border-color: #b7d4ff; box-shadow: 0 4px 14px #1677ff12; }
@@ -156,9 +194,10 @@ code { color: #175cd3; font-family: "Cascadia Code", Consolas, monospace; font-s
 .skill-tag-values { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-height: 36px; padding: 4px; }
 .skill-value-tag { max-width: 340px; margin-inline-end: 0 !important; cursor: pointer; user-select: none; transition: transform .15s ease, box-shadow .15s ease; }
 .skill-value-tag:hover { transform: translateY(-1px); box-shadow: 0 3px 8px #1018281c; }
-.skill-edit-chip { max-width: 420px; }
-.skill-edit-chip .ant-input { min-width: 220px; }
 .skill-row-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding-top: 10px; border-top: 1px dashed #d0d5dd; }
+.skill-row-modal .ant-modal-content { overflow: hidden; border: 1px solid #d6e4ff; box-shadow: 0 18px 50px #1018282b; }
+.skill-row-modal-fields .field { margin-bottom: 12px !important; }
+.skill-row-modal-fields .ant-input { font-family: "Cascadia Code", Consolas, monospace; }
 .replacement-tag-editor { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid #d6e4ff; border-radius: 10px; background: linear-gradient(135deg, #f8fbff 0%, #fff 100%); box-shadow: inset 0 1px 0 #fff, 0 4px 14px #1677ff0d; }
 .replacement-field-list { display: flex; flex-direction: column; gap: 12px; }
 .replacement-field-row { display: grid; grid-template-columns: minmax(180px, 220px) minmax(0, 1fr); gap: 12px; align-items: center; padding: 9px; border: 1px solid #e4e7ec; border-radius: 8px; background: #fff; }

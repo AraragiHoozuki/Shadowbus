@@ -1,7 +1,7 @@
 import type { AttackEffectFields, CardMasterPatch } from "../types";
 import { useState } from "react";
 import { CheckOutlined, CloseOutlined, EditOutlined, PlusOutlined } from "@ant-design/icons";
-import { Button, Input, Space, Tag, Tooltip, Typography } from "antd";
+import { Button, Input, Modal, Space, Tag, Tooltip, Typography } from "antd";
 import { cardParameterFields, localizationKeys, skillParallelKeys } from "../data/catalog";
 import { newCardPatch } from "../models/defaults";
 import { Card, CheckboxField, Field, NumberField, RowActions, Section, TextField, moveItem } from "../components/Fields";
@@ -15,32 +15,35 @@ const skillTagColors = ["blue", "green", "gold", "purple", "cyan", "magenta", "o
 const replacementTagColors = ["processing", "success", "warning", "purple", "cyan", "magenta", "orange", "geekblue"] as const;
 
 function SkillTagMatrix({ rows, onChange, onMove, onCopy, onDelete }: { rows: SkillRow[]; onChange: (rows: SkillRow[]) => void; onMove: (from: number, to: number) => void; onCopy: (index: number) => void; onDelete: (index: number) => void }) {
-  const [editing, setEditing] = useState<{ row: number; key: keyof SkillRow } | null>(null);
-  const [draft, setDraft] = useState("");
-  const beginEdit = (row: number, key: keyof SkillRow) => { setEditing({ row, key }); setDraft(rows[row]?.[key] ?? ""); };
+  const [editingRow, setEditingRow] = useState<number | null>(null);
+  const [draft, setDraft] = useState<SkillRow | null>(null);
+  const beginEdit = (row: number) => { setEditingRow(row); setDraft({ ...rows[row] }); };
+  const updateDraft = <K extends keyof SkillRow>(key: K, value: SkillRow[K]) => setDraft((current) => current ? { ...current, [key]: value } : current);
   const commitEdit = () => {
-    if (!editing) return;
+    if (editingRow == null || !draft) return;
     const next = [...rows];
-    next[editing.row] = { ...next[editing.row], [editing.key]: draft };
+    next[editingRow] = draft;
     onChange(next);
-    setEditing(null);
+    setEditingRow(null);
+    setDraft(null);
   };
+  const cancelEdit = () => { setEditingRow(null); setDraft(null); };
   const removeRow = (index: number) => onDelete(index);
   return <div className="skill-tag-editor">
-    <div className="skill-tag-legend"><Typography.Text type="secondary">技能序号：</Typography.Text>{rows.map((_, index) => <span key={index} className={`skill-index-label skill-index-${index % skillTagColors.length}`}>技能 {index + 1}</span>)}<Typography.Text type="secondary">字段名独立显示；只有字段值显示为 Tag。双击 Tag 编辑，关闭 Tag 删除整组并行技能。</Typography.Text></div>
+    <div className="skill-tag-legend"><Typography.Text type="secondary">技能序号：</Typography.Text>{rows.map((_, index) => <span key={index} className={`skill-index-label skill-index-${index % skillTagColors.length}`}>技能 {index + 1}</span>)}<Typography.Text type="secondary">字段名独立显示；点击技能值或“编辑”打开弹窗，关闭 Tag 删除整组并行技能。</Typography.Text></div>
     <div className="skill-tag-matrix">
       {skillParallelKeys.map((key) => <div className="skill-tag-row" key={key}>
         <div className="skill-tag-label"><Typography.Text strong>{key}</Typography.Text><Typography.Text type="secondary" code>{key}</Typography.Text></div>
         <div className="skill-tag-values">{rows.map((row, index) => {
           const color = skillTagColors[index % skillTagColors.length];
-          const isEditing = editing?.row === index && editing.key === key;
-          return isEditing
-            ? <Space.Compact size="small" className="skill-edit-chip" key={`${key}-${index}`}><Input autoFocus value={draft} onChange={(event) => setDraft(event.target.value)} onPressEnter={commitEdit} onKeyDown={(event) => { if (event.key === "Escape") setEditing(null); }} /><Button type="primary" icon={<CheckOutlined />} onClick={commitEdit} /><Button icon={<CloseOutlined />} onClick={() => setEditing(null)} /></Space.Compact>
-            : <Tooltip title="双击编辑" key={`${key}-${index}`}><Tag color={color} closable onClose={(event) => { event.preventDefault(); removeRow(index); }} onDoubleClick={() => beginEdit(index, key)} className="skill-value-tag">{row[key] || "（空）"}</Tag></Tooltip>;
+          return <Tooltip title="点击编辑整组技能" key={`${key}-${index}`}><Tag color={color} closable onClose={(event) => { event.preventDefault(); removeRow(index); }} onClick={() => beginEdit(index)} className="skill-value-tag">{row[key] || "（空）"}</Tag></Tooltip>;
         })}</div>
       </div>)}
     </div>
-    <div className="skill-row-actions">{rows.map((row, index) => <Space key={index} size={4}><span className={`skill-index-label skill-index-${index % skillTagColors.length}`}>技能 {index + 1}</span><Button size="small" icon={<EditOutlined />} onClick={() => beginEdit(index, "Skill")}>编辑</Button><Button size="small" disabled={index === 0} onClick={() => onMove(index, index - 1)}>上移</Button><Button size="small" disabled={index === rows.length - 1} onClick={() => onMove(index, index + 1)}>下移</Button><Button size="small" onClick={() => onCopy(index)}>复制</Button><Button size="small" danger onClick={() => removeRow(index)}>删除</Button></Space>)}</div>
+    <div className="skill-row-actions">{rows.map((row, index) => <Space key={index} size={4}><span className={`skill-index-label skill-index-${index % skillTagColors.length}`}>技能 {index + 1}</span><Button size="small" icon={<EditOutlined />} onClick={() => beginEdit(index)}>编辑</Button><Button size="small" disabled={index === 0} onClick={() => onMove(index, index - 1)}>上移</Button><Button size="small" disabled={index === rows.length - 1} onClick={() => onMove(index, index + 1)}>下移</Button><Button size="small" onClick={() => onCopy(index)}>复制</Button><Button size="small" danger onClick={() => removeRow(index)}>删除</Button></Space>)}</div>
+    <Modal className="skill-row-modal" open={editingRow != null} title={`编辑技能 ${editingRow == null ? "" : editingRow + 1}`} width={820} centered okText="应用修改" cancelText="取消" onCancel={cancelEdit} onOk={commitEdit}>
+      {draft && <div className="field-grid skill-row-modal-fields">{skillParallelKeys.map((key) => <Field key={key} label={key} field={key} wide={key === "Skill"}><Input.TextArea value={draft[key]} rows={key === "Skill" ? 5 : 3} autoSize={{ minRows: key === "Skill" ? 4 : 2, maxRows: 8 }} spellCheck={false} onChange={(event) => updateDraft(key, event.target.value)} /></Field>)}</div>}
+    </Modal>
   </div>;
 }
 

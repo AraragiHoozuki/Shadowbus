@@ -1,7 +1,7 @@
 import type { BossRushAbility, BossRushBoss, BossRushPackage, IdCatalog } from "../types";
 import { classes, uiThemes } from "../data/catalog";
 import { newAbility, newBoss } from "../models/defaults";
-import { Card, CheckboxField, CollapsibleCard, Field, NumberField, RowActions, Section, SelectField, TextField, moveItem } from "../components/Fields";
+import { Card, CheckboxField, CollapsibleCard, Field, NumberField, RowActions, Section, SelectField, SkillDslField, TextField, moveItem } from "../components/Fields";
 import { NumberListEditor, StringListEditor, StringMapEditor, UnknownFieldsEditor } from "../components/Collections";
 
 const packageKeys = ["schema_version", "id", "display_name", "detail_title", "detail_text", "ui_theme", "lobby_background", "default_player_life", "initial_progress", "abilities", "bosses", "hidden_boss"];
@@ -29,8 +29,8 @@ function BossForm({ value, onChange, catalog }: { value: BossRushBoss; onChange:
       </div>
     </Section>
     <Section title="技能" description="复用现有特殊战斗技能 DSL">
-      <TextField label="兼容单技能" field="enemy_skill" value={value.enemy_skill} multiline wide onChange={(item) => set("enemy_skill", item)} />
-      <StringListEditor label="多个敌方技能" field="enemy_skills" value={value.enemy_skills} onChange={(item) => set("enemy_skills", item)} />
+      <SkillDslField label="兼容单技能" field="enemy_skill" value={value.enemy_skill} onChange={(item) => set("enemy_skill", item)} hint="兼容旧配置；多个较长技能建议放到下方技能数组中分别编辑。" />
+      <StringListEditor label="多个敌方技能" field="enemy_skills" value={value.enemy_skills} dsl onChange={(item) => set("enemy_skills", item)} />
       <TextField label="技能说明" field="enemy_skill_desc" value={value.enemy_skill_desc} multiline wide onChange={(item) => set("enemy_skill_desc", item)} />
     </Section>
     <Section title="AI 与牌组">
@@ -95,7 +95,7 @@ export function BossRushEditor({ value, onChange, catalog }: { value: BossRushPa
           <CheckboxField label="闪卡" field="is_foil" value={ability.is_foil} onChange={(item) => { const next = [...value.abilities]; next[index] = { ...ability, is_foil: item }; set("abilities", next); }} />
           <NumberField label="最大生命变化" field="max_life_change" value={ability.max_life_change} onChange={(item) => { const next = [...value.abilities]; next[index] = { ...ability, max_life_change: item }; set("abilities", next); }} />
           <NumberField label="当前生命变化" field="life_change" value={ability.life_change} onChange={(item) => { const next = [...value.abilities]; next[index] = { ...ability, life_change: item }; set("abilities", next); }} />
-          <TextField label="技能 DSL" field="skill" value={ability.skill} multiline wide onChange={(item) => { const next = [...value.abilities]; next[index] = { ...ability, skill: item }; set("abilities", next); }} />
+          <SkillDslField label="技能 DSL" field="skill" value={ability.skill} onChange={(item) => { const next = [...value.abilities]; next[index] = { ...ability, skill: item }; set("abilities", next); }} />
           <TextField label="显示说明" field="special_ability_desc" value={ability.special_ability_desc} multiline wide onChange={(item) => { const next = [...value.abilities]; next[index] = { ...ability, special_ability_desc: item }; set("abilities", next); }} />
         </div>
       </CollapsibleCard>)}</div>
