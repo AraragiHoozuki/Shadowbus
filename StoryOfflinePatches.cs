@@ -53,6 +53,17 @@ namespace Shadowbus
         private static readonly HashSet<string> MissingScenarioSummaryKeys =
             new HashSet<string>(StringComparer.Ordinal);
 
+        // Asset manifests are normally populated by the online boot flow.  The offlinizer
+        // skips that flow, so a voice file can exist on disk while its AssetHandle is absent.
+        // Keep track of the aliases we create so repeated story loads stay quiet.
+        private static readonly HashSet<string> RegisteredVoiceAssetKeys =
+            new HashSet<string>(StringComparer.Ordinal);
+
+        private static readonly HashSet<string> MissingVoiceCueWarnings =
+            new HashSet<string>(StringComparer.Ordinal);
+
+        private static bool HasLoggedScenarioVoicePlayback;
+
         [HarmonyPatch(typeof(AreaSelectBG), nameof(AreaSelectBG.LoadBG))]
         [HarmonyPrefix]
         private static void AreaSelectBG_LoadBG_Prefix(StorySectionData sectionData)
@@ -402,10 +413,13 @@ namespace Shadowbus
             }
 
             int skippedCount = 0;
+            int registeredCount = 0;
+            int keptVoiceCount = 0;
             List<IResourceHandle> availableHandles = new List<IResourceHandle>(handles.Count);
             foreach (IResourceHandle handle in handles)
             {
-                if (handle is VoiceHandle && !AreResourcesAvailable(handle))
+                bool isVoice = handle is VoiceHandle;
+                if (isVoice && !AreResourcesAvailable(handle, ref registeredCount))
                 {
                     // Commands wait for every handle's IsLoaded flag. Missing voices must be
                     // marked complete before they are removed from the actual load request.
@@ -414,32 +428,265 @@ namespace Shadowbus
                     continue;
                 }
 
+                if (isVoice)
+                {
+                    keptVoiceCount++;
+                }
+
                 availableHandles.Add(handle);
             }
 
-            if (skippedCount == 0)
+            if (skippedCount == 0 && registeredCount == 0)
             {
                 return;
             }
 
-            handles = availableHandles;
-            Plugin.Logger.LogDebug($"[Offlinizer] Skipped {skippedCount} unavailable story voice resource(s).");
+            if (skippedCount > 0)
+            {
+                handles = availableHandles;
+            }
+
+            Plugin.Logger.LogInfo(
+                $"[Offlinizer] Story voice resources: kept={keptVoiceCount}, " +
+                $"registeredLocal={registeredCount}, skippedUnavailable={skippedCount}.");
         }
 
-        private static bool AreResourcesAvailable(IResourceHandle handle)
+        private static bool AreResourcesAvailable(
+            IResourceHandle handle,
+            ref int registeredCount)
         {
-            return handle.ResourcePaths.All(path =>
+            if (handle?.ResourcePaths == null || handle.ResourcePaths.Count == 0)
             {
-                try
-                {
-                    AssetHandle assetHandle = Toolbox.AssetManager.GetAssetHandle(path, false);
-                    return assetHandle != null && File.Exists(assetHandle.BuildLocalCachePath());
-                }
-                catch
+                return false;
+            }
+
+            foreach (string path in handle.ResourcePaths)
+            {
+                if (!TryEnsureLocalVoiceAsset(path, out bool registered))
                 {
                     return false;
                 }
-            });
+
+                if (registered)
+                {
+                    registeredCount++;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool TryEnsureLocalVoiceAsset(string resourcePath, out bool registered)
+        {
+            registered = false;
+            if (string.IsNullOrWhiteSpace(resourcePath) || Toolbox.AssetManager == null)
+            {
+                return false;
+            }
+
+            AssetHandle existingHandle = Toolbox.AssetManager.GetAssetHandle(resourcePath, false);
+            if (IsLocalAssetHandleAvailable(existingHandle))
+            {
+                return true;
+            }
+
+            foreach (string candidatePath in GetVoicePathCandidates(resourcePath))
+            {
+                AssetHandle candidateHandle = existingHandle;
+                if (candidateHandle == null || !string.Equals(candidatePath, resourcePath, StringComparison.Ordinal))
+                {
+                    candidateHandle = CreateLocalAssetHandle(candidatePath);
+                }
+
+                if (!IsLocalAssetHandleAvailable(candidateHandle))
+                {
+                    continue;
+                }
+
+                // Register an alias under the path requested by VoiceHandle.  This also
+                // makes ResourcesManager.LoadAssetGroup* call the normal cue-sheet loader.
+                if (existingHandle == null)
+                {
+                    try
+                    {
+                        if (Toolbox.AssetManager.RegistHandle(resourcePath, candidateHandle))
+                        {
+                            existingHandle = Toolbox.AssetManager.GetAssetHandle(resourcePath, false);
+                            registered = RegisteredVoiceAssetKeys.Add(resourcePath);
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        Plugin.Logger.LogWarning(
+                            $"[Offlinizer] Could not register local story voice '{resourcePath}': " +
+                            exception.Message);
+                    }
+                }
+
+                return existingHandle != null && IsLocalAssetHandleAvailable(existingHandle);
+            }
+
+            return false;
+        }
+
+        private static AssetHandle CreateLocalAssetHandle(string resourcePath)
+        {
+            string localHash = string.Empty;
+            try
+            {
+                localHash = Toolbox.AssetManager.GetLocalDatahash(resourcePath) ?? string.Empty;
+            }
+            catch
+            {
+                // A missing local manifest database is harmless for an already present file.
+            }
+
+            return new AssetHandle(resourcePath, localHash, null, null, null, null, false, false);
+        }
+
+        private static bool IsLocalAssetHandleAvailable(AssetHandle assetHandle)
+        {
+            if (assetHandle == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                return File.Exists(assetHandle.BuildLocalCachePath());
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static IEnumerable<string> GetVoicePathCandidates(string resourcePath)
+        {
+            string normalizedPath = resourcePath.Replace('\\', '/');
+            yield return normalizedPath;
+
+            string extension = Path.GetExtension(normalizedPath);
+            if (!string.Equals(extension, ".acb", StringComparison.OrdinalIgnoreCase))
+            {
+                yield break;
+            }
+
+            string fileName = Path.GetFileNameWithoutExtension(normalizedPath);
+            bool hasVoicePrefix = fileName.StartsWith("vo_", StringComparison.OrdinalIgnoreCase);
+            string directory = normalizedPath.Substring(0, normalizedPath.Length - fileName.Length - extension.Length);
+            string fileWithExtension = fileName + extension;
+            if (!hasVoicePrefix)
+            {
+                yield return directory + "vo_" + fileWithExtension;
+            }
+
+            string alternateDirectory = normalizedPath.StartsWith("v/t/", StringComparison.OrdinalIgnoreCase)
+                ? "v/"
+                : "v/t/";
+            yield return alternateDirectory + fileWithExtension;
+            if (!hasVoicePrefix)
+            {
+                yield return alternateDirectory + "vo_" + fileWithExtension;
+            }
+        }
+
+        [HarmonyPatch(
+            typeof(Wizard.Scenario2.Player.VoiceManager),
+            nameof(Wizard.Scenario2.Player.VoiceManager.Init))]
+        [HarmonyPostfix]
+        private static void VoiceManager_Init_Postfix(bool canPlayVoice)
+        {
+            Plugin.Logger.LogInfo(
+                canPlayVoice
+                    ? "[Offlinizer] Story voice playback is enabled."
+                    : "[Offlinizer] Story voice playback is disabled by the story selection option.");
+        }
+
+        [HarmonyPatch(typeof(Voice), nameof(Voice.PlayScenario))]
+        [HarmonyPrefix]
+        private static void Voice_PlayScenario_Prefix(ref string cuename)
+        {
+            if (string.IsNullOrWhiteSpace(cuename))
+            {
+                return;
+            }
+
+            string normalizedCueName = NormalizeVoiceCueName(cuename);
+            if (!string.Equals(normalizedCueName, cuename, StringComparison.Ordinal))
+            {
+                Plugin.Logger.LogDebug(
+                    $"[Offlinizer] Normalized story voice cue '{cuename}' to '{normalizedCueName}'.");
+                cuename = normalizedCueName;
+            }
+
+            // ResourceManager normally registers the cue sheet while loading VoiceHandle.
+            // Ensure a locally cached sheet is available even when the startup manifest did
+            // not contain this voice entry.
+            string resourcePath = "v/" + normalizedCueName + ".acb";
+            if (!TryLoadLocalVoiceCueSheet(resourcePath))
+            {
+                if (MissingVoiceCueWarnings.Add(resourcePath))
+                {
+                    Plugin.Logger.LogWarning(
+                        $"[Offlinizer] Story requested voice '{normalizedCueName}', " +
+                        "but its local ACB file could not be loaded from 'v' or 'v/t'.");
+                }
+                return;
+            }
+
+            if (!HasLoggedScenarioVoicePlayback)
+            {
+                HasLoggedScenarioVoicePlayback = true;
+                Plugin.Logger.LogInfo(
+                    $"[Offlinizer] Playing local story voice cue '{normalizedCueName}'.");
+            }
+        }
+
+        private static bool TryLoadLocalVoiceCueSheet(string resourcePath)
+        {
+            if (!TryEnsureLocalVoiceAsset(resourcePath, out _) || Toolbox.AudioManager == null)
+            {
+                return false;
+            }
+
+            AssetHandle assetHandle = Toolbox.AssetManager.GetAssetHandle(resourcePath, false);
+            if (!IsLocalAssetHandleAvailable(assetHandle))
+            {
+                return false;
+            }
+
+            try
+            {
+                // Mirrors AssetHandle._LoadPostProcess for Sound resources. AddCueSheet is
+                // idempotent, so preloaded voices return immediately while late temporary
+                // voices are registered just before their command executes.
+                return Toolbox.AudioManager.AddCueSheet(
+                    assetHandle.filename,
+                    Path.GetFileName(assetHandle.filename),
+                    assetHandle.directory,
+                    string.Empty);
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[Offlinizer] Failed to load local story voice '{resourcePath}': " +
+                    exception.Message);
+                return false;
+            }
+        }
+
+        private static string NormalizeVoiceCueName(string cueName)
+        {
+            if (cueName.StartsWith("vo_", StringComparison.OrdinalIgnoreCase))
+            {
+                return cueName;
+            }
+
+            string prefixedName = "vo_" + cueName;
+            return TryEnsureLocalVoiceAsset("v/" + prefixedName + ".acb", out _)
+                ? prefixedName
+                : cueName;
         }
     }
 }

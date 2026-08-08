@@ -42,7 +42,7 @@ function BossForm({ value, onChange, catalog }: { value: BossRushBoss; onChange:
         <TextField label="Style CSV" field="style_csv" value={value.style_csv} onChange={(item) => set("style_csv", item)} />
         <TextField label="Emote CSV" field="emote_csv" value={value.emote_csv} onChange={(item) => set("emote_csv", item)} />
       </div>
-      <NumberListEditor label="实际敌方牌组" field="custom_deck_card_ids" value={value.custom_deck_card_ids} onChange={(item) => set("custom_deck_card_ids", item)} hint="推荐 40 张；第一版使用可编辑 ID 列表，后续卡牌数据库将复用此接口。" />
+      <NumberListEditor label="实际敌方牌组" field="custom_deck_card_ids" value={value.custom_deck_card_ids} cardIds onChange={(item) => set("custom_deck_card_ids", item)} hint="推荐 40 张；第一版使用可编辑 ID 列表，后续卡牌数据库将复用此接口。" />
     </Section>
     <Section title="开局规则">
       <div className="field-grid">
@@ -50,8 +50,8 @@ function BossForm({ value, onChange, catalog }: { value: BossRushBoss; onChange:
         <NumberField label="玩家初始 PP" field="player_start_pp" value={value.player_start_pp} min={0} max={10} onChange={(item) => set("player_start_pp", item)} />
         <NumberField label="敌方初始 PP" field="enemy_start_pp" value={value.enemy_start_pp} min={0} max={10} onChange={(item) => set("enemy_start_pp", item)} />
       </div>
-      <NumberListEditor label="玩家开局场面" field="player_start_field_card_ids" value={value.player_start_field_card_ids} max={5} onChange={(item) => set("player_start_field_card_ids", item)} />
-      <NumberListEditor label="敌方开局场面" field="enemy_start_field_card_ids" value={value.enemy_start_field_card_ids} max={5} onChange={(item) => set("enemy_start_field_card_ids", item)} />
+      <NumberListEditor label="玩家开局场面" field="player_start_field_card_ids" value={value.player_start_field_card_ids} cardIds max={5} onChange={(item) => set("player_start_field_card_ids", item)} />
+      <NumberListEditor label="敌方开局场面" field="enemy_start_field_card_ids" value={value.enemy_start_field_card_ids} cardIds max={5} onChange={(item) => set("enemy_start_field_card_ids", item)} />
     </Section>
     <Section title="剧情特殊战斗字段" collapsible defaultOpen={false}>
       <div className="field-grid">
@@ -91,7 +91,7 @@ export function BossRushEditor({ value, onChange, catalog }: { value: BossRushPa
     <Section title="加护池" description={`abilities · ${value.abilities.length} 项`} actions={<button type="button" onClick={() => set("abilities", [...value.abilities, newAbility()])}>新增加护</button>}>
       <div className="stack">{value.abilities.map((ability, index) => <CollapsibleCard key={index} title={`加护 ${index + 1}`} subtitle={`卡牌 ${ability.ability_id}`} defaultOpen={index === 0} actions={<RowActions index={index} count={value.abilities.length} onMove={(from, to) => set("abilities", moveItem(value.abilities, from, to))} onCopy={() => set("abilities", [...value.abilities.slice(0, index + 1), structuredClone(ability), ...value.abilities.slice(index + 1)])} onDelete={() => set("abilities", value.abilities.filter((_, itemIndex) => itemIndex !== index))} />}>
         <div className="field-grid">
-          <NumberField label="显示卡牌 ID" field="ability_id" value={ability.ability_id} onChange={(item) => { const next = [...value.abilities]; next[index] = { ...ability, ability_id: item }; set("abilities", next); }} />
+          <NumberField label="显示卡牌 ID" field="ability_id" value={ability.ability_id} cardId onChange={(item) => { const next = [...value.abilities]; next[index] = { ...ability, ability_id: item }; set("abilities", next); }} />
           <CheckboxField label="闪卡" field="is_foil" value={ability.is_foil} onChange={(item) => { const next = [...value.abilities]; next[index] = { ...ability, is_foil: item }; set("abilities", next); }} />
           <NumberField label="最大生命变化" field="max_life_change" value={ability.max_life_change} onChange={(item) => { const next = [...value.abilities]; next[index] = { ...ability, max_life_change: item }; set("abilities", next); }} />
           <NumberField label="当前生命变化" field="life_change" value={ability.life_change} onChange={(item) => { const next = [...value.abilities]; next[index] = { ...ability, life_change: item }; set("abilities", next); }} />

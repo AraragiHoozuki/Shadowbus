@@ -191,8 +191,8 @@ function PatchForm({ value, onChange }: { value: CardMasterPatch; onChange: (val
     <Section title="补丁目标">
       <div className="field-grid">
         <CheckboxField label="创建新卡" field="newCard" value={value.newCard} onChange={(item) => set("newCard", item)} />
-        <NumberField label="新卡 ID" field="cardId" value={value.cardId} disabled={!value.newCard} onChange={(item) => set("cardId", item)} />
-        <NumberField label="模板卡 ID" field="templateCardId" value={value.templateCardId} onChange={(item) => set("templateCardId", item)} />
+        <NumberField label="新卡 ID" field="cardId" value={value.cardId} disabled={!value.newCard} cardId onChange={(item) => set("cardId", item)} />
+        <NumberField label="模板卡 ID" field="templateCardId" value={value.templateCardId} cardId onChange={(item) => set("templateCardId", item)} />
       </div>
     </Section>
     <GenericFieldMap title="布尔属性" field="boolFields" value={value.boolFields} type="boolean" suggestions={cardParameterFields.boolean} onChange={(item) => set("boolFields", item)} />

@@ -99,6 +99,13 @@ code { color: #175cd3; font-family: "Cascadia Code", Consolas, monospace; font-s
 .field .ant-form-item-label > label { height: auto; color: #344054; font-size: 13px; line-height: 1.45; white-space: normal; }
 .field .ant-form-item-control, .field .ant-form-item-control-input, .field .ant-form-item-control-input-content { width: 100%; min-width: 0; }
 .field-label { display: inline-flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; max-width: 100%; }
+.card-id-tooltip-trigger { display: inline-block; max-width: 100%; }
+.card-id-tooltip-trigger-block { display: block; width: 100%; }
+.card-id-tooltip-trigger > .ant-input, .card-id-tooltip-trigger > .ant-input-number { max-width: 100%; }
+.card-id-tooltip-trigger > .ant-input-number { width: 100%; }
+.card-id-popover-content { max-width: 230px; padding: 0; }
+.card-id-preview-link { display: block; line-height: 0; }
+.card-id-preview { display: block; width: 220px; max-width: 100%; height: auto; border: 1px solid #d0d5dd; border-radius: 6px; background: #f8fafc; }
 .field-hint { display: block; margin-top: 5px; font-size: 12px; line-height: 1.4; }
 .full-number, .field .ant-select, .field .ant-input-number { width: 100%; }
 .nullable-input { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 12px; }

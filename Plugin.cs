@@ -58,6 +58,8 @@ public class Plugin : BaseUnityPlugin
         AITurnGuard.Configure(aiStallTimeout.Value);
         CustomFormats.Initialize();
         P2PTwoPickRules.Initialize();
+        BossRushOfflineData.Initialize();
+        BossRushReferenceExporter.Export();
 
         try
         {
@@ -71,7 +73,9 @@ public class Plugin : BaseUnityPlugin
                 $"[DeckListHotReload] Harmony registration complete: " +
                 $"{deckListHotReloadHarmony.GetPatchedMethods().Count()} game method(s) patched.");
             Harmony.CreateAndPatchAll(typeof(FakeConnect));
+            Harmony.CreateAndPatchAll(typeof(BossRushPatches));
             Harmony.CreateAndPatchAll(typeof(AIManager));
+            Harmony.CreateAndPatchAll(typeof(BossRushReferenceExporter));
             try
             {
                 // Isolated: these patches bind to private and virtual game methods, and a

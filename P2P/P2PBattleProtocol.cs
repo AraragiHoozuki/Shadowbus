@@ -30,10 +30,30 @@ namespace Shadowbus
         internal const string TurnStartUri = "TurnStart";
         internal const string JudgeUri = "Judge";
         internal const string EchoUri = "Echo";
+        // P2P-only metadata. The native receiver ignores unknown fields, while
+        // the host uses this marker to avoid preparing the same action twice.
+        internal const string PreparedActionKey = "p2pPreparedAction";
+        internal const string PreparedCardIdKey = "p2pPreparedCardId";
         // Unlike normal battle messages, this table is intentionally sent once at
         // battle setup so both local rule engines can evaluate hidden-zone effects
         // against the same card identities.
         internal const string OpponentDeckIdentityKey = "p2pOpponentDeck";
+
+        internal static bool TryReadPreparedAction(
+            Dictionary<string, object> data,
+            out int playIndex,
+            out int cardId)
+        {
+            playIndex = -1;
+            cardId = 0;
+            return data != null &&
+                TryConvertInt(data, PreparedActionKey, out int prepared) &&
+                prepared != 0 &&
+                TryConvertInt(data, "playIdx", out playIndex) &&
+                playIndex >= 0 &&
+                TryConvertInt(data, PreparedCardIdKey, out cardId) &&
+                cardId > 0;
+        }
 
         internal static List<object> CreateDeckIdentityPayload(IList<int> cardIds)
         {
@@ -620,6 +640,15 @@ namespace Shadowbus
                 return false;
             }
 
+            // A host receives an already prepared action when the local source
+            // is forwarded. Preserve the source's transformed identity instead
+            // of running the reveal passes a second time.
+            if (P2PBattleProtocol.TryReadPreparedAction(
+                    data, out playIndex, out cardId))
+            {
+                return true;
+            }
+
             ObserveKnownCards(sourceIsHost, data, "knownList");
             ObserveKnownCards(sourceIsHost, data, "uList");
             ObserveOrderList(sourceIsHost, data);
@@ -643,6 +672,7 @@ namespace Shadowbus
                     diagnosticLogger, out cardId))
             {
                 PlaceMutationKnownListAfterKeyAction(data);
+                MarkPreparedAction(data, playIndex, cardId);
                 return true;
             }
 
@@ -655,7 +685,21 @@ namespace Shadowbus
             int? cost = ResolveSourceCardCost(
                 sourceIsHost, playIndex, sourceCardCostResolver);
             RevealKnownCard(data, playIndex, cardId, true, cost);
+            MarkPreparedAction(data, playIndex, cardId);
             return true;
+        }
+
+        private static void MarkPreparedAction(
+            Dictionary<string, object> data,
+            int playIndex,
+            int cardId)
+        {
+            if (data == null || playIndex < 0 || cardId <= 0)
+            {
+                return;
+            }
+            data[P2PBattleProtocol.PreparedActionKey] = 1;
+            data[P2PBattleProtocol.PreparedCardIdKey] = cardId;
         }
 
         private bool TryRevealCardMutation(
@@ -1138,6 +1182,10 @@ namespace Shadowbus
             }
 
             List<object> metamorphoses = new List<object>();
+            bool hasMutationAction = TryGetMutationKeyAction(
+                data, out _, out _);
+            int mutationPlayIndex = -1;
+            TryGetInt(data, "playIdx", out mutationPlayIndex);
             foreach (object item in Enumerate(rawOrderList))
             {
                 Dictionary<string, object> order = item as Dictionary<string, object>;
@@ -1159,8 +1207,16 @@ namespace Shadowbus
 
                     int? cost = ResolveSourceCardCost(
                         sourceIsHost, index, sourceCardCostResolver);
-                    RevealKnownCard(data, index, resolvedCardId, isSelf,
-                        cost, null, null, true);
+                    // Accelerated/Crystallize uses the first knownList entry as
+                    // the transformed card and the native receiver converts it
+                    // back to the original card before applying the key action.
+                    // Do not let a metamorphose order overwrite that prepared
+                    // entry while a message is being forwarded by the host.
+                    if (!hasMutationAction || index != mutationPlayIndex)
+                    {
+                        RevealKnownCard(data, index, resolvedCardId, isSelf,
+                            cost, null, null, true);
+                    }
                     metamorphoses.Add(new Dictionary<string, object>
                     {
                         ["owner"] = ownerIsHost ? 1 : 0,

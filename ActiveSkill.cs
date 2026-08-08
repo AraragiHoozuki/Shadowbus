@@ -16,18 +16,48 @@ namespace Shadowbus
 {
     public static class DetailPanelControlExtensions
     {
-        private static readonly ConditionalWeakTable<DetailPanelControl, UIButton> CustomButtonMap =
-            new ConditionalWeakTable<DetailPanelControl, UIButton>();
-
-        public static void SetCustomButton(this DetailPanelControl panel, UIButton button)
+        public sealed class ActiveSkillButtons
         {
-            CustomButtonMap.Remove(panel);
-            CustomButtonMap.Add(panel, button);
+            public UIButton FollowerButton;
+            public UIButton NonFollowerButton;
+
+            public UIButton GetButton(BattleCardBase card)
+            {
+                return card != null && !card.IsUnit ? NonFollowerButton : FollowerButton;
+            }
+
+            public void HideAll()
+            {
+                SetActive(FollowerButton, false);
+                SetActive(NonFollowerButton, false);
+            }
+
+            private static void SetActive(UIButton button, bool active)
+            {
+                if (button != null)
+                {
+                    button.gameObject.SetActive(active);
+                }
+            }
         }
 
-        public static UIButton GetCustomButton(this DetailPanelControl panel)
+        private static readonly ConditionalWeakTable<DetailPanelControl, ActiveSkillButtons> CustomButtonMap =
+            new ConditionalWeakTable<DetailPanelControl, ActiveSkillButtons>();
+
+        public static void SetCustomButtons(this DetailPanelControl panel, ActiveSkillButtons buttons)
         {
-            return CustomButtonMap.TryGetValue(panel, out UIButton button) ? button : null;
+            CustomButtonMap.Remove(panel);
+            CustomButtonMap.Add(panel, buttons);
+        }
+
+        public static ActiveSkillButtons GetCustomButtons(this DetailPanelControl panel)
+        {
+            return CustomButtonMap.TryGetValue(panel, out ActiveSkillButtons buttons) ? buttons : null;
+        }
+
+        public static UIButton GetCustomButton(this DetailPanelControl panel, BattleCardBase card)
+        {
+            return panel.GetCustomButtons()?.GetButton(card);
         }
     }
 
@@ -67,7 +97,7 @@ namespace Shadowbus
                 }
             }
 
-            UIButton button = TargetPanel.GetCustomButton();
+            UIButton button = TargetPanel.GetCustomButton(card);
             UIWidget buttonWidget = button != null ? button.GetComponent<UIWidget>() : null;
             UIWidget bottomWidget = GetLastBottomWidgetMethod.Invoke(TargetPanel, null) as UIWidget;
             if (button == null || buttonWidget == null || bottomWidget == null ||
@@ -93,6 +123,9 @@ namespace Shadowbus
 
         private static readonly FieldInfo IsOnceCallTimingField =
             AccessTools.Field(typeof(SkillBase), "<IsOnceCallTiming>k__BackingField");
+
+        private static readonly FieldInfo NonFollowerFusionButtonField =
+            AccessTools.Field(typeof(DetailPanelControl), "NonFollowerFusionButton");
 
         private static ActivationSession _activationSession;
 
@@ -122,76 +155,35 @@ namespace Shadowbus
         {
             try
             {
-                if (__instance.EvolveButton == null || __instance.GetCustomButton() != null)
+                if (__instance.EvolveButton == null || __instance.GetCustomButtons() != null)
                 {
                     return;
                 }
 
-                Transform buttonParent = __instance.EvolveButton.transform.parent ?? __instance.transform;
-                GameObject customButtonObject = UnityEngine.Object.Instantiate(
-                    __instance.EvolveButton.gameObject,
-                    buttonParent);
-                customButtonObject.name = "ActiveSkillButton";
-                customButtonObject.transform.SetSiblingIndex(__instance.EvolveButton.transform.GetSiblingIndex() + 1);
-
-                TweenAlpha tween = customButtonObject.GetComponent<TweenAlpha>();
-                if (tween != null)
+                UIButton nonFollowerTemplate = NonFollowerFusionButtonField?.GetValue(__instance) as UIButton;
+                UIButton followerButton = CreateActivationButton(
+                    __instance,
+                    __instance.EvolveButton,
+                    "ActiveSkillFollowerButton");
+                UIButton nonFollowerButton = CreateActivationButton(
+                    __instance,
+                    nonFollowerTemplate,
+                    "ActiveSkillNonFollowerButton");
+                if (followerButton == null || nonFollowerButton == null)
                 {
-                    tween.enabled = false;
-                    UnityEngine.Object.Destroy(tween);
-                }
-
-                UIAnchor anchor = customButtonObject.GetComponent<UIAnchor>();
-                if (anchor != null)
-                {
-                    anchor.enabled = false;
-                    UnityEngine.Object.Destroy(anchor);
-                }
-
-                UIButton button = customButtonObject.GetComponent<UIButton>();
-                if (button == null)
-                {
-                    UnityEngine.Object.Destroy(customButtonObject);
+                    DestroyButton(followerButton);
+                    DestroyButton(nonFollowerButton);
                     return;
                 }
 
-                __instance.SetCustomButton(button);
-                button.CacheDefaultColor();
-                button.defaultColor = Color.white;
-                button.hover = Color.white;
-                button.pressed = Color.white;
-                button.SetState(UIButtonColor.State.Normal, true);
-                button.onClick.Clear();
-                button.onClick.Add(new EventDelegate(() => OnActivateButtonClicked(__instance)));
-
-                UIEventListener eventListener = customButtonObject.GetComponent<UIEventListener>();
-                if (eventListener != null)
+                __instance.SetCustomButtons(new DetailPanelControlExtensions.ActiveSkillButtons
                 {
-                    eventListener.onClick = null;
-                    eventListener.onPress = null;
-                    eventListener.onDragOut = null;
-                    eventListener.onClickRight = null;
-                    eventListener.onPressRight = null;
-                }
+                    FollowerButton = followerButton,
+                    NonFollowerButton = nonFollowerButton
+                });
 
                 DetailBottomButtonTracker tracker = __instance.gameObject.AddComponent<DetailBottomButtonTracker>();
                 tracker.TargetPanel = __instance;
-
-                Transform labelTransform = customButtonObject.transform.Find("Label");
-                UILabel label = labelTransform != null ? labelTransform.GetComponent<UILabel>() : null;
-                if (label != null)
-                {
-                    label.text = "\u542f\u52a8";
-                }
-
-                foreach (UIWidget widget in customButtonObject.GetComponentsInChildren<UIWidget>(true))
-                {
-                    widget.depth += 100;
-                    widget.alpha = 1f;
-                    widget.enabled = true;
-                }
-
-                customButtonObject.SetActive(false);
             }
             catch
             {
@@ -351,6 +343,82 @@ namespace Shadowbus
             }
         }
 
+        private static UIButton CreateActivationButton(
+            DetailPanelControl panel,
+            UIButton template,
+            string objectName)
+        {
+            if (template == null)
+            {
+                return null;
+            }
+
+            Transform buttonParent = template.transform.parent ?? panel.transform;
+            GameObject customButtonObject = UnityEngine.Object.Instantiate(
+                template.gameObject,
+                buttonParent);
+            customButtonObject.name = objectName;
+            customButtonObject.transform.SetSiblingIndex(template.transform.GetSiblingIndex() + 1);
+
+            TweenAlpha tween = customButtonObject.GetComponent<TweenAlpha>();
+            if (tween != null)
+            {
+                tween.enabled = false;
+                UnityEngine.Object.Destroy(tween);
+            }
+
+            UIAnchor anchor = customButtonObject.GetComponent<UIAnchor>();
+            if (anchor != null)
+            {
+                anchor.enabled = false;
+                UnityEngine.Object.Destroy(anchor);
+            }
+
+            UIButton button = customButtonObject.GetComponent<UIButton>();
+            if (button == null)
+            {
+                UnityEngine.Object.Destroy(customButtonObject);
+                return null;
+            }
+
+            button.CacheDefaultColor();
+            button.defaultColor = Color.white;
+            button.hover = Color.white;
+            button.pressed = Color.white;
+            button.SetState(UIButtonColor.State.Normal, true);
+            button.onClick.Clear();
+            button.onClick.Add(new EventDelegate(() => OnActivateButtonClicked(panel)));
+
+            UIEventListener eventListener = customButtonObject.GetComponent<UIEventListener>();
+            if (eventListener != null)
+            {
+                eventListener.onClick = null;
+                eventListener.onPress = null;
+                eventListener.onDragOut = null;
+                eventListener.onClickRight = null;
+                eventListener.onPressRight = null;
+            }
+
+            SetButtonLabel(button, 0);
+            foreach (UIWidget widget in customButtonObject.GetComponentsInChildren<UIWidget>(true))
+            {
+                widget.depth += 100;
+                widget.alpha = 1f;
+                widget.enabled = true;
+            }
+
+            customButtonObject.SetActive(false);
+            return button;
+        }
+
+        private static void DestroyButton(UIButton button)
+        {
+            if (button != null)
+            {
+                UnityEngine.Object.Destroy(button.gameObject);
+            }
+        }
+
         private static void SetButtonLabel(UIButton button, int ppCost)
         {
             Transform labelTransform = button != null ? button.transform.Find("Label") : null;
@@ -368,7 +436,15 @@ namespace Shadowbus
             BattleCardBase card,
             DetailPanelControl.ShowRequest showRequest)
         {
-            UIButton button = panel != null ? panel.GetCustomButton() : null;
+            DetailPanelControlExtensions.ActiveSkillButtons buttons =
+                panel != null ? panel.GetCustomButtons() : null;
+            if (buttons == null)
+            {
+                return;
+            }
+
+            buttons.HideAll();
+            UIButton button = buttons.GetButton(card);
             if (button == null)
             {
                 return;
@@ -406,7 +482,7 @@ namespace Shadowbus
             }
             catch
             {
-                button.gameObject.SetActive(false);
+                buttons.HideAll();
             }
         }
 
@@ -583,18 +659,43 @@ namespace Shadowbus
                 card.SelfBattlePlayer,
                 card.OpponentBattlePlayer);
             SkillConditionCheckerOption option = new SkillConditionCheckerOption();
-            List<SkillBase> availableSkills = GetActivationSkills(card)
-                .Where(skill => skill.VisualCheckCondition(pair, option, true))
-                .Where(skill => !skill.IsUserSelectType ||
-                                skill.GetSelectableCards(pair, option, false, null).Any())
+            List<SkillBase> activationSkills = GetActivationSkills(card).ToList();
+            List<SkillBase> availableSkills = activationSkills
+                .Where(skill => IsActivationSkillVisuallyAvailable(skill, pair, option))
                 .ToList();
             if (availableSkills.Count == 0)
             {
                 return false;
             }
 
-            requiredPp = GetActivationPpCost(availableSkills);
-            return currentPp >= requiredPp;
+            // A card's when_activate entries form one atomic activation.  Skills carrying
+            // use_pp are mandatory payment nodes; they may not be dropped while the other
+            // entries continue to resolve for free.
+            List<SkillBase> costSkills = GetActivationCostSkills(activationSkills);
+            requiredPp = GetActivationPpCost(costSkills);
+            bool allCostSkillsAvailable = costSkills.All(availableSkills.Contains);
+            return allCostSkillsAvailable && currentPp >= requiredPp;
+        }
+
+        private static bool IsActivationSkillVisuallyAvailable(
+            SkillBase skill,
+            BattlePlayerReadOnlyInfoPair pair,
+            SkillConditionCheckerOption option)
+        {
+            return skill != null &&
+                   skill.VisualCheckCondition(pair, option, true) &&
+                   (!skill.IsUserSelectType ||
+                    skill.GetSelectableCards(pair, option, false, null).Any());
+        }
+
+        private static List<SkillBase> GetActivationCostSkills(IEnumerable<SkillBase> skills)
+        {
+            return (skills ?? Enumerable.Empty<SkillBase>())
+                .Where(skill => skill?.PreprocessList != null &&
+                                skill.PreprocessList
+                                    .OfType<SkillPreprocessUsePp>()
+                                    .Any(usePp => usePp.ConsumeValue > 0))
+                .ToList();
         }
 
         private static int GetActivationPpCost(IEnumerable<SkillBase> skills)
@@ -709,13 +810,15 @@ namespace Shadowbus
                     readOnlyPair,
                     option,
                     skillProcessor,
-                    false,
+                    true,
                     true);
 
-                int requiredPp = GetActivationPpCost(activeSkills);
+                List<SkillBase> costSkills = GetActivationCostSkills(currentActivationSkills);
+                int requiredPp = GetActivationPpCost(costSkills);
                 int currentPp = card.SelfBattlePlayer.Pp;
+                bool allCostSkillsActive = costSkills.All(activeSkills.Contains);
 
-                if (activeSkills.Count > 0 && currentPp >= requiredPp)
+                if (activeSkills.Count > 0 && allCostSkillsActive && currentPp >= requiredPp)
                 {
                     sequence.Register<VfxBase>(CreateActivationEffectVfx(card));
                     SkillProcessor.ProcessInfo processInfo = new SkillProcessor.ProcessInfoCollection(

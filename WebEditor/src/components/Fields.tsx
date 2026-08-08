@@ -1,6 +1,39 @@
 import type { ReactNode } from "react";
 import { ArrowDownOutlined, ArrowUpOutlined, CopyOutlined, DeleteOutlined } from "@ant-design/icons";
-import { Button, Card as AntCard, Checkbox, Collapse, Form, Input, InputNumber, Select, Space, Switch, Tooltip, Typography } from "antd";
+import { Button, Card as AntCard, Checkbox, Collapse, Form, Input, InputNumber, Popover, Select, Space, Switch, Tooltip, Typography } from "antd";
+
+const cardPortalUrl = (cardId: number | string) => `https://shadowverse-portal.com/card/${encodeURIComponent(String(cardId))}?lang=zh-tw`;
+const cardImageUrl = (cardId: number) => `https://svgdb.me/assets/cards/jp/C_${cardId}.png`;
+
+function normalizedCardId(cardId: number | string) {
+  const value = Number(cardId);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function normalCardId(cardId: number) {
+  return cardId % 10 === 1 ? cardId - 1 : cardId;
+}
+
+function CardIdPopoverContent({ cardId, url }: { cardId: number; url: string }) {
+  const normalId = normalCardId(cardId);
+  return <a className="card-id-preview-link" href={url} target="_blank" rel="noreferrer">
+    <img className="card-id-preview" src={cardImageUrl(normalId)} alt={`Card ${normalId}`} />
+  </a>;
+}
+
+export function CardIdTooltip({ cardId, children, block = false }: { cardId: number | string; children: ReactNode; block?: boolean }) {
+  const normalized = normalizedCardId(cardId);
+  if (normalized == null) return <>{children}</>;
+  const url = cardPortalUrl(normalized);
+  return <Popover
+    trigger="hover"
+    placement="topLeft"
+    mouseEnterDelay={0.25}
+    content={<CardIdPopoverContent cardId={normalized} url={url} />}
+  >
+    <span className={`card-id-tooltip-trigger${block ? " card-id-tooltip-trigger-block" : ""}`}>{children}</span>
+  </Popover>;
+}
 
 export function Field({ label, field, hint, children, wide = false }: { label: string; field?: string; hint?: string; children: ReactNode; wide?: boolean }) {
   return <Form.Item layout="vertical" className={`field ${wide ? "field-wide" : ""}`} label={<span className="field-label">{label}{field && <code>{field}</code>}</span>}>
@@ -15,9 +48,10 @@ export function TextField({ label, field, value, onChange, multiline = false, pl
   </Field>;
 }
 
-export function NumberField({ label, field, value, onChange, min, max, disabled }: { label: string; field?: string; value: number; onChange: (value: number) => void; min?: number; max?: number; disabled?: boolean }) {
+export function NumberField({ label, field, value, onChange, min, max, disabled, cardId = false }: { label: string; field?: string; value: number; onChange: (value: number) => void; min?: number; max?: number; disabled?: boolean; cardId?: boolean }) {
+  const input = <InputNumber className="full-number" value={Number.isFinite(value) ? value : 0} min={min} max={max} disabled={disabled} onChange={(item) => onChange(item ?? 0)} />;
   return <Field label={label} field={field}>
-    <InputNumber className="full-number" value={Number.isFinite(value) ? value : 0} min={min} max={max} disabled={disabled} onChange={(item) => onChange(item ?? 0)} />
+    {cardId ? <CardIdTooltip cardId={value} block>{input}</CardIdTooltip> : input}
   </Field>;
 }
 

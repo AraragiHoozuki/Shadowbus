@@ -17,7 +17,7 @@ export function FormatEditor({ value, onChange }: { value: CustomFormat; onChang
         <NullableNumberField label="同名 Token 上限" field="tokenSameCardLimit" value={value.tokenSameCardLimit} min={0} onChange={(item) => set("tokenSameCardLimit", item)} />
       </div>
     </Section>
-    <NumberMapEditor label="个别卡牌限制" field="cardLimits" value={value.cardLimits} onChange={(item) => set("cardLimits", item)} />
+    <NumberMapEditor label="个别卡牌限制" field="cardLimits" value={value.cardLimits} cardIds onChange={(item) => set("cardLimits", item)} />
     <UnknownFieldsEditor value={value} knownKeys={known} onChange={(item) => onChange(item as CustomFormat)} />
   </div>;
 }

@@ -50,6 +50,8 @@ namespace Shadowbus
         private static bool hostLoaded;
         private static bool guestLoaded;
         private static bool battleStartSent;
+        private static bool battleStartReceived;
+        private static bool mulliganReadyReceived;
         private static bool finishResultSent;
         private static bool? retiringHost;
         private static bool localRetired;
@@ -611,6 +613,8 @@ namespace Shadowbus
             hostLoaded = false;
             guestLoaded = false;
             battleStartSent = false;
+            battleStartReceived = false;
+            mulliganReadyReceived = false;
             finishResultSent = false;
             retiringHost = null;
             localRetired = false;
@@ -1039,12 +1043,19 @@ namespace Shadowbus
                 return;
             }
 
-            bool revealed = BattleCardTracker.PrepareOutgoingAction(
-                sourceIsHost, data, out int playIndex, out int cardId,
-                null, null,
-                warning => Plugin.Logger.LogWarning(
-                    $"[P2P] {SideName(sourceIsHost)} hidden-card synchronization: " +
-                    warning + "."));
+            bool revealed = P2PBattleProtocol.TryReadPreparedAction(
+                data, out int playIndex, out int cardId);
+            if (!revealed)
+            {
+                // Compatibility fallback for an unprepared peer. Current peers
+                // prepare at the source, so forwarding must preserve that data.
+                revealed = BattleCardTracker.PrepareOutgoingAction(
+                    sourceIsHost, data, out playIndex, out cardId,
+                    null, null,
+                    warning => Plugin.Logger.LogWarning(
+                        $"[P2P] {SideName(sourceIsHost)} hidden-card synchronization: " +
+                        warning + "."));
+            }
             if (uri == NetworkBattleDefine.NetworkBattleURI.PlayActions.ToString())
             {
                 Plugin.Logger.LogInfo(
@@ -1658,9 +1669,15 @@ namespace Shadowbus
 
         private static int GetLocalFinishResult()
         {
+            if (!matchedSent || !battleStartReceived ||
+                !mulliganReadyReceived)
+            {
+                return (int)NetworkBattleReceiver.RESULT_CODE.NotFinish;
+            }
             NetworkBattleManagerBase manager =
                 BattleManagerBase.GetIns() as NetworkBattleManagerBase;
-            return manager == null
+            return manager == null || manager.BattlePlayer?.Class == null ||
+                manager.BattleEnemy?.Class == null
                 ? (int)NetworkBattleReceiver.RESULT_CODE.NotFinish
                 : (int)manager.JudgeCurrentFinishStatus();
         }
@@ -1803,6 +1820,33 @@ namespace Shadowbus
             string uri = data != null && data.TryGetValue("uri", out object value)
                 ? value?.ToString() ?? "?"
                 : "?";
+            if (string.Equals(uri,
+                    PlayerController.ROOM_URI.RoomReady.ToString(),
+                    StringComparison.Ordinal))
+            {
+                // The host resets when both players become ready. The guest must
+                // reset at the same boundary so no previous round state can make
+                // startup Judge messages appear final.
+                ResetBattleState();
+            }
+            else if (string.Equals(uri,
+                    NetworkBattleDefine.NetworkBattleURI.Matched.ToString(),
+                    StringComparison.Ordinal))
+            {
+                matchedSent = true;
+            }
+            else if (string.Equals(uri,
+                    NetworkBattleDefine.NetworkBattleURI.BattleStart.ToString(),
+                    StringComparison.Ordinal))
+            {
+                battleStartReceived = true;
+            }
+            else if (string.Equals(uri,
+                    NetworkBattleDefine.NetworkBattleURI.Ready.ToString(),
+                    StringComparison.Ordinal))
+            {
+                mulliganReadyReceived = true;
+            }
             Dictionary<string, object> expectedBattleState = null;
             if (data != null &&
                 data.TryGetValue(P2PBattleStateDiagnostics.StateKey, out object rawState))
@@ -1905,7 +1949,8 @@ namespace Shadowbus
 
         private static void TrySendInitialPrivateStateSnapshot()
         {
-            if (!IsActive || localPrivateStateSent || transport == null ||
+            if (!IsActive || !battleStartReceived || localPrivateStateSent ||
+                transport == null ||
                 !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
                 manager.BattlePlayer == null)
             {
@@ -1954,31 +1999,10 @@ namespace Shadowbus
                 return;
             }
 
-            Dictionary<string, object> history =
-                CapturePlayerHistoryState(manager.BattlePlayer,
-                    Role == P2PRole.Host);
-            string historySignature = JsonConvert.SerializeObject(
-                history, P2PJson.Settings);
-            if (!string.Equals(historySignature,
-                    localPlayerHistoryStateSignature, StringComparison.Ordinal))
-            {
-                localPlayerHistoryStateSignature = historySignature;
-                history["revision"] = ++localPlayerHistoryRevision;
-            }
-            else if (localPlayerHistoryRevision <= 0)
-            {
-                history["revision"] = ++localPlayerHistoryRevision;
-            }
-            else
-            {
-                history["revision"] = localPlayerHistoryRevision;
-            }
-
             Dictionary<string, object> payload = new Dictionary<string, object>
             {
                 ["owner"] = Role == P2PRole.Host ? 1 : 0,
-                ["cards"] = cards.Select(card => (object)card).ToList(),
-                ["history"] = history
+                ["cards"] = cards.Select(card => (object)card).ToList()
             };
             if (!SendWire(new P2PWireMessage
             {
@@ -2032,23 +2056,6 @@ namespace Shadowbus
                     }
                     StoreReceivedHiddenCardState(ownerIsHost, card);
                 }
-            }
-
-            if (payload.TryGetValue("history", out object rawHistory) &&
-                rawHistory is Dictionary<string, object> history)
-            {
-                Dictionary<string, object> historyCopy =
-                    P2PJson.CloneDictionary(history);
-                if (!TryGetStateInt(historyCopy, "revision", out int revision) ||
-                    revision <= 0)
-                {
-                    historyCopy["revision"] = 1;
-                }
-                Dictionary<string, object> wrapper = new Dictionary<string, object>
-                {
-                    [PlayerHistoryStateKey] = historyCopy
-                };
-                RememberReceivedPlayerHistoryState(wrapper, true);
             }
 
             remotePrivateStateReceived = true;
@@ -2338,10 +2345,23 @@ namespace Shadowbus
                 return false;
             }
 
+            int previousPp = player.Pp;
+            int previousPpTotal = player.PpTotal;
             if (state.TryGetValue("scalars", out object rawScalars) &&
                 rawScalars is Dictionary<string, object> scalars)
             {
                 ApplyPlayerHistoryScalars(player, scalars);
+                if (previousPp != player.Pp || previousPpTotal != player.PpTotal)
+                {
+                    try
+                    {
+                        player.StatusPanelControl?.SetPp(
+                            player.Pp, player.PpTotal, false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
             }
             List<string> unresolvedLists = new List<string>();
             if (state.TryGetValue("class", out object rawClassState) &&

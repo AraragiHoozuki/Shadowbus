@@ -4,7 +4,7 @@ import { Button, Input, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { CsvDocument } from "../types";
 import { addDeckTag, deckBaseHeaders, emoteHeaders, normalizeDeckCsv, styleHeaders } from "../models/csv";
-import { Field, Section } from "../components/Fields";
+import { CardIdTooltip, Field, Section } from "../components/Fields";
 
 type AiType = "deck" | "style" | "emote";
 
@@ -23,7 +23,7 @@ function SimpleCsvTable({ document, headers, onChange }: { document: CsvDocument
   const allHeaders = [...headers, ...extras];
   const columns: ColumnsType<Record<string, string>> = [
     { title: "#", key: "index", width: 52, fixed: "left", render: (_, __, rowIndex) => rowIndex + 1 },
-    ...allHeaders.map((header) => ({ title: header, key: header, dataIndex: header, width: 150, render: (value: string, _: Record<string, string>, rowIndex: number) => <Input bordered={false} value={value ?? ""} onChange={(event) => onChange(updateRow(document, rowIndex, header, event.target.value))} /> })),
+    ...allHeaders.map((header) => ({ title: header, key: header, dataIndex: header, width: 150, render: (value: string, _: Record<string, string>, rowIndex: number) => { const input = <Input bordered={false} value={value ?? ""} onChange={(event) => onChange(updateRow(document, rowIndex, header, event.target.value))} />; return /^card[_-]?id$/i.test(header.trim()) ? <CardIdTooltip cardId={value}>{input}</CardIdTooltip> : input; } })),
     { title: "操作", key: "actions", width: 62, fixed: "right", render: (_: unknown, __: Record<string, string>, rowIndex: number) => <Button aria-label={`删除第 ${rowIndex + 1} 行`} danger type="text" icon={<DeleteOutlined />} onClick={() => onChange({ ...document, rows: document.rows.filter((_, index) => index !== rowIndex) })} /> },
   ];
   return <Space direction="vertical" size="middle" className="table-editor"><Table<Record<string, string>> size="small" bordered sticky pagination={{ pageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100] }} scroll={{ x: Math.max(900, allHeaders.length * 150) }} rowKey={rowKey} columns={columns} dataSource={document.rows} /><Button icon={<PlusOutlined />} onClick={() => onChange({ ...document, headers: allHeaders, rows: [...document.rows, Object.fromEntries(allHeaders.map((header) => [header, ""]))] })}>新增行</Button></Space>;
@@ -47,7 +47,7 @@ function DeckTable({ document: sourceDocument, onChange }: { document: CsvDocume
   };
   const columns: ColumnsType<Record<string, string>> = [
     { title: "#", key: "index", width: 52, fixed: "left", render: (_, __, rowIndex) => rowIndex + 1 },
-    ...deckBaseHeaders.map((header) => ({ title: header, key: header, dataIndex: header, width: 150, render: (value: string, _: Record<string, string>, rowIndex: number) => <Input bordered={false} value={value ?? ""} onChange={(event) => onChange(updateRow(document, rowIndex, header, event.target.value))} /> })),
+    ...deckBaseHeaders.map((header) => ({ title: header, key: header, dataIndex: header, width: 150, render: (value: string, _: Record<string, string>, rowIndex: number) => { const input = <Input bordered={false} value={value ?? ""} onChange={(event) => onChange(updateRow(document, rowIndex, header, event.target.value))} />; return /^card[_-]?id$/i.test(header.trim()) ? <CardIdTooltip cardId={value}>{input}</CardIdTooltip> : input; } })),
     { title: "Tags", key: "tags", width: 90, render: (_: unknown, row: Record<string, string>) => <Tag color="blue">{tagIndexes.filter((index) => row[`Tag${index}.Type`]).length} 个</Tag> },
     { title: "操作", key: "actions", width: 104, fixed: "right", render: (_: unknown, row: Record<string, string>, rowIndex: number) => <Space.Compact><Button aria-label="复制" icon={<CopyOutlined />} onClick={() => onChange({ ...document, rows: [...document.rows.slice(0, rowIndex + 1), { ...row }, ...document.rows.slice(rowIndex + 1)] })} /><Button aria-label="删除" danger icon={<DeleteOutlined />} onClick={() => onChange({ ...document, rows: document.rows.filter((_, index) => index !== rowIndex) })} /></Space.Compact> },
   ];

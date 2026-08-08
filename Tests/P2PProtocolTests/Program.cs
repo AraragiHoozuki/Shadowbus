@@ -1246,6 +1246,18 @@ namespace Shadowbus
                         {
                             new Dictionary<string, object>
                             {
+                                ["metamorphose"] = new Dictionary<string, object>
+                                {
+                                    ["idx"] = new List<object> { 42 },
+                                    ["isSelf"] = 1,
+                                    ["after"] = new Dictionary<string, object>
+                                    {
+                                        ["cardId"] = originalCardId
+                                    }
+                                }
+                            },
+                            new Dictionary<string, object>
+                            {
                                 ["move"] = new Dictionary<string, object>
                                 {
                                     ["idx"] = new List<object> { 43 },
@@ -1293,6 +1305,12 @@ namespace Shadowbus
                     mutationPlayIndex == 42 &&
                     revealedMutationCardId == mutationCardId,
                     $"Mutation key action type {mutationType} did not reveal its changed card.");
+                Assert(P2PBattleProtocol.TryReadPreparedAction(
+                        mutationPlay, out int preparedIndex,
+                        out int preparedCardId) && preparedIndex == 42 &&
+                    preparedCardId == mutationCardId,
+                    $"Mutation key action type {mutationType} did not retain its " +
+                    "source-side prepared identity marker.");
                 Dictionary<string, object> mutationKeyAction =
                     (Dictionary<string, object>)
                     ((List<object>)mutationPlay["keyAction"])[0];
