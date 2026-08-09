@@ -97,6 +97,9 @@ namespace Shadowbus
             new Queue<Dictionary<string, object>>();
         private static readonly HashSet<string> PendingFusionActionSignatures =
             new HashSet<string>(StringComparer.Ordinal);
+        private static readonly List<Dictionary<string, object>>
+            StagedPreNativeFusionActions =
+            new List<Dictionary<string, object>>();
         private const string PlayerHistoryStateKey = "p2pPlayerHistory";
         private static readonly Dictionary<string, PendingPlayerHistoryState>
             ReceivedPlayerHistoryStates =
@@ -486,7 +489,8 @@ namespace Shadowbus
                     Role == P2PRole.Host, messageData, out _, out _,
                     ResolveLocalCardId, ResolveLocalCardCost,
                     warning => Plugin.Logger.LogWarning(
-                        "[P2P] Hidden-card synchronization: " + warning + "."));
+                        "[P2P] Hidden-card synchronization: " + warning + "."),
+                    ResolveLocalFusionIngredients);
             }
 
             if (Role == P2PRole.Host)
@@ -631,6 +635,7 @@ namespace Shadowbus
             remotePrivateStateReceived = false;
             PendingFusionActions.Clear();
             PendingFusionActionSignatures.Clear();
+            StagedPreNativeFusionActions.Clear();
             ReceivedPlayerHistoryStates.Clear();
             AppliedPlayerHistoryRevisions.Clear();
             localPlayerHistoryStateSignature = string.Empty;
@@ -1857,7 +1862,7 @@ namespace Shadowbus
             RememberReceivedHiddenCardStates(data);
             RememberReceivedPlayerHistoryState(data, false);
             TryApplyPendingHiddenCardStates();
-            ApplyReceivedFusionAction(data);
+            ApplyReceivedFusionAction(data, false);
             if (string.Equals(
                     uri,
                     NetworkBattleDefine.NetworkBattleURI.JudgeResult.ToString(),
@@ -1941,6 +1946,10 @@ namespace Shadowbus
                     $"Failed to inject '{uri}' message; " +
                     P2PBattleStateDiagnostics.DescribeBattleMessage(data) +
                     $". Exception: {ex}");
+            }
+            finally
+            {
+                StagedPreNativeFusionActions.Clear();
             }
         }
 
@@ -2775,8 +2784,13 @@ namespace Shadowbus
         }
 
         internal static void ApplyReceivedFusionAction(
-            Dictionary<string, object> data)
+            Dictionary<string, object> data,
+            bool afterNative)
         {
+            if (!afterNative)
+            {
+                StagedPreNativeFusionActions.Clear();
+            }
             if (!IsActive || data == null ||
                 !data.TryGetValue("p2pFusionActions", out object rawActions) ||
                 rawActions is string)
@@ -2786,7 +2800,7 @@ namespace Shadowbus
 
             if (rawActions is Dictionary<string, object> singleAction)
             {
-                QueueOrApplyFusionAction(singleAction);
+                ApplyFusionActionAtBoundary(singleAction, afterNative);
                 return;
             }
             if (!(rawActions is IEnumerable actions))
@@ -2797,15 +2811,23 @@ namespace Shadowbus
             {
                 if (rawAction is Dictionary<string, object> action)
                 {
-                    QueueOrApplyFusionAction(action);
+                    ApplyFusionActionAtBoundary(action, afterNative);
                 }
             }
         }
 
-        private static void QueueOrApplyFusionAction(
-            Dictionary<string, object> action)
+        private static void ApplyFusionActionAtBoundary(
+            Dictionary<string, object> action,
+            bool afterNative)
         {
-            if (TryApplyFusionAction(action))
+            if (!afterNative)
+            {
+                StagedPreNativeFusionActions.Add(
+                    P2PJson.CloneDictionary(action));
+                return;
+            }
+
+            if (TryApplyFusionAction(action, true))
             {
                 PendingFusionActionSignatures.Remove(
                     JsonConvert.SerializeObject(action, P2PJson.Settings));
@@ -2816,6 +2838,28 @@ namespace Shadowbus
             if (PendingFusionActionSignatures.Add(signature))
             {
                 PendingFusionActions.Enqueue(copy);
+            }
+        }
+
+        internal static void ApplyStagedPreNativeFusionActions()
+        {
+            if (!IsActive || StagedPreNativeFusionActions.Count == 0)
+            {
+                return;
+            }
+
+            List<Dictionary<string, object>> actions =
+                StagedPreNativeFusionActions.ToList();
+            StagedPreNativeFusionActions.Clear();
+            foreach (Dictionary<string, object> action in actions)
+            {
+                if (!TryApplyFusionAction(action, false))
+                {
+                    Plugin.Logger.LogWarning(
+                        "[P2P] Could not restore the pre-fusion cumulative state " +
+                        "immediately before native fusion processing; using the " +
+                        "currently resolved card state.");
+                }
             }
         }
 
@@ -2830,7 +2874,7 @@ namespace Shadowbus
             for (int i = 0; i < count; i++)
             {
                 Dictionary<string, object> action = PendingFusionActions.Dequeue();
-                if (!TryApplyFusionAction(action))
+                if (!TryApplyFusionAction(action, true))
                 {
                     PendingFusionActions.Enqueue(action);
                     continue;
@@ -2841,7 +2885,8 @@ namespace Shadowbus
         }
 
         private static bool TryApplyFusionAction(
-            Dictionary<string, object> action)
+            Dictionary<string, object> action,
+            bool afterNative)
         {
             if (action == null ||
                 !TryGetStateInt(action, "owner", out int owner) ||
@@ -2872,48 +2917,90 @@ namespace Shadowbus
                 return target == null ? false : true;
             }
 
-            BattlePlayerBase ownerPlayer = ownerIsHost == localOwnerIsHost
-                ? manager.BattlePlayer : manager.BattleEnemy;
-            if (ownerPlayer == null)
+            if (afterNative)
             {
-                return false;
+                if (!action.TryGetValue("afterIngredients", out object rawAfter) ||
+                    rawAfter is string || !(rawAfter is IEnumerable afterIngredients))
+                {
+                    // Older peers did not publish a post-action cumulative snapshot.
+                    // The native fusion operation has already appended the current
+                    // ingredients, so leaving it untouched is the safest fallback.
+                    return true;
+                }
+                return TryApplyFusionIngredients(
+                    target, ownerIsHost, afterIngredients);
             }
 
+            if (action.TryGetValue("beforeIngredients", out object rawBefore) &&
+                !(rawBefore is string) && rawBefore is IEnumerable beforeIngredients &&
+                TryApplyFusionIngredients(target, ownerIsHost, beforeIngredients))
+            {
+                return true;
+            }
+
+            // The message carries a post-action hidden-card snapshot. For an older
+            // peer, or while a referenced historical ingredient is still resolving,
+            // derive the pre-action state by removing this operation's materials.
+            return TryRemoveCurrentFusionIngredients(target, ingredients);
+        }
+
+        private static bool TryRemoveCurrentFusionIngredients(
+            BattleCardBase target,
+            IEnumerable currentIngredients)
+        {
             SkillApplyInformation information =
-                target.SkillApplyInformation as SkillApplyInformation;
-            if (information == null)
+                target?.SkillApplyInformation as SkillApplyInformation;
+            if (information?.FusionIngredients == null)
             {
                 return false;
             }
 
-            List<FusionIngredientInfo> replacements =
-                new List<FusionIngredientInfo>();
-            foreach (object rawIngredient in ingredients)
+            Dictionary<int, int> remainingCurrent = new Dictionary<int, int>();
+            foreach (object rawIngredient in currentIngredients)
             {
                 if (!(rawIngredient is Dictionary<string, object> ingredient) ||
                     !TryGetStateInt(ingredient, "idx", out int index) || index <= 0)
                 {
                     continue;
                 }
+                remainingCurrent.TryGetValue(index, out int count);
+                remainingCurrent[index] = count + 1;
+            }
 
-                BattleCardBase ingredientCard = ResolveCardReference(
-                    new Dictionary<string, object>
-                    {
-                        ["idx"] = index,
-                        ["owner"] = owner
-                    });
-                if (ingredientCard == null)
+            if (remainingCurrent.Count == 0)
+            {
+                return true;
+            }
+
+            List<FusionIngredientInfo> before = new List<FusionIngredientInfo>();
+            foreach (FusionIngredientInfo existing in information.FusionIngredients)
+            {
+                int index = existing?.Card?.Index ?? -1;
+                if (index > 0 && remainingCurrent.TryGetValue(index, out int count) &&
+                    count > 0)
                 {
-                    return false;
+                    if (count == 1)
+                    {
+                        remainingCurrent.Remove(index);
+                    }
+                    else
+                    {
+                        remainingCurrent[index] = count - 1;
+                    }
+                    continue;
                 }
+                before.Add(existing);
+            }
 
-                int turn = ownerPlayer.Turn;
-                TryGetStateInt(ingredient, "turn", out turn);
-                replacements.Add(new FusionIngredientInfo(turn, ingredientCard));
+            // If the target still contains its true pre-action state, none of the
+            // current indices will be present. Do not clear valid historical data.
+            if (remainingCurrent.Count > 0)
+            {
+                return true;
             }
 
             information.FusionIngredients.Clear();
-            information.FusionIngredients.AddRange(replacements);
+            information.FusionIngredients.AddRange(before);
             return true;
         }
 
@@ -6651,6 +6738,26 @@ namespace Shadowbus
         {
             BattleCardBase card = ResolveLocalCard(index);
             return card?.Cost ?? -1;
+        }
+
+        private static IEnumerable<P2PFusionIngredientState>
+            ResolveLocalFusionIngredients(int index)
+        {
+            SkillApplyInformation information = ResolveLocalCard(index)?
+                .SkillApplyInformation as SkillApplyInformation;
+            if (information?.FusionIngredients == null)
+            {
+                return Enumerable.Empty<P2PFusionIngredientState>();
+            }
+
+            return information.FusionIngredients
+                .Where(ingredient => ingredient?.Card != null &&
+                    ingredient.Card.Index > 0)
+                .Select(ingredient => new P2PFusionIngredientState(
+                    ingredient.Card.Index,
+                    ingredient.Card.CardId,
+                    ingredient.FusionTurn))
+                .ToList();
         }
 
         private static IEnumerable<int> ResolveLocalBurialRiteSkillIndexes(int index)

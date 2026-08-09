@@ -537,6 +537,20 @@ namespace Shadowbus
         }
     }
 
+    internal sealed class P2PFusionIngredientState
+    {
+        internal P2PFusionIngredientState(int index, int cardId, int turn)
+        {
+            Index = index;
+            CardId = cardId;
+            Turn = turn;
+        }
+
+        internal int Index { get; }
+        internal int CardId { get; }
+        internal int Turn { get; }
+    }
+
     internal sealed class P2PBattleCardTracker
     {
         private readonly Dictionary<int, int> hostCards = new Dictionary<int, int>();
@@ -631,7 +645,9 @@ namespace Shadowbus
             out int cardId,
             Func<int, int> sourceCardIdResolver = null,
             Func<int, int> sourceCardCostResolver = null,
-            Action<string> diagnosticLogger = null)
+            Action<string> diagnosticLogger = null,
+            Func<int, IEnumerable<P2PFusionIngredientState>>
+                sourceFusionIngredientsResolver = null)
         {
             playIndex = -1;
             cardId = 0;
@@ -658,7 +674,8 @@ namespace Shadowbus
             RevealPublicMoves(sourceIsHost, data,
                 sourceCardIdResolver, sourceCardCostResolver, diagnosticLogger);
             RevealFusionIngredients(sourceIsHost, data,
-                sourceCardIdResolver, sourceCardCostResolver, diagnosticLogger);
+                sourceCardIdResolver, sourceCardCostResolver, diagnosticLogger,
+                sourceFusionIngredientsResolver);
             RevealOpenedHandCards(sourceIsHost, data,
                 sourceCardIdResolver, sourceCardCostResolver, diagnosticLogger);
 
@@ -1105,7 +1122,9 @@ namespace Shadowbus
             Dictionary<string, object> data,
             Func<int, int> sourceCardIdResolver,
             Func<int, int> sourceCardCostResolver,
-            Action<string> diagnosticLogger)
+            Action<string> diagnosticLogger,
+            Func<int, IEnumerable<P2PFusionIngredientState>>
+                sourceFusionIngredientsResolver)
         {
             if (!data.TryGetValue("orderList", out object rawOrderList))
             {
@@ -1159,6 +1178,12 @@ namespace Shadowbus
                     {
                         action["targetCardId"] = targetCardId;
                     }
+                    AttachFusionCumulativeState(
+                        action,
+                        targetIndices[0],
+                        actionIngredients,
+                        sourceFusionIngredientsResolver,
+                        diagnosticLogger);
                     fusionActions.Add(action);
                 }
             }
@@ -1167,6 +1192,90 @@ namespace Shadowbus
             {
                 data["p2pFusionActions"] = fusionActions;
             }
+        }
+
+        private static void AttachFusionCumulativeState(
+            Dictionary<string, object> action,
+            int targetIndex,
+            List<object> currentIngredients,
+            Func<int, IEnumerable<P2PFusionIngredientState>>
+                sourceFusionIngredientsResolver,
+            Action<string> diagnosticLogger)
+        {
+            if (action == null || sourceFusionIngredientsResolver == null)
+            {
+                return;
+            }
+
+            List<P2PFusionIngredientState> after;
+            try
+            {
+                after = (sourceFusionIngredientsResolver(targetIndex) ??
+                        Enumerable.Empty<P2PFusionIngredientState>())
+                    .Where(state => state != null && state.Index > 0)
+                    .ToList();
+            }
+            catch (Exception ex)
+            {
+                diagnosticLogger?.Invoke(
+                    $"could not capture cumulative fusion state for idx={targetIndex}: " +
+                    ex.Message);
+                return;
+            }
+
+            Dictionary<int, int> remainingCurrent = new Dictionary<int, int>();
+            foreach (Dictionary<string, object> ingredient in
+                currentIngredients.OfType<Dictionary<string, object>>())
+            {
+                if (!TryGetInt(ingredient, "idx", out int index) || index <= 0)
+                {
+                    continue;
+                }
+                remainingCurrent.TryGetValue(index, out int count);
+                remainingCurrent[index] = count + 1;
+            }
+
+            List<P2PFusionIngredientState> before = new List<P2PFusionIngredientState>();
+            foreach (P2PFusionIngredientState ingredient in after)
+            {
+                if (remainingCurrent.TryGetValue(ingredient.Index, out int count) &&
+                    count > 0)
+                {
+                    if (count == 1)
+                    {
+                        remainingCurrent.Remove(ingredient.Index);
+                    }
+                    else
+                    {
+                        remainingCurrent[ingredient.Index] = count - 1;
+                    }
+                    continue;
+                }
+                before.Add(ingredient);
+            }
+
+            if (remainingCurrent.Count > 0)
+            {
+                diagnosticLogger?.Invoke(
+                    $"cumulative fusion state for idx={targetIndex} did not contain " +
+                    $"all current ingredients [{string.Join(",", remainingCurrent.Keys)}]");
+                return;
+            }
+
+            action["beforeIngredients"] = SerializeFusionIngredients(before);
+            action["afterIngredients"] = SerializeFusionIngredients(after);
+        }
+
+        private static List<object> SerializeFusionIngredients(
+            IEnumerable<P2PFusionIngredientState> ingredients)
+        {
+            return ingredients.Select(ingredient =>
+                (object)new Dictionary<string, object>
+                {
+                    ["idx"] = ingredient.Index,
+                    ["cardId"] = ingredient.CardId,
+                    ["turn"] = ingredient.Turn
+                }).ToList();
         }
 
         private void RevealMetamorphoses(

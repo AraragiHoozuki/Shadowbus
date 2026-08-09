@@ -763,6 +763,10 @@ namespace Shadowbus
             // so conditions in this operation see the authoritative counters.
             P2PRuntime.TryApplyPendingHiddenCardStates();
             P2PRuntime.TryApplyPendingPlayerHistoryStates();
+            // ConvertReceiveDataToMakeData may replace a hidden fusion target from
+            // knownList. Restore N-1 only after that replacement and immediately
+            // before the native fusion action evaluates its Nth-fusion conditions.
+            P2PRuntime.ApplyStagedPreNativeFusionActions();
             if (receiveData == null ||
                 !receiveData.IsAcceleratedOrCrystallize)
             {
@@ -780,6 +784,23 @@ namespace Shadowbus
         }
 
         [HarmonyPatch(
+            typeof(NetworkBattleManagerBase),
+            nameof(NetworkBattleManagerBase.ConductReceiveData_NotHaveSequence))]
+        [HarmonyPrefix]
+        private static void
+            NetworkBattleManagerBase_ConductReceiveData_NotHaveSequence_Prefix()
+        {
+            if (!P2PRuntime.IsActive)
+            {
+                return;
+            }
+
+            P2PRuntime.TryApplyPendingHiddenCardStates();
+            P2PRuntime.TryApplyPendingPlayerHistoryStates();
+            P2PRuntime.ApplyStagedPreNativeFusionActions();
+        }
+
+        [HarmonyPatch(
             typeof(NetworkBattleReceiver),
             nameof(NetworkBattleReceiver.ReceivedMessage))]
         [HarmonyPostfix]
@@ -792,7 +813,7 @@ namespace Shadowbus
                 // The payload is a post-action snapshot. It must not become
                 // eligible until the matching native operation was accepted.
                 P2PRuntime.MarkReceivedPlayerHistoryStateReady(data);
-                P2PRuntime.ApplyReceivedFusionAction(data);
+                P2PRuntime.ApplyReceivedFusionAction(data, true);
                 P2PRuntime.FinalizeReceivedHiddenCardRemovals(data);
             }
         }

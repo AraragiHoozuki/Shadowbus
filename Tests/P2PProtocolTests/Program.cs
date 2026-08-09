@@ -1811,7 +1811,16 @@ namespace Shadowbus
                 fusionIndex => fusionIndex == 1 ? 101 :
                     fusionIndex == 3 ? 103 : 0,
                 fusionIndex => fusionIndex == 1 ? 1 :
-                    fusionIndex == 3 ? 5 : -1);
+                    fusionIndex == 3 ? 5 : -1,
+                null,
+                fusionIndex => fusionIndex == 2
+                    ? new[]
+                    {
+                        new P2PFusionIngredientState(9, 109, 1),
+                        new P2PFusionIngredientState(1, 101, 2),
+                        new P2PFusionIngredientState(3, 103, 2)
+                    }
+                    : Enumerable.Empty<P2PFusionIngredientState>());
             List<object> fusionKnown = (List<object>)fusion["knownList"];
             Assert(fusionKnown.Count == 2,
                 "Fusion did not reveal every consumed ingredient.");
@@ -1834,8 +1843,16 @@ namespace Shadowbus
                 (Dictionary<string, object>)fusionActions[0];
             Assert(Convert.ToInt32(fusionAction["owner"]) == 1 &&
                 Convert.ToInt32(fusionAction["targetIdx"]) == 2 &&
-                ((List<object>)fusionAction["ingredients"]).Count == 2,
+                ((List<object>)fusionAction["ingredients"]).Count == 2 &&
+                ((List<object>)fusionAction["beforeIngredients"]).Count == 1 &&
+                ((List<object>)fusionAction["afterIngredients"]).Count == 3,
                 "Fusion metadata lost its absolute owner, target, or ingredients.");
+            Dictionary<string, object> previousFusionIngredient =
+                (Dictionary<string, object>)((List<object>)
+                    fusionAction["beforeIngredients"])[0];
+            Assert(Convert.ToInt32(previousFusionIngredient["idx"]) == 9 &&
+                Convert.ToInt32(previousFusionIngredient["turn"]) == 1,
+                "Fusion metadata did not preserve the pre-action cumulative state.");
 
             Dictionary<string, object> receivedFusion =
                 P2PMessageTransform.PrepareOpponentBattleMessage(fusion);
@@ -1843,8 +1860,55 @@ namespace Shadowbus
                 (Dictionary<string, object>)((List<object>)
                     receivedFusion["p2pFusionActions"])[0];
             Assert(Convert.ToInt32(receivedFusionAction["owner"]) == 1 &&
-                Convert.ToInt32(receivedFusionAction["targetIdx"]) == 2,
+                Convert.ToInt32(receivedFusionAction["targetIdx"]) == 2 &&
+                ((List<object>)receivedFusionAction["beforeIngredients"]).Count == 1 &&
+                ((List<object>)receivedFusionAction["afterIngredients"]).Count == 3,
                 "Fusion metadata ownership was incorrectly perspective-flipped.");
+
+            List<P2PFusionIngredientState> cumulativeFusion =
+                new List<P2PFusionIngredientState>();
+            for (int fusionNumber = 1; fusionNumber <= 3; fusionNumber++)
+            {
+                int ingredientIndex = 10 + fusionNumber;
+                cumulativeFusion.Add(new P2PFusionIngredientState(
+                    ingredientIndex, 100 + ingredientIndex, fusionNumber));
+                Dictionary<string, object> repeatedFusion =
+                    new Dictionary<string, object>
+                    {
+                        ["orderList"] = new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["fusion"] = new Dictionary<string, object>
+                                {
+                                    ["idx"] = new List<object> { 50 },
+                                    ["ingredients"] = new List<object>
+                                    {
+                                        ingredientIndex
+                                    },
+                                    ["isSelf"] = 1
+                                }
+                            }
+                        }
+                    };
+                tracker.PrepareOutgoingAction(
+                    true, repeatedFusion, out _, out _,
+                    index => 100 + index,
+                    index => 1,
+                    null,
+                    index => index == 50
+                        ? cumulativeFusion.ToList()
+                        : Enumerable.Empty<P2PFusionIngredientState>());
+                Dictionary<string, object> repeatedAction =
+                    (Dictionary<string, object>)((List<object>)
+                        repeatedFusion["p2pFusionActions"])[0];
+                Assert(((List<object>)repeatedAction["beforeIngredients"]).Count ==
+                        fusionNumber - 1 &&
+                    ((List<object>)repeatedAction["afterIngredients"]).Count ==
+                        fusionNumber,
+                    $"Fusion #{fusionNumber} did not preserve its N-1/N " +
+                    "cumulative-state boundary.");
+            }
         }
 
         private static void TestBattleStateDiagnostics()
