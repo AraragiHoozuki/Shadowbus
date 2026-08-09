@@ -98,10 +98,13 @@ namespace Shadowbus
         [HarmonyPostfix]
         public static void OperateMgr_TurnEndOperation_Postfix(bool isPlayer)
         {
-            if (!isPlayer)
-            {
-                _watchedAI = null;
-            }
+            // Both sides can now be driven by SoloBattleEnemyAI in custom practice.
+            // A turn-end operation means the currently watched AI has finished regardless
+            // of which side it controls; the next AI turn will register itself again.
+            _watchedAI = null;
+            _idleSeconds = 0f;
+            _lastActionCount = -1;
+            _lastQueueCount = -1;
         }
 
         internal static void Update()

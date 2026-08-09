@@ -2,6 +2,7 @@ using Cute;
 using HarmonyLib;
 using Newtonsoft.Json;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -45,6 +46,7 @@ namespace Shadowbus
     public class AIManager
     {
         private const string CustomPracticeButtonName = "ShadowbusCustomPracticeButton";
+        private static bool _loadingOriginalPracticeDeckAssets;
 
         // Master key prefix of the AI data that Shadowbus registers from local CSV files.
         private const string LocalAIKeyPrefix = "shadowbus/ai/";
@@ -107,26 +109,37 @@ namespace Shadowbus
         internal sealed class CustomPracticeSettings
         {
             public DeckData Deck;
+            public DeckData PlayerDeck;
             public int EnemyClassId;
+            public int PlayerClassId;
             public ClassCharacterMasterData Leader;
             public PracticeAISettingData AIPreset;
+            public PracticeAISettingData PlayerAIPreset;
             public string LocalDeckCsvPath;
             public string LocalStyleCsvPath;
             public string LocalEmoteCsvPath;
             public int LogicLevel;
             public int MaxLife;
+            public bool EnablePlayerAI;
+            public bool PlayerAIUseLocalCsv;
+            public string LocalPlayerDeckCsvPath;
+            public string LocalPlayerStyleCsvPath;
+            public string LocalPlayerEmoteCsvPath;
         }
 
         internal sealed class CustomPracticeDeckChoice
         {
             public DeckData Deck;
             public int EnemyClassId;
+            public bool IsOriginalPracticeDeck;
+            public PracticeAISettingData OriginalAIPreset;
         }
 
         private sealed class CustomPracticeSession
         {
             public string DeckName;
             public List<int> EnemyDeck;
+            public List<int> PlayerDeck;
             public int EnemyClassId;
             public int EnemyCharaId;
             public int Difficulty;
@@ -141,6 +154,12 @@ namespace Shadowbus
             public string EmoteAIKey;
             public int DifficultyDegreeId;
             public int FieldId;
+            public bool PlayerAIEnabled;
+            public bool PlayerAIUseLocalCsv;
+            public int PlayerClassId;
+            public string PlayerDeckAIKey;
+            public string PlayerStyleAIKey;
+            public string PlayerEmoteAIKey;
         }
 
         private static CustomPracticeSession ActiveCustomPracticeSession;
@@ -229,6 +248,39 @@ namespace Shadowbus
 
         private static void ShowDeckSelection(ClassSelectionPage page)
         {
+            if (_loadingOriginalPracticeDeckAssets)
+            {
+                return;
+            }
+
+            try
+            {
+                _loadingOriginalPracticeDeckAssets = true;
+                page.StartCoroutine(ShowDeckSelectionPreloadCoroutine(page));
+            }
+            catch (Exception exception)
+            {
+                _loadingOriginalPracticeDeckAssets = false;
+                Plugin.Logger.LogError($"[AIManager] Failed to start opening the custom deck selector.\n{exception}");
+                ShowMessage("Custom Practice", "Failed to open the practice deck selector. Check the BepInEx log.");
+            }
+        }
+
+        private static IEnumerator ShowDeckSelectionPreloadCoroutine(ClassSelectionPage page)
+        {
+            try
+            {
+                yield return PreloadOriginalPracticeDeckAssets();
+                ShowDeckSelectionAfterPreload(page);
+            }
+            finally
+            {
+                _loadingOriginalPracticeDeckAssets = false;
+            }
+        }
+
+        private static void ShowDeckSelectionAfterPreload(ClassSelectionPage page)
+        {
             try
             {
                 List<CustomPracticeDeckChoice> decks = GetUnlimitedDeckChoices();
@@ -254,6 +306,63 @@ namespace Shadowbus
             }
         }
 
+        private static IEnumerator PreloadOriginalPracticeDeckAssets()
+        {
+            EnsureOriginalPracticeAIMasters();
+
+            List<PracticeAISettingData> settings = Data.Master?.PracticeAISettingList?
+                .GetSettingDataTable()?
+                .Where(setting => setting != null && setting.DeckId >= 9100 && setting.DeckId <= 9899)
+                .ToList() ?? new List<PracticeAISettingData>();
+            if (settings.Count == 0 || Toolbox.ResourcesManager == null)
+            {
+                yield break;
+            }
+
+            List<string> paths = settings
+                .Select(setting => GetAIDeckFileName(setting.DeckId))
+                .Where(fileName => !string.IsNullOrEmpty(fileName))
+                .Distinct()
+                .Select(fileName => Toolbox.ResourcesManager.GetAssetTypePath(
+                    fileName,
+                    ResourcesManager.AssetLoadPathType.Master,
+                    false))
+                .Where(path => !string.IsNullOrEmpty(path))
+                .ToList();
+            if (paths.Count == 0)
+            {
+                yield break;
+            }
+
+            bool completed = false;
+            try
+            {
+                Plugin.Logger.LogInfo(
+                    $"[AIManager] Preloading {paths.Count} original practice AI deck bundle(s) from game resources...");
+                Toolbox.ResourcesManager.StartCoroutine_LoadAssetGroupSync(
+                    paths,
+                    delegate { completed = true; },
+                    false);
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[AIManager] Failed to start original practice AI deck preload: {exception.Message}");
+                yield break;
+            }
+
+            int frames = 0;
+            while (!completed && frames++ < 900)
+            {
+                yield return null;
+            }
+            if (!completed)
+            {
+                Plugin.Logger.LogWarning(
+                    "[AIManager] Timed out while preloading original practice AI deck bundles; continuing with loaded resources.");
+            }
+        }
+
         private static List<CustomPracticeDeckChoice> GetUnlimitedDeckChoices()
         {
             DeckGroup deckGroup = DeckListUtility.DeckGroupDataBase?.FirstOrDefault(group =>
@@ -261,7 +370,7 @@ namespace Shadowbus
                 group.DeckFormat == Format.Unlimited &&
                 group.AttributeType == DeckAttributeType.CustomDeck);
 
-            return deckGroup?.DeckDataList?
+            var choices = deckGroup?.DeckDataList?
                 .Where(deck =>
                     deck != null &&
                     deck.GetCardIdList() != null &&
@@ -271,7 +380,411 @@ namespace Shadowbus
                     Deck = deck,
                     EnemyClassId = ResolveEnemyClassId(deck)
                 })
+                .ToList() ?? new List<CustomPracticeDeckChoice>();
+
+            choices.AddRange(GetOriginalPracticeDeckChoices());
+            return choices;
+        }
+
+        private static List<CustomPracticeDeckChoice> GetOriginalPracticeDeckChoices()
+        {
+            var choices = new List<CustomPracticeDeckChoice>();
+            EnsureOriginalPracticeAIMasters();
+
+            List<PracticeAISettingData> settingTable = Data.Master?.PracticeAISettingList?
+                .GetSettingDataTable();
+            Plugin.Logger.LogInfo(
+                $"[AIManager] Original practice AI settings available: " +
+                $"{settingTable?.Count ?? 0}; deck filename list loaded=" +
+                $"{(Data.Master?.AIDeckFileNameList != null)}.");
+
+            List<PracticeAISettingData> nonNullSettings = settingTable?
+                .Where(setting => setting != null)
+                .ToList() ?? new List<PracticeAISettingData>();
+            int classBoundSettings = nonNullSettings.Count(setting =>
+                setting.ClassId >= 1 && setting.ClassId <= 8);
+            int stockDeckSettings = nonNullSettings.Count(setting =>
+                setting.DeckId >= 9100 && setting.DeckId <= 9899);
+            string settingSample = string.Join(", ", nonNullSettings
+                .Take(8)
+                .Select(setting => $"{setting.ClassId}/{setting.Difficulty}/{setting.DeckId}"));
+            Plugin.Logger.LogInfo(
+                $"[AIManager] Original practice AI setting shape: " +
+                $"classBound={classBoundSettings}, stockDeckIds={stockDeckSettings}, " +
+                $"sample=[{settingSample}].");
+
+            IEnumerable<PracticeAISettingData> settings = nonNullSettings
+                .Where(setting => setting.ClassId >= 1 && setting.ClassId <= 8)
+                .OrderBy(setting => setting.ClassId)
+                .ThenBy(setting => setting.Difficulty)
+                .ThenBy(setting => setting.DeckId)
                 .ToList();
+
+            // A partially initialized/offline master can expose the deck ids before the
+            // class column is available. Stock practice ids still identify the classes.
+            if (!settings.Any() && stockDeckSettings > 0)
+            {
+                settings = nonNullSettings
+                    .Where(setting => setting.DeckId >= 9100 && setting.DeckId <= 9899)
+                    .OrderBy(setting => setting.DeckId)
+                    .ToList();
+                Plugin.Logger.LogWarning(
+                    "[AIManager] Practice settings had no usable class ids; falling back to stock practice deck ids.");
+            }
+
+            int choiceNumber = 0;
+            foreach (PracticeAISettingData setting in settings)
+            {
+                try
+                {
+                    List<int> cardIds = GetOriginalPracticeDeckCardIds(setting);
+                    if (cardIds == null || cardIds.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    int enemyClassId = ResolveOriginalPracticeClassId(setting);
+                    string className = GameMgr.GetIns().GetDataMgr().GetClanNameByKey(enemyClassId);
+                    string fileName = GetAIDeckFileName(setting.DeckId);
+                    var deck = new DeckData(Format.Unlimited, DeckAttributeType.CustomDeck);
+                    deck.SetDeckID(-100000000 - choiceNumber++);
+                    deck.SetDeckName($"原作练习 {className} / 难度 {setting.Difficulty + 1} [{fileName}]");
+                    deck.SetDeckClassID(enemyClassId);
+                    deck.SetDeckSubClassID(10);
+                    deck.SetDeckSleeveID(3000011L);
+                    deck.SetDeckIsComplete(true);
+                    deck.SetCardIdList(cardIds);
+
+                    choices.Add(new CustomPracticeDeckChoice
+                    {
+                        Deck = deck,
+                        EnemyClassId = enemyClassId,
+                        IsOriginalPracticeDeck = true,
+                        OriginalAIPreset = setting
+                    });
+                }
+                catch (Exception exception)
+                {
+                    Plugin.Logger.LogWarning(
+                        $"[AIManager] Failed to expose original practice deck {setting.DeckId}: " +
+                        exception.Message);
+                }
+            }
+
+            Plugin.Logger.LogInfo(
+                $"[AIManager] Added {choices.Count(choice => choice.IsOriginalPracticeDeck)} original practice AI deck choice(s).");
+            return choices;
+        }
+
+        private static int ResolveOriginalPracticeClassId(PracticeAISettingData setting)
+        {
+            if (setting != null && setting.ClassId >= 1 && setting.ClassId <= 8)
+            {
+                return setting.ClassId;
+            }
+
+            // Stock practice ids are 91xx..98xx: the middle digit identifies the
+            // class (elf=1, royal=2, ..., nemesis=8).
+            int classId = setting == null ? 0 : (setting.DeckId / 100) % 10;
+            return classId >= 1 && classId <= 8 ? classId : 1;
+        }
+
+        /// <summary>
+        /// The title master normally loads these tables before the stock practice flow is
+        /// opened.  With the offline title/task path that ordering is not guaranteed, so
+        /// make the custom practice selector self-sufficient.  Loading the small text
+        /// masters here is synchronous and does not contact the server.
+        /// </summary>
+        private static void EnsureOriginalPracticeAIMasters()
+        {
+            if (Data.Master == null)
+            {
+                Plugin.Logger.LogWarning("[AIManager] Master is unavailable; original practice decks cannot be listed.");
+                return;
+            }
+
+            try
+            {
+                List<PracticeAISettingData> settings = Data.Master.PracticeAISettingList?.GetSettingDataTable();
+                if (settings == null || settings.Count == 0)
+                {
+                    string settingsPath = Toolbox.ResourcesManager.GetAssetTypePath(
+                        "ai/practice_ai_setting",
+                        ResourcesManager.AssetLoadPathType.Master,
+                        true);
+                    Data.Master.StartLoadPracticeAISettingData(settingsPath);
+                    Plugin.Logger.LogInfo(
+                        $"[AIManager] Loaded the original practice AI setting master locally: " +
+                        $"{Data.Master.PracticeAISettingList?.GetSettingDataTable()?.Count ?? 0} entries.");
+                }
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[AIManager] Could not load the original practice AI setting master: {exception.Message}");
+            }
+
+            if (Data.Master.AIDeckFileNameList != null)
+            {
+                return;
+            }
+
+            try
+            {
+                string fileListPath = Toolbox.ResourcesManager.GetAssetTypePath(
+                    "ai/ai_deck_filelist",
+                    ResourcesManager.AssetLoadPathType.Master,
+                    true);
+                TextAsset fileListAsset = Toolbox.ResourcesManager.LoadObject(fileListPath, true, false) as TextAsset;
+                if (fileListAsset == null)
+                {
+                    throw new InvalidDataException("ai/ai_deck_filelist TextAsset is unavailable.");
+                }
+
+                Data.Master.AIDeckFileNameList = new AIDeckFileNameList(
+                    Utility.ConvertCSV_Array(fileListAsset.ToString(), true));
+                Plugin.Logger.LogInfo("[AIManager] Loaded the original AI deck filename list locally.");
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[AIManager] Could not load the original AI deck filename list: {exception.Message}");
+            }
+        }
+
+        private static List<int> GetOriginalPracticeDeckCardIds(PracticeAISettingData setting)
+        {
+            if (setting == null)
+            {
+                return new List<int>();
+            }
+
+            EnsureOriginalPracticeAIMasters();
+            string fileName = GetAIDeckFileName(setting.DeckId);
+            if (string.IsNullOrEmpty(fileName))
+            {
+                Plugin.Logger.LogWarning(
+                    $"[AIManager] No original AI deck filename is mapped for deck id {setting.DeckId}.");
+                return new List<int>();
+            }
+
+            string key = "ai/" + fileName;
+            DataMgr dataMgr = GameMgr.GetIns().GetDataMgr();
+            if (setting.Difficulty <= 2 || setting.DeckId == 9100)
+            {
+                Plugin.Logger.LogInfo(
+                    $"[AIManager] Resolving original practice deck: class={setting.ClassId}, " +
+                    $"difficulty={setting.Difficulty}, deckId={setting.DeckId}, file='{fileName}', key='{key}'.");
+            }
+
+            // Prefer the game's normal loader.  If conversion is unavailable because the
+            // title's LoadDetail has not finished yet, the raw CSV fallback below still
+            // exposes the real card IDs to the selector and the battle loader can register
+            // the same data later.
+            try
+            {
+                Data.Master.StartLoadAIDeckData(setting.DeckId);
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogInfo(
+                    $"[AIManager] Normal loader failed for original deck {setting.DeckId}: {exception.Message}");
+                Plugin.Logger.LogDebug(
+                    $"[AIManager] StartLoadAIDeckData failed for deck {setting.DeckId}: {exception.Message}");
+                TryLoadOriginalAIDeckAssetFromCsv(key);
+            }
+
+            AICardDataAssetSet assetSet = null;
+            if (Data.Master.AIDeckDic == null ||
+                !Data.Master.AIDeckDic.TryGetValue(key, out assetSet) ||
+                assetSet?.Set == null || assetSet.Set.Count == 0)
+            {
+                TryLoadOriginalAIDeckAssetFromCsv(key);
+                Data.Master.AIDeckDic?.TryGetValue(key, out assetSet);
+            }
+
+            if ((setting.Difficulty <= 2 || setting.DeckId == 9100) && assetSet != null)
+            {
+                Plugin.Logger.LogInfo(
+                    $"[AIManager] Original deck asset '{key}' contains " +
+                    $"{assetSet.Set?.Count ?? 0} asset row(s), expanded cards={ExpandAIDeckCardIds(assetSet).Count}.");
+            }
+
+            List<int> directCardIds = ExpandAIDeckCardIds(assetSet);
+            if (directCardIds.Count > 0)
+            {
+                return directCardIds;
+            }
+
+            try
+            {
+                dataMgr.RegisterAIDeckData();
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogDebug(
+                    $"[AIManager] RegisterAIDeckData failed while reading '{key}': {exception.Message}");
+            }
+
+            List<int> cardIds = null;
+            try
+            {
+                cardIds = AIDataLibrary.GetAIDeckCardList(key);
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogDebug(
+                    $"[AIManager] GetAIDeckCardList failed while reading '{key}': {exception.Message}");
+            }
+            if (cardIds != null && cardIds.Count > 0)
+            {
+                return cardIds.ToList();
+            }
+
+            Plugin.Logger.LogWarning(
+                $"[AIManager] Original practice deck {setting.DeckId} produced no cards " +
+                $"(class={setting.ClassId}, difficulty={setting.Difficulty}, file='{fileName}', key='{key}', " +
+                $"assetRows={assetSet?.Set?.Count ?? 0}).");
+
+            return new List<int>();
+        }
+
+        private static List<int> ExpandAIDeckCardIds(AICardDataAssetSet assetSet)
+        {
+            return (assetSet?.Set ?? new List<AICardDataAsset>())
+                .Where(asset => asset != null && asset.CardID > 0 && asset.CardNum > 0)
+                .SelectMany(asset => Enumerable.Repeat(asset.CardID, asset.CardNum))
+                .ToList();
+        }
+
+        private static bool TryLoadOriginalAIDeckAssetFromCsv(string key)
+        {
+            if (Data.Master == null || string.IsNullOrEmpty(key))
+            {
+                return false;
+            }
+
+            Data.Master.AIDeckDic ??= new Dictionary<string, AICardDataAssetSet>();
+            if (Data.Master.AIDeckDic.TryGetValue(key, out AICardDataAssetSet existing) &&
+                ExpandAIDeckCardIds(existing).Count > 0)
+            {
+                return true;
+            }
+
+            try
+            {
+                string assetPath = Toolbox.ResourcesManager.GetAssetTypePath(
+                    key,
+                    ResourcesManager.AssetLoadPathType.Master,
+                    true);
+                TextAsset textAsset = Toolbox.ResourcesManager.LoadObject(assetPath, true, false) as TextAsset;
+                if (textAsset == null)
+                {
+                    Plugin.Logger.LogWarning(
+                        $"[AIManager] Original AI deck resource was not found: key='{key}', path='{assetPath}'.");
+                    return false;
+                }
+
+                var assetSet = new AICardDataAssetSet();
+                List<string[]> rows = Utility.ConvertCSV_Array(textAsset.ToString(), true);
+                foreach (string[] columns in rows)
+                {
+                    try
+                    {
+                        var asset = new AICardDataAsset(columns);
+                        if (asset.CardID > 0 && asset.CardNum > 0)
+                        {
+                            assetSet.Set.Add(asset);
+                        }
+                    }
+                    catch (Exception rowException)
+                    {
+                        Plugin.Logger.LogDebug(
+                            $"[AIManager] Ignored malformed row in original AI deck '{key}': " +
+                            rowException.Message);
+                    }
+                }
+
+                if (assetSet.Set.Count == 0)
+                {
+                    Plugin.Logger.LogWarning(
+                        $"[AIManager] Original AI deck resource '{key}' parsed with no usable rows " +
+                        $"(rows={rows?.Count ?? 0}).");
+                    return false;
+                }
+
+                Data.Master.AIDeckDic[key] = assetSet;
+                Plugin.Logger.LogInfo(
+                    $"[AIManager] Loaded original AI deck '{key}' from its CSV fallback: " +
+                    $"{ExpandAIDeckCardIds(assetSet).Count} card(s).");
+                return true;
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[AIManager] Could not read original AI deck '{key}' directly: {exception.Message}");
+                return false;
+            }
+        }
+
+        private static string GetAIDeckFileName(int deckId)
+        {
+            try
+            {
+                string fileName = Data.Master?.AIDeckFileNameList?.GetFileName(deckId);
+                if (!string.IsNullOrEmpty(fileName))
+                {
+                    return fileName;
+                }
+            }
+            catch
+            {
+            }
+
+            // The filename master is occasionally not available during the offline title
+            // bootstrap. Reconstruct the deterministic stock practice name so the bundled
+            // CSV can still be loaded.
+            return GetKnownPracticeAIDeckFileName(deckId);
+        }
+
+        private static string GetKnownPracticeAIDeckFileName(int deckId)
+        {
+            if (deckId < 9100 || deckId > 9899)
+            {
+                return string.Empty;
+            }
+
+            int classId = (deckId / 100) % 10;
+            string[] classNames =
+            {
+                string.Empty, "elf", "royal", "witch", "dragon", "necromancer", "vampire", "bishop", "nemesis"
+            };
+            if (classId < 1 || classId >= classNames.Length)
+            {
+                return string.Empty;
+            }
+
+            string className = classNames[classId];
+            int variant = deckId % 100;
+            if (variant == 0 || variant == 2 || variant == 3 || variant == 4)
+            {
+                int level = variant == 0 ? 1 : variant == 2 ? 3 : variant == 3 ? 4 : 5;
+                return $"ai_deck_{className}_lv{level}";
+            }
+            if (variant == 5)
+            {
+                return $"ai_deck_{className}_lv4_ver2";
+            }
+            if (variant == 6)
+            {
+                return $"ai_deck_{className}_lv5_ver2";
+            }
+            if (variant == 7)
+            {
+                return $"ai_deck_{className}_lv5_ver3";
+            }
+
+            return $"ai_deck_{className}_temp_ver{variant - 7}";
         }
 
         private static int ResolveEnemyClassId(DeckData deck)
@@ -315,6 +828,7 @@ namespace Shadowbus
         {
             try
             {
+                PracticeDualAI.ClearConfiguration();
                 int classId = settings.EnemyClassId;
                 List<int> deckCardIds = settings.Deck.GetCardIdList().ToList();
                 PracticeData practiceData = GetPracticeData(classId);
@@ -324,13 +838,51 @@ namespace Shadowbus
                 UIManager.GetInstance().createInSceneCenterLoading(false, false, true, null);
                 DataMgr dataMgr = GameMgr.GetIns().GetDataMgr();
                 dataMgr.Load();
+                List<int> playerDeckCardIds = settings.PlayerDeck?.GetCardIdList()?.ToList();
+                if (playerDeckCardIds == null || playerDeckCardIds.Count == 0)
+                {
+                    playerDeckCardIds = dataMgr.GetCurrentDeckData()?.ToList() ?? new List<int>();
+                }
+                if (playerDeckCardIds.Count > 0)
+                {
+                    dataMgr.SetCurrentDeckData(playerDeckCardIds);
+                }
                 dataMgr.SetEnemyCharaId(settings.Leader.chara_id);
 
-                Data.Master.LoadAICsv(
+                int playerClassId = settings.PlayerClassId >= 1 && settings.PlayerClassId <= 8
+                    ? settings.PlayerClassId
+                    : dataMgr.GetPlayerClassId();
+                if (playerClassId != dataMgr.GetPlayerClassId())
+                {
+                    // A selectable original practice deck belongs to its own class. Align
+                    // the battle-side leader/class with that deck just like the normal deck
+                    // selector does, otherwise card clan parameters and the AI script use
+                    // the profile's old class while the selected deck contains another one.
+                    dataMgr.SetPlayerCharaIdByClassId(playerClassId, true);
+                }
+                PracticeAISettingData playerPreset = settings.PlayerAIPreset ??
+                    GetPracticeAIPreset(playerClassId, settings.AIPreset.Difficulty);
+                PracticeAISettingData builtinPlayerPreset = playerPreset ?? settings.AIPreset;
+                var aiLoadingInfos = new List<AICsvLoadingInfo>
+                {
                     new AICsvLoadingInfo(
                         settings.AIPreset.DeckId,
                         settings.AIPreset.StyleId,
-                        settings.AIPreset.EmoteId),
+                        settings.AIPreset.EmoteId)
+                };
+                if (settings.EnablePlayerAI && playerPreset != null &&
+                    (playerPreset.DeckId != settings.AIPreset.DeckId ||
+                     playerPreset.StyleId != settings.AIPreset.StyleId ||
+                     playerPreset.EmoteId != settings.AIPreset.EmoteId))
+                {
+                    aiLoadingInfos.Add(new AICsvLoadingInfo(
+                        playerPreset.DeckId,
+                        playerPreset.StyleId,
+                        playerPreset.EmoteId));
+                }
+
+                Data.Master.LoadAICsvList(
+                    aiLoadingInfos,
                     delegate
                     {
                         try
@@ -341,6 +893,25 @@ namespace Shadowbus
                                 "ai/" + Data.Master.AIStyleFileNameList.GetFileName(settings.AIPreset.StyleId);
                             string emoteAIKey = RegisterLocalEmoteCsv(settings.LocalEmoteCsvPath, leaderVoiceId, settings.Leader) ??
                                 "ai/" + Data.Master.AIEmoteFileNameList.GetFileName(settings.AIPreset.EmoteId);
+
+                            ClassCharacterMasterData playerLeader = dataMgr.GetCharaPrmByClassId(playerClassId, true);
+                            string playerLeaderVoiceId = ResolveLeaderVoiceId(playerLeader);
+                            string playerDeckAIKey = settings.EnablePlayerAI
+                                ? RegisterLocalDeckCsv(settings.LocalPlayerDeckCsvPath) ??
+                                  "ai/" + Data.Master.AIDeckFileNameList.GetFileName(builtinPlayerPreset.DeckId)
+                                : "ai/" + Data.Master.AIDeckFileNameList.GetFileName(builtinPlayerPreset.DeckId);
+                            string playerStyleAIKey = settings.EnablePlayerAI
+                                ? RegisterLocalStyleCsv(settings.LocalPlayerStyleCsvPath) ??
+                                  "ai/" + Data.Master.AIStyleFileNameList.GetFileName(builtinPlayerPreset.StyleId)
+                                : "ai/" + Data.Master.AIStyleFileNameList.GetFileName(builtinPlayerPreset.StyleId);
+                            string playerEmoteAIKey = settings.EnablePlayerAI
+                                ? RegisterLocalEmoteCsvForLeader(
+                                      settings.LocalPlayerEmoteCsvPath,
+                                      playerLeaderVoiceId,
+                                      playerLeader,
+                                      "player") ??
+                                  "ai/" + Data.Master.AIEmoteFileNameList.GetFileName(builtinPlayerPreset.EmoteId)
+                                : "ai/" + Data.Master.AIEmoteFileNameList.GetFileName(builtinPlayerPreset.EmoteId);
 
                             dataMgr.RegisterAllAIData();
                             dataMgr.SetEnemyAIDeckFromCustomDeck(
@@ -367,10 +938,18 @@ namespace Shadowbus
                             dataMgr.PracticeDifficultyDegreeId = practiceData?.DegreeId ?? 0;
                             dataMgr.SetSoroPlay3DFieldID(fieldId);
                             dataMgr.Practice3DfieldId = fieldId;
+                            PracticeDualAI.Configure(
+                                settings.EnablePlayerAI,
+                                playerClassId,
+                                GetLogicLevel(settings.LogicLevel),
+                                playerDeckAIKey,
+                                playerStyleAIKey,
+                                playerEmoteAIKey);
                             ActiveCustomPracticeSession = new CustomPracticeSession
                             {
                                 DeckName = settings.Deck.GetDeckName(),
                                 EnemyDeck = deckCardIds.ToList(),
+                                PlayerDeck = playerDeckCardIds.ToList(),
                                 EnemyClassId = classId,
                                 EnemyCharaId = settings.Leader.chara_id,
                                 Difficulty = -1,
@@ -384,7 +963,16 @@ namespace Shadowbus
                                 StyleAIKey = styleAIKey,
                                 EmoteAIKey = emoteAIKey,
                                 DifficultyDegreeId = dataMgr.PracticeDifficultyDegreeId,
-                                FieldId = fieldId
+                                FieldId = fieldId,
+                                PlayerAIEnabled = settings.EnablePlayerAI,
+                                PlayerAIUseLocalCsv = settings.PlayerAIUseLocalCsv ||
+                                                       !string.IsNullOrEmpty(settings.LocalPlayerDeckCsvPath) ||
+                                                       !string.IsNullOrEmpty(settings.LocalPlayerStyleCsvPath) ||
+                                                       !string.IsNullOrEmpty(settings.LocalPlayerEmoteCsvPath),
+                                PlayerClassId = playerClassId,
+                                PlayerDeckAIKey = playerDeckAIKey,
+                                PlayerStyleAIKey = playerStyleAIKey,
+                                PlayerEmoteAIKey = playerEmoteAIKey
                             };
                             UIManager.GetInstance().closeInSceneCenterLoading(true, false);
 
@@ -393,7 +981,10 @@ namespace Shadowbus
                                 $"class={classId}, leader={settings.Leader.chara_id}, skin={settings.Leader.skin_id}, " +
                                 $"leaderVoiceId='{leaderVoiceId}', logic={settings.LogicLevel}, " +
                                 $"maxLife={settings.MaxLife}, deckAI='{deckAIKey}', styleAI='{styleAIKey}', " +
-                                $"emoteAI='{emoteAIKey}'.");
+                                $"emoteAI='{emoteAIKey}', playerAI={settings.EnablePlayerAI}, " +
+                                $"playerCsvSource={(settings.PlayerAIUseLocalCsv ? "local" : "builtin")}, " +
+                                $"playerDeckAI='{playerDeckAIKey}', playerStyleAI='{playerStyleAIKey}', " +
+                                $"playerEmoteAI='{playerEmoteAIKey}', playerPresetClass={builtinPlayerPreset.ClassId}.");
 
                             PracticeStartTask practiceStartTask = new PracticeStartTask();
                             page.StartCoroutine(Toolbox.NetworkManager.Connect(
@@ -447,6 +1038,15 @@ namespace Shadowbus
                 // Rebuild the runtime library because battle teardown may have replaced
                 // its buffered setup. The local CSV assets remain registered in Master.
                 dataMgr.RegisterAllAIData();
+                if (session.PlayerDeck != null && session.PlayerDeck.Count > 0)
+                {
+                    dataMgr.SetCurrentDeckData(session.PlayerDeck.ToList());
+                }
+                if (session.PlayerClassId >= 1 && session.PlayerClassId <= 8 &&
+                    session.PlayerClassId != dataMgr.GetPlayerClassId())
+                {
+                    dataMgr.SetPlayerCharaIdByClassId(session.PlayerClassId, true);
+                }
                 dataMgr.SetEnemyCharaId(session.EnemyCharaId);
                 dataMgr.SetEnemyAIDeckFromCustomDeck(
                     session.EnemyClassId,
@@ -472,13 +1072,23 @@ namespace Shadowbus
                 dataMgr.SetSoroPlay3DFieldID(session.FieldId);
                 dataMgr.Practice3DfieldId = session.FieldId;
                 dataMgr.LoadEnemyClassData();
+                PracticeDualAI.Configure(
+                    session.PlayerAIEnabled,
+                    session.PlayerClassId,
+                    GetLogicLevel(session.LogicLevel),
+                    session.PlayerDeckAIKey,
+                    session.PlayerStyleAIKey,
+                    session.PlayerEmoteAIKey);
 
                 Plugin.Logger.LogInfo(
                     $"[AIManager] Restored custom practice for retry: " +
                     $"deck='{session.DeckName}', class={session.EnemyClassId}, " +
                     $"leader={session.EnemyCharaId}, logic={session.LogicLevel}, " +
                     $"maxLife={session.MaxLife}, deckAI='{session.DeckAIKey}', " +
-                    $"styleAI='{session.StyleAIKey}', emoteAI='{session.EmoteAIKey}'.");
+                    $"styleAI='{session.StyleAIKey}', emoteAI='{session.EmoteAIKey}', " +
+                    $"playerAI={session.PlayerAIEnabled}, playerCsvSource={(session.PlayerAIUseLocalCsv ? "local" : "builtin")}, " +
+                    $"playerDeckAI='{session.PlayerDeckAIKey}', playerStyleAI='{session.PlayerStyleAIKey}', " +
+                    $"playerEmoteAI='{session.PlayerEmoteAIKey}'.");
                 return true;
             }
             catch (Exception exception)
@@ -494,6 +1104,17 @@ namespace Shadowbus
             List<PracticeData> practiceData = Data.PracticeDataMgr.GetClassDataList(classId);
             return practiceData?.FirstOrDefault(data => !data.IsMaintenance)
                    ?? practiceData?.FirstOrDefault();
+        }
+
+        private static PracticeAISettingData GetPracticeAIPreset(int classId, int difficulty)
+        {
+            List<PracticeAISettingData> settings = Data.Master.PracticeAISettingList?
+                .GetSettingDataTable()?
+                .Where(setting => setting.ClassId == classId)
+                .OrderBy(setting => Math.Abs(setting.Difficulty - difficulty))
+                .ThenBy(setting => setting.Difficulty)
+                .ToList();
+            return settings?.FirstOrDefault();
         }
 
         private static AI_LOGIC_LV GetLogicLevel(int logicLevel)
@@ -538,12 +1159,22 @@ namespace Shadowbus
 
         internal static string RegisterLocalEmoteCsv(string path, string leaderVoiceId, ClassCharacterMasterData leader)
         {
+            return RegisterLocalEmoteCsvForLeader(path, leaderVoiceId, leader, null);
+        }
+
+        internal static string RegisterLocalEmoteCsvForLeader(
+            string path,
+            string leaderVoiceId,
+            ClassCharacterMasterData leader,
+            string variant)
+        {
             if (string.IsNullOrEmpty(path))
             {
                 return null;
             }
 
-            string key = GetLocalAIKey("emote", path);
+            string key = GetLocalAIKey("emote", path) +
+                         (string.IsNullOrEmpty(variant) ? string.Empty : "/" + variant);
             string fileName = Path.GetFileName(path);
             List<string[]> csv = ReadCsv(path);
             ApplyLeaderVoiceId(csv, leaderVoiceId, fileName);

@@ -30,21 +30,31 @@ namespace Shadowbus
         private DialogBase _dialog;
         private ClassSelectionPage _page;
         private List<AIManager.CustomPracticeDeckChoice> _decks;
+        private List<AIManager.CustomPracticeDeckChoice> _playerDecks;
         private int _deckIndex;
+        private int _playerDeckIndex;
         private int _classId;
+        private int _playerClassId;
         private List<ClassCharacterMasterData> _leaders;
         private int _leaderIndex;
         private int _leaderPageIndex;
         private List<AIPresetChoice> _presets;
+        private List<AIPresetChoice> _playerPresets;
         private int _presetIndex;
+        private int _playerPresetIndex;
         private List<CsvChoice> _deckCsvChoices;
         private List<CsvChoice> _styleCsvChoices;
         private List<CsvChoice> _emoteCsvChoices;
         private int _deckCsvIndex;
         private int _styleCsvIndex;
         private int _emoteCsvIndex;
+        private int _playerDeckCsvIndex;
+        private int _playerStyleCsvIndex;
+        private int _playerEmoteCsvIndex;
         private int _logicLevel;
         private int _maxLife;
+        private bool _enablePlayerAI;
+        private bool _playerAIUseLocalCsv;
         private bool _isStarting;
         private bool _updatingLifeSlider;
         private bool _isDestroyed;
@@ -59,10 +69,16 @@ namespace Shadowbus
         private UIButton _leaderPreviousButton;
         private UIButton _leaderNextButton;
         private UIButton _deckButton;
+        private UIButton _playerDeckButton;
         private UIButton _presetButton;
+        private UIButton _playerPresetButton;
         private UIButton _deckCsvButton;
         private UIButton _styleCsvButton;
         private UIButton _emoteCsvButton;
+        private UIButton _playerDeckCsvButton;
+        private UIButton _playerStyleCsvButton;
+        private UIButton _playerEmoteCsvButton;
+        private UIButton _playerAIButton;
         private readonly List<UIButton> _classButtons = new List<UIButton>();
         private readonly List<UIButton> _logicButtons = new List<UIButton>();
         private readonly List<SelectRandomSkinButton> _leaderButtons = new List<SelectRandomSkinButton>();
@@ -78,13 +94,17 @@ namespace Shadowbus
             _dialog = dialog;
             _page = page;
             _decks = decks;
+            _playerDecks = BuildPlayerDeckChoices(decks);
             _logicLevel = 2;
             _maxLife = 20;
+            _enablePlayerAI = false;
+            _playerAIUseLocalCsv = false;
 
             try
             {
                 RefreshCsvChoices();
                 SelectDeck(0, false);
+                SelectPlayerDeck(0, false);
                 BuildNativeUi();
                 RefreshAllControls();
                 BeginRebuildLeaderButtons();
@@ -94,6 +114,42 @@ namespace Shadowbus
                 _dialog.CloseSoon();
                 throw;
             }
+        }
+
+        private static List<AIManager.CustomPracticeDeckChoice> BuildPlayerDeckChoices(
+            List<AIManager.CustomPracticeDeckChoice> availableDecks)
+        {
+            var choices = new List<AIManager.CustomPracticeDeckChoice>();
+            try
+            {
+                DataMgr dataMgr = GameMgr.GetIns().GetDataMgr();
+                List<int> currentCardIds = dataMgr.GetCurrentDeckData()?.ToList();
+                if (currentCardIds != null && currentCardIds.Count > 0)
+                {
+                    int classId = dataMgr.GetPlayerClassId();
+                    var currentDeck = new DeckData(Format.Unlimited, DeckAttributeType.CustomDeck);
+                    currentDeck.SetDeckID(-200000000);
+                    currentDeck.SetDeckName("当前玩家卡组");
+                    currentDeck.SetDeckClassID(classId);
+                    currentDeck.SetDeckSubClassID(10);
+                    currentDeck.SetDeckSleeveID(3000011L);
+                    currentDeck.SetDeckIsComplete(true);
+                    currentDeck.SetCardIdList(currentCardIds);
+                    choices.Add(new AIManager.CustomPracticeDeckChoice
+                    {
+                        Deck = currentDeck,
+                        EnemyClassId = classId
+                    });
+                }
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[AIManager] Failed to prepare the current player deck choice: {exception.Message}");
+            }
+
+            choices.AddRange(availableDecks ?? new List<AIManager.CustomPracticeDeckChoice>());
+            return choices;
         }
 
         private void BuildNativeUi()
@@ -108,6 +164,10 @@ namespace Shadowbus
 
             _contentRoot = new GameObject("CustomPracticeNativeContent");
             _contentRoot.layer = _dialog.gameObject.layer;
+            // The native XL dialog leaves less vertical room at lower resolutions than the
+            // original game UI. Keep the whole custom page inside the dialog while retaining
+            // readable text and hit targets.
+            _contentRoot.transform.localScale = new Vector3(0.80f, 0.80f, 1f);
 
             _settingTemplate = UIManager.GetInstance().OptionSettingPrefab;
             if (_settingTemplate == null)
@@ -128,7 +188,7 @@ namespace Shadowbus
             }
 
             CreateSectionHeader("对手设置", new Vector3(-500f, 190f, 0f));
-            CreateSectionHeader("AI 数据", new Vector3(20f, 190f, 0f));
+            CreateSectionHeader("对手 AI 数据", new Vector3(20f, 190f, 0f));
 
             CreateLabel("卡组", new Vector3(-470f, 142f, 0f), 90, 34, 18, NGUIText.Alignment.Left);
             _deckButton = CreateNativeButton(
@@ -146,29 +206,54 @@ namespace Shadowbus
                 38,
                 OpenPresetDialog);
 
-            CreateLabel("Deck CSV", new Vector3(30f, 92f, 0f), 130, 34, 18, NGUIText.Alignment.Left);
+            CreateLabel("Deck CSV", new Vector3(30f, 96f, 0f), 130, 32, 17, NGUIText.Alignment.Left);
             _deckCsvButton = CreateNativeButton(
                 string.Empty,
-                new Vector3(330f, 92f, 0f),
+                new Vector3(330f, 96f, 0f),
                 350,
                 38,
                 () => OpenCsvDialog("选择 Deck CSV", _deckCsvChoices, _deckCsvIndex, index => _deckCsvIndex = index));
 
-            CreateLabel("Style CSV", new Vector3(30f, 42f, 0f), 130, 34, 18, NGUIText.Alignment.Left);
+            CreateLabel("Style CSV", new Vector3(30f, 52f, 0f), 130, 32, 17, NGUIText.Alignment.Left);
             _styleCsvButton = CreateNativeButton(
                 string.Empty,
-                new Vector3(330f, 42f, 0f),
+                new Vector3(330f, 52f, 0f),
                 350,
                 38,
                 () => OpenCsvDialog("选择 Style CSV", _styleCsvChoices, _styleCsvIndex, index => _styleCsvIndex = index));
 
-            CreateLabel("Emote CSV", new Vector3(30f, -8f, 0f), 130, 34, 18, NGUIText.Alignment.Left);
+            CreateLabel("Emote CSV", new Vector3(30f, 8f, 0f), 130, 32, 17, NGUIText.Alignment.Left);
             _emoteCsvButton = CreateNativeButton(
                 string.Empty,
-                new Vector3(330f, -8f, 0f),
+                new Vector3(330f, 8f, 0f),
                 350,
                 38,
                 () => OpenCsvDialog("选择 Emote CSV", _emoteCsvChoices, _emoteCsvIndex, index => _emoteCsvIndex = index));
+
+            CreateLabel("我方 AI 数据", new Vector3(30f, -34f, 0f), 220, 30, 17, NGUIText.Alignment.Left);
+            CreateLabel("Deck CSV", new Vector3(30f, -68f, 0f), 130, 30, 16, NGUIText.Alignment.Left);
+            _playerDeckCsvButton = CreateNativeButton(
+                string.Empty,
+                new Vector3(330f, -68f, 0f),
+                350,
+                36,
+                () => OpenCsvDialog("选择我方 Deck CSV", _deckCsvChoices, _playerDeckCsvIndex, index => _playerDeckCsvIndex = index));
+
+            CreateLabel("Style CSV", new Vector3(30f, -108f, 0f), 130, 30, 16, NGUIText.Alignment.Left);
+            _playerStyleCsvButton = CreateNativeButton(
+                string.Empty,
+                new Vector3(330f, -108f, 0f),
+                350,
+                36,
+                () => OpenCsvDialog("选择我方 Style CSV", _styleCsvChoices, _playerStyleCsvIndex, index => _playerStyleCsvIndex = index));
+
+            CreateLabel("Emote CSV", new Vector3(30f, -148f, 0f), 130, 30, 16, NGUIText.Alignment.Left);
+            _playerEmoteCsvButton = CreateNativeButton(
+                string.Empty,
+                new Vector3(330f, -148f, 0f),
+                350,
+                36,
+                () => OpenCsvDialog("选择我方 Emote CSV", _emoteCsvChoices, _playerEmoteCsvIndex, index => _playerEmoteCsvIndex = index));
 
             CreateLabel("职业", new Vector3(-470f, 102f, 0f), 120, 32, 19, NGUIText.Alignment.Left);
             CreateClassButtons();
@@ -176,31 +261,56 @@ namespace Shadowbus
             CreateLabel("AI 逻辑", new Vector3(-470f, -4f, 0f), 120, 32, 19, NGUIText.Alignment.Left);
             CreateLogicButtons();
 
+            CreateLabel("我方卡组", new Vector3(-470f, -68f, 0f), 120, 30, 17, NGUIText.Alignment.Left);
+            _playerDeckButton = CreateNativeButton(
+                string.Empty,
+                new Vector3(-210f, -68f, 0f),
+                320,
+                36,
+                OpenPlayerDeckDialog);
+
+            CreateLabel("我方原作预设", new Vector3(-470f, -106f, 0f), 150, 30, 17, NGUIText.Alignment.Left);
+            _playerPresetButton = CreateNativeButton(
+                string.Empty,
+                new Vector3(-210f, -106f, 0f),
+                320,
+                36,
+                OpenPlayerPresetDialog);
+
+            CreateLabel("我方 AI", new Vector3(-470f, -144f, 0f), 120, 30, 17, NGUIText.Alignment.Left);
+            _playerAIButton = CreateNativeButton(
+                string.Empty,
+                new Vector3(-210f, -144f, 0f),
+                320,
+                36,
+                TogglePlayerAI);
+
             _lifeSlider = NGUITools.AddChild(_contentRoot, _settingTemplate.m_itemSlider).GetComponent<ItemSlider>();
             _lifeSlider.name = "MaxLifeSlider";
-            _lifeSlider.transform.localPosition = new Vector3(-270f, -82f, 0f);
+            _lifeSlider.transform.localPosition = new Vector3(-270f, -184f, 0f);
             _lifeSlider.transform.localScale = new Vector3(ColumnScale, ColumnScale, 1f);
             _lifeSlider.SetTitleLabel("生命上限");
             _lifeSlider.SetActive_SeparatorLine(false);
             _lifeSlider.m_slider.numberOfSteps = 100;
             _lifeSlider.AddChangeCallback(OnLifeSliderChanged);
 
-            CreateNativeButton("刷新 CSV", new Vector3(390f, -66f, 0f), 150, 38, RefreshCsvChoicesAndControls);
+            CreateNativeButton("刷新 CSV", new Vector3(390f, -188f, 0f), 150, 36, RefreshCsvChoicesAndControls);
 
-            CreateSectionHeader("主战者", new Vector3(-500f, -116f, 0f), 1000);
+            CreateSectionHeader("主战者", new Vector3(-500f, -218f, 0f), 1000);
             _leaderStripRoot = new GameObject("LeaderStrip");
             _leaderStripRoot.transform.parent = _contentRoot.transform;
-            _leaderStripRoot.transform.localPosition = new Vector3(0f, -164f, 0f);
+            _leaderStripRoot.transform.localPosition = new Vector3(0f, -254f, 0f);
             _leaderStripRoot.transform.localScale = Vector3.one;
             _leaderStripRoot.layer = _contentRoot.layer;
 
             CreateLeaderPageButtons();
-            _leaderNameLabel = CreateLabel(string.Empty, new Vector3(0f, -211f, 0f), 520, 28, 16, NGUIText.Alignment.Center);
-            _leaderPageLabel = CreateLabel(string.Empty, new Vector3(445f, -116f, 0f), 100, 28, 15, NGUIText.Alignment.Right);
-            _validationLabel = CreateLabel(string.Empty, new Vector3(0f, -211f, 0f), 900, 28, 15, NGUIText.Alignment.Center);
+            _leaderNameLabel = CreateLabel(string.Empty, new Vector3(0f, -296f, 0f), 520, 26, 15, NGUIText.Alignment.Center);
+            _leaderPageLabel = CreateLabel(string.Empty, new Vector3(445f, -218f, 0f), 100, 26, 14, NGUIText.Alignment.Right);
+            _validationLabel = CreateLabel(string.Empty, new Vector3(0f, -296f, 0f), 900, 26, 14, NGUIText.Alignment.Center);
             _validationLabel.color = new Color(1f, 0.72f, 0.72f, 1f);
 
             _dialog.SetObj(_contentRoot, Vector3.zero);
+            _contentRoot.transform.localScale = new Vector3(0.80f, 0.80f, 1f);
         }
 
         private void CreateSectionHeader(string text, Vector3 position, int width = 470)
@@ -348,12 +458,12 @@ namespace Shadowbus
         {
             _leaderPreviousButton = CloneLeaderPageButton(
                 _skinDialogTemplate._btnNextPage,
-                new Vector3(-485f, -164f, 0f),
+                new Vector3(-485f, -254f, 0f),
                 true,
                 ShowPreviousLeaderPage);
             _leaderNextButton = CloneLeaderPageButton(
                 _skinDialogTemplate._btnNextPage,
-                new Vector3(485f, -164f, 0f),
+                new Vector3(485f, -254f, 0f),
                 false,
                 ShowNextLeaderPage);
         }
@@ -382,8 +492,48 @@ namespace Shadowbus
         private void SelectDeck(int index, bool refreshControls = true)
         {
             _deckIndex = Mathf.Clamp(index, 0, _decks.Count - 1);
-            SelectClass(_decks[_deckIndex].EnemyClassId, refreshControls);
+            AIManager.CustomPracticeDeckChoice choice = _decks[_deckIndex];
+            SelectClass(choice.EnemyClassId, refreshControls);
+            if (choice.OriginalAIPreset != null)
+            {
+                int presetIndex = FindPresetIndex(_presets, choice.OriginalAIPreset);
+                if (presetIndex >= 0)
+                {
+                    _presetIndex = presetIndex;
+                    ApplyPresetDefaults(_presets[presetIndex].Setting);
+                }
+            }
             UpdateDeckButton();
+        }
+
+        private void SelectPlayerDeck(int index, bool refreshControls = true)
+        {
+            if (_playerDecks == null || _playerDecks.Count == 0)
+            {
+                _playerClassId = Mathf.Clamp(GameMgr.GetIns().GetDataMgr().GetPlayerClassId(), 1, 8);
+                RebuildPlayerPresets();
+                return;
+            }
+
+            _playerDeckIndex = Mathf.Clamp(index, 0, _playerDecks.Count - 1);
+            AIManager.CustomPracticeDeckChoice choice = _playerDecks[_playerDeckIndex];
+            _playerClassId = Mathf.Clamp(choice.EnemyClassId, 1, 8);
+            RebuildPlayerPresets();
+            if (choice.OriginalAIPreset != null)
+            {
+                int presetIndex = FindPresetIndex(_playerPresets, choice.OriginalAIPreset);
+                if (presetIndex >= 0)
+                {
+                    _playerPresetIndex = presetIndex;
+                }
+            }
+
+            if (refreshControls && _contentRoot != null)
+            {
+                UpdatePlayerDeckButton();
+                UpdatePlayerPresetButton();
+                UpdatePlayerAIControls();
+            }
         }
 
         private void OpenDeckDialog()
@@ -401,7 +551,10 @@ namespace Shadowbus
                 OnDeckSelected,
                 new DeckSelectUI.InitOptions
                 {
-                    PrimaryFirstDisplayDeck = _decks[_deckIndex].Deck
+                    PrimaryFirstDisplayDeck = _decks[_deckIndex].Deck,
+                    // Original practice decks contain cards the local profile may not own,
+                    // but they are valid training inputs and must remain selectable.
+                    CanUseNonPossessionCard = true
                 });
             RaiseDialogAbove(deckSelector.Dialog, _dialog);
         }
@@ -418,6 +571,47 @@ namespace Shadowbus
 
             deckDialog.CloseSoon();
             SelectDeck(index);
+            ClearValidation();
+        }
+
+        private void OpenPlayerDeckDialog()
+        {
+            if (_playerDecks == null || _playerDecks.Count == 0)
+            {
+                return;
+            }
+
+            var deckGroup = new DeckGroup(
+                _playerDecks.Select(choice => choice.Deck).ToList(),
+                Format.Unlimited,
+                DeckAttributeType.CustomDeck);
+            DeckSelectUIDialog deckSelector = DeckSelectUIDialog.Create(
+                "选择我方 AI 卡组",
+                new DeckGroupListData(deckGroup),
+                Format.Unlimited,
+                DeckSelectUIDialog.eFormatChangeUIType.SingleFormat,
+                false,
+                OnPlayerDeckSelected,
+                new DeckSelectUI.InitOptions
+                {
+                    PrimaryFirstDisplayDeck = _playerDecks[_playerDeckIndex].Deck,
+                    CanUseNonPossessionCard = true
+                });
+            RaiseDialogAbove(deckSelector.Dialog, _dialog);
+        }
+
+        private void OnPlayerDeckSelected(DialogBase deckDialog, DeckData deck)
+        {
+            int index = _playerDecks.FindIndex(choice =>
+                ReferenceEquals(choice.Deck, deck) ||
+                choice.Deck.GetDeckID() == deck.GetDeckID());
+            if (index < 0)
+            {
+                return;
+            }
+
+            deckDialog.CloseSoon();
+            SelectPlayerDeck(index);
             ClearValidation();
         }
 
@@ -489,6 +683,42 @@ namespace Shadowbus
             }
         }
 
+        private void RebuildPlayerPresets()
+        {
+            List<PracticeAISettingData> settings = Data.Master.PracticeAISettingList?
+                .GetSettingDataTable()?
+                .Where(setting => setting.ClassId == _playerClassId)
+                .OrderBy(setting => setting.Difficulty)
+                .ToList() ?? new List<PracticeAISettingData>();
+
+            _playerPresets = settings.Select((setting, index) => new AIPresetChoice
+            {
+                Setting = setting,
+                Label = $"原作预设 {index + 1}  [{GetDeckFileName(setting)}]"
+            }).ToList();
+
+            _playerPresetIndex = settings.FindIndex(setting => setting.Difficulty == 1);
+            if (_playerPresetIndex < 0)
+            {
+                _playerPresetIndex = 0;
+            }
+        }
+
+        private static int FindPresetIndex(List<AIPresetChoice> presets, PracticeAISettingData setting)
+        {
+            if (presets == null || setting == null)
+            {
+                return -1;
+            }
+
+            return presets.FindIndex(choice => choice.Setting != null &&
+                choice.Setting.ClassId == setting.ClassId &&
+                choice.Setting.Difficulty == setting.Difficulty &&
+                choice.Setting.DeckId == setting.DeckId &&
+                choice.Setting.StyleId == setting.StyleId &&
+                choice.Setting.EmoteId == setting.EmoteId);
+        }
+
         private void SelectPreset(int index)
         {
             if (_presets == null || _presets.Count == 0)
@@ -516,6 +746,32 @@ namespace Shadowbus
                 _presets.Select(choice => choice.Label).ToList(),
                 _presetIndex,
                 SelectPreset);
+        }
+
+        private void SelectPlayerPreset(int index)
+        {
+            if (_playerPresets == null || _playerPresets.Count == 0)
+            {
+                return;
+            }
+
+            _playerPresetIndex = Mathf.Clamp(index, 0, _playerPresets.Count - 1);
+            UpdatePlayerPresetButton();
+            ClearValidation();
+        }
+
+        private void OpenPlayerPresetDialog()
+        {
+            if (_playerPresets == null || _playerPresets.Count == 0)
+            {
+                return;
+            }
+
+            OpenListDialog(
+                "选择我方原作 AI 预设",
+                _playerPresets.Select(choice => choice.Label).ToList(),
+                _playerPresetIndex,
+                SelectPlayerPreset);
         }
 
         private void OpenCsvDialog(
@@ -598,6 +854,9 @@ namespace Shadowbus
             string selectedDeckPath = GetSelectedPath(_deckCsvChoices, _deckCsvIndex);
             string selectedStylePath = GetSelectedPath(_styleCsvChoices, _styleCsvIndex);
             string selectedEmotePath = GetSelectedPath(_emoteCsvChoices, _emoteCsvIndex);
+            string selectedPlayerDeckPath = GetSelectedPath(_deckCsvChoices, _playerDeckCsvIndex);
+            string selectedPlayerStylePath = GetSelectedPath(_styleCsvChoices, _playerStyleCsvIndex);
+            string selectedPlayerEmotePath = GetSelectedPath(_emoteCsvChoices, _playerEmoteCsvIndex);
 
             _deckCsvChoices = BuildCsvChoices(PathHelper.AIDeckPath);
             _styleCsvChoices = BuildCsvChoices(PathHelper.AIStylePath);
@@ -606,6 +865,9 @@ namespace Shadowbus
             _deckCsvIndex = FindPathIndex(_deckCsvChoices, selectedDeckPath);
             _styleCsvIndex = FindPathIndex(_styleCsvChoices, selectedStylePath);
             _emoteCsvIndex = FindPathIndex(_emoteCsvChoices, selectedEmotePath);
+            _playerDeckCsvIndex = FindPathIndex(_deckCsvChoices, selectedPlayerDeckPath);
+            _playerStyleCsvIndex = FindPathIndex(_styleCsvChoices, selectedPlayerStylePath);
+            _playerEmoteCsvIndex = FindPathIndex(_emoteCsvChoices, selectedPlayerEmotePath);
         }
 
         private void RefreshCsvChoicesAndControls()
@@ -646,6 +908,7 @@ namespace Shadowbus
         private void RefreshAllControls()
         {
             UpdateDeckButton();
+            UpdatePlayerDeckButton();
             RefreshClassDependentControls();
             RefreshCsvControls();
         }
@@ -664,6 +927,16 @@ namespace Shadowbus
             UpdateLogicButtons();
             UpdateLifeSlider();
             UpdateAIPresetButton();
+            UpdatePlayerPresetButton();
+            UpdatePlayerAIControls();
+        }
+
+        private void UpdatePlayerDeckButton()
+        {
+            string label = _playerDecks != null && _playerDecks.Count > 0
+                ? GetDeckChoiceLabel(_playerDecks[Mathf.Clamp(_playerDeckIndex, 0, _playerDecks.Count - 1)])
+                : "无可用卡组";
+            SetNativeButtonText(_playerDeckButton, label);
         }
 
         private void RefreshCsvControls()
@@ -671,6 +944,9 @@ namespace Shadowbus
             SetNativeButtonText(_deckCsvButton, GetChoiceLabel(_deckCsvChoices, _deckCsvIndex));
             SetNativeButtonText(_styleCsvButton, GetChoiceLabel(_styleCsvChoices, _styleCsvIndex));
             SetNativeButtonText(_emoteCsvButton, GetChoiceLabel(_emoteCsvChoices, _emoteCsvIndex));
+            SetNativeButtonText(_playerDeckCsvButton, GetChoiceLabel(_deckCsvChoices, _playerDeckCsvIndex));
+            SetNativeButtonText(_playerStyleCsvButton, GetChoiceLabel(_styleCsvChoices, _playerStyleCsvIndex));
+            SetNativeButtonText(_playerEmoteCsvButton, GetChoiceLabel(_emoteCsvChoices, _playerEmoteCsvIndex));
         }
 
         private void UpdateAIPresetButton()
@@ -679,6 +955,32 @@ namespace Shadowbus
                 ? _presets[Mathf.Clamp(_presetIndex, 0, _presets.Count - 1)].Label
                 : "无可用预设";
             SetNativeButtonText(_presetButton, label);
+        }
+
+        private void UpdatePlayerPresetButton()
+        {
+            string label = _playerPresets != null && _playerPresets.Count > 0
+                ? _playerPresets[Mathf.Clamp(_playerPresetIndex, 0, _playerPresets.Count - 1)].Label
+                : "无可用预设";
+            SetNativeButtonText(_playerPresetButton, label);
+        }
+
+        private void TogglePlayerAI()
+        {
+            _enablePlayerAI = !_enablePlayerAI;
+            UpdatePlayerAIControls();
+            ClearValidation();
+        }
+
+        private void UpdatePlayerAIControls()
+        {
+            SetNativeButtonText(_playerAIButton, _enablePlayerAI ? "开启（双方 AI）" : "关闭（仅对手 AI）");
+            // Each row has its own "使用原作预设" entry, so Deck/Style/Emote can be
+            // mixed independently. Keep the legacy flag in sync for retry diagnostics.
+            _playerAIUseLocalCsv =
+                !string.IsNullOrEmpty(GetSelectedPath(_deckCsvChoices, _playerDeckCsvIndex)) ||
+                !string.IsNullOrEmpty(GetSelectedPath(_styleCsvChoices, _playerStyleCsvIndex)) ||
+                !string.IsNullOrEmpty(GetSelectedPath(_emoteCsvChoices, _playerEmoteCsvIndex));
         }
 
         private static string GetChoiceLabel(List<CsvChoice> choices, int index)
@@ -920,17 +1222,30 @@ namespace Shadowbus
 
             _isStarting = true;
             _dialog.IsButton1Enabled = false;
+            UpdatePlayerAIControls();
             var settings = new AIManager.CustomPracticeSettings
             {
                 Deck = _decks[_deckIndex].Deck,
+                PlayerDeck = _playerDecks != null && _playerDecks.Count > 0
+                    ? _playerDecks[Mathf.Clamp(_playerDeckIndex, 0, _playerDecks.Count - 1)].Deck
+                    : null,
                 EnemyClassId = _classId,
+                PlayerClassId = _playerClassId,
                 Leader = _leaders[_leaderIndex],
                 AIPreset = _presets[_presetIndex].Setting,
+                PlayerAIPreset = _playerPresets != null && _playerPresets.Count > 0
+                    ? _playerPresets[Mathf.Clamp(_playerPresetIndex, 0, _playerPresets.Count - 1)].Setting
+                    : null,
                 LocalDeckCsvPath = GetSelectedPath(_deckCsvChoices, _deckCsvIndex),
                 LocalStyleCsvPath = GetSelectedPath(_styleCsvChoices, _styleCsvIndex),
                 LocalEmoteCsvPath = GetSelectedPath(_emoteCsvChoices, _emoteCsvIndex),
                 LogicLevel = _logicLevel,
-                MaxLife = _maxLife
+                MaxLife = _maxLife,
+                EnablePlayerAI = _enablePlayerAI,
+                PlayerAIUseLocalCsv = _playerAIUseLocalCsv,
+                LocalPlayerDeckCsvPath = GetSelectedPath(_deckCsvChoices, _playerDeckCsvIndex),
+                LocalPlayerStyleCsvPath = GetSelectedPath(_styleCsvChoices, _playerStyleCsvIndex),
+                LocalPlayerEmoteCsvPath = GetSelectedPath(_emoteCsvChoices, _playerEmoteCsvIndex)
             };
             _dialog.CloseSoon();
             AIManager.StartCustomPractice(_page, settings);

@@ -75,6 +75,14 @@ public class Plugin : BaseUnityPlugin
             Harmony.CreateAndPatchAll(typeof(FakeConnect));
             Harmony.CreateAndPatchAll(typeof(BossRushPatches));
             Harmony.CreateAndPatchAll(typeof(AIManager));
+            try
+            {
+                Harmony.CreateAndPatchAll(typeof(PracticeDualAI));
+            }
+            catch (System.Exception exception)
+            {
+                Logger.LogError($"[AIManager] FAILED to apply the dual-practice AI patches: {exception}");
+            }
             Harmony.CreateAndPatchAll(typeof(BossRushReferenceExporter));
             try
             {
@@ -116,6 +124,7 @@ public class Plugin : BaseUnityPlugin
     private void Update()
     {
         P2PRuntime.Update();
+        PracticeDualAI.Update();
         AITurnGuard.Update();
     }
 
