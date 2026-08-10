@@ -34,6 +34,11 @@ namespace Shadowbus
         // the host uses this marker to avoid preparing the same action twice.
         internal const string PreparedActionKey = "p2pPreparedAction";
         internal const string PreparedCardIdKey = "p2pPreparedCardId";
+        // Fusion metamorphose is executed by the native skill after knownList has
+        // been applied. Preserve the pre-action identity separately so the peer
+        // does not replace the hand card with its transformed form too early.
+        internal const string FusionMetamorphoseOriginalsKey =
+            "p2pFusionMetamorphoseOriginals";
         // Unlike normal battle messages, this table is intentionally sent once at
         // battle setup so both local rule engines can evaluate hidden-zone effects
         // against the same card identities.
@@ -201,6 +206,121 @@ namespace Shadowbus
                 string.Equals(uri, TurnEndUri, StringComparison.Ordinal) ||
                 string.Equals(uri, TurnEndFinalUri, StringComparison.Ordinal) ||
                 string.Equals(uri, TurnStartUri, StringComparison.Ordinal);
+        }
+
+        internal static bool IsFusionMetamorphoseTarget(
+            Dictionary<string, object> data,
+            int index)
+        {
+            if (data == null || index <= 0 ||
+                !data.TryGetValue("orderList", out object rawOrders) ||
+                rawOrders is string || !(rawOrders is IEnumerable orders))
+            {
+                return false;
+            }
+
+            foreach (object rawOrder in orders)
+            {
+                if (!(rawOrder is IDictionary<string, object> order) ||
+                    !order.TryGetValue("metamorphose", out object rawMetamorphose) ||
+                    !(rawMetamorphose is IDictionary<string, object> metamorphose) ||
+                    !TryConvertInt(metamorphose, "isFusion", out int isFusion) ||
+                    isFusion == 0)
+                {
+                    continue;
+                }
+
+                if (ContainsCardIndex(metamorphose, index))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        internal static bool TryReadFusionMetamorphoseOriginal(
+            Dictionary<string, object> data,
+            bool ownerIsHost,
+            int index,
+            out int cardId,
+            out int? cost)
+        {
+            cardId = 0;
+            cost = null;
+            if (data == null || index <= 0 ||
+                !data.TryGetValue(FusionMetamorphoseOriginalsKey,
+                    out object rawEntries) ||
+                rawEntries is string || !(rawEntries is IEnumerable entries))
+            {
+                return false;
+            }
+
+            foreach (object rawEntry in entries)
+            {
+                if (!(rawEntry is IDictionary<string, object> entry) ||
+                    !TryConvertInt(entry, "owner", out int owner) ||
+                    owner != (ownerIsHost ? 1 : 0) ||
+                    !TryConvertInt(entry, "idx", out int entryIndex) ||
+                    entryIndex != index ||
+                    !TryConvertInt(entry, "cardId", out int originalCardId) ||
+                    originalCardId <= 0)
+                {
+                    continue;
+                }
+
+                cardId = originalCardId;
+                if (TryConvertInt(entry, "cost", out int originalCost) &&
+                    originalCost >= 0)
+                {
+                    cost = originalCost;
+                }
+                return true;
+            }
+            return false;
+        }
+
+        private static bool ContainsCardIndex(
+            IDictionary<string, object> data,
+            int index)
+        {
+            if (data == null ||
+                (!data.TryGetValue("idx", out object rawIndices) &&
+                 !data.TryGetValue("idxList", out rawIndices)))
+            {
+                return false;
+            }
+
+            if (TryConvertInt(rawIndices, out int singleIndex))
+            {
+                return singleIndex == index;
+            }
+            if (rawIndices is string || !(rawIndices is IEnumerable indices))
+            {
+                return false;
+            }
+            foreach (object rawIndex in indices)
+            {
+                if (TryConvertInt(rawIndex, out int itemIndex) &&
+                    itemIndex == index)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool TryConvertInt(object value, out int result)
+        {
+            try
+            {
+                result = Convert.ToInt32(value, CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch (Exception)
+            {
+                result = 0;
+                return false;
+            }
         }
     }
 
@@ -681,6 +801,27 @@ namespace Shadowbus
 
             if (!TryGetInt(data, "playIdx", out playIndex) || playIndex < 0)
             {
+                return false;
+            }
+
+            // The native fusion skill must see the original card in hand. The
+            // metamorphosed identity is a post-action snapshot and is applied
+            // only after the native fusion VFX and replacement have completed.
+            if (P2PBattleProtocol.TryReadFusionMetamorphoseOriginal(
+                    data, sourceIsHost, playIndex,
+                    out int originalFusionCardId, out int? originalFusionCost))
+            {
+                cardId = originalFusionCardId;
+                RevealKnownCard(data, playIndex, cardId, true,
+                    originalFusionCost, null, null, true);
+                MarkPreparedAction(data, playIndex, cardId);
+                return true;
+            }
+            if (P2PBattleProtocol.IsFusionMetamorphoseTarget(data, playIndex))
+            {
+                diagnosticLogger?.Invoke(
+                    $"fusion metamorphose idx={playIndex} did not include its " +
+                    "pre-action card identity; leaving the native hand card unchanged");
                 return false;
             }
 
@@ -1313,7 +1454,6 @@ namespace Shadowbus
                 foreach (int index in GetIndices(metamorphose))
                 {
                     int resolvedCardId = cardId;
-
                     int? cost = ResolveSourceCardCost(
                         sourceIsHost, index, sourceCardCostResolver);
                     // Accelerated/Crystallize uses the first knownList entry as
@@ -1321,7 +1461,27 @@ namespace Shadowbus
                     // back to the original card before applying the key action.
                     // Do not let a metamorphose order overwrite that prepared
                     // entry while a message is being forwarded by the host.
-                    if (!hasMutationAction || index != mutationPlayIndex)
+                    bool isFusion = TryGetInt(
+                        metamorphose, "isFusion", out int rawIsFusion) &&
+                        rawIsFusion != 0;
+                    int originalCardId = 0;
+                    int? originalCost = null;
+                    bool revealedOriginal = isFusion &&
+                        P2PBattleProtocol.TryReadFusionMetamorphoseOriginal(
+                            data, ownerIsHost, index,
+                            out originalCardId, out originalCost);
+                    if (revealedOriginal)
+                    {
+                        RevealKnownCard(data, index, originalCardId, isSelf,
+                            originalCost, null, null, true);
+                    }
+                    else if (isFusion)
+                    {
+                        diagnosticLogger?.Invoke(
+                            $"fusion metamorphose idx={index} did not include " +
+                            "its pre-action card identity; skipped early replacement");
+                    }
+                    else if (!hasMutationAction || index != mutationPlayIndex)
                     {
                         RevealKnownCard(data, index, resolvedCardId, isSelf,
                             cost, null, null, true);

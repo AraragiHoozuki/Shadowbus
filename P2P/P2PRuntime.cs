@@ -12,6 +12,7 @@ using System.Security.Cryptography;
 using System.Globalization;
 using Newtonsoft.Json;
 using Wizard;
+using Wizard.Battle.View.Vfx;
 using Wizard.RoomMatch;
 
 namespace Shadowbus
@@ -20,6 +21,7 @@ namespace Shadowbus
     {
         private const int BattleStateCheckTimeoutSeconds = 15;
         private const int MaxDeferredAgentDeliveries = 128;
+        private const int MaxPendingReceivedBattleMessages = 128;
 
         private static readonly ConcurrentQueue<Action> MainThreadActions =
             new ConcurrentQueue<Action>();
@@ -31,6 +33,9 @@ namespace Shadowbus
         private static readonly Queue<Dictionary<string, object>> DeferredGuestDeliveries =
             new Queue<Dictionary<string, object>>();
         private static readonly Queue<Dictionary<string, object>> DeferredAgentDeliveries =
+            new Queue<Dictionary<string, object>>();
+        private static readonly Queue<Dictionary<string, object>>
+            PendingReceivedBattleMessages =
             new Queue<Dictionary<string, object>>();
         private static readonly P2PBattleSelectionTracker BattleSelectionTracker =
             new P2PBattleSelectionTracker();
@@ -80,6 +85,13 @@ namespace Shadowbus
         private static readonly Dictionary<string, Dictionary<string, object>>
             ReceivedHiddenCardStates =
             new Dictionary<string, Dictionary<string, object>>();
+        // A hidden-card snapshot attached to an action describes the state after
+        // that action. Keep it out of ReceivedHiddenCardStates until the native
+        // operation has finished, otherwise a card condition can observe its own
+        // post-action buff while the action is still being evaluated.
+        private static readonly Dictionary<string, Dictionary<string, object>>
+            PendingReceivedHiddenCardStates =
+            new Dictionary<string, Dictionary<string, object>>();
         private static readonly Dictionary<string, string>
             ReceivedHiddenCardStateSignatures =
             new Dictionary<string, string>();
@@ -100,14 +112,55 @@ namespace Shadowbus
         private static readonly List<Dictionary<string, object>>
             StagedPreNativeFusionActions =
             new List<Dictionary<string, object>>();
+        // FusionMaterialized mutates the target while the action VFX is being
+        // built. Keep the latest cumulative list by index because metamorphose
+        // can replace the object before the outbound PlayActions message is
+        // finally prepared.
+        private static readonly Dictionary<int, List<P2PFusionIngredientState>>
+            LocalFusionIngredientSnapshots =
+            new Dictionary<int, List<P2PFusionIngredientState>>();
+        private const string AuthoritativeSkillTargetsKey =
+            "p2pAuthoritativeSkillTargets";
+        // The official server resolves random skill targets and returns the
+        // selected card indices. In P2P the acting client is the authority, so
+        // record the actual post-filter targets and replay those exact cards on
+        // the peer. This covers public history lists as well as private zones.
+        private static readonly List<Dictionary<string, object>>
+            LocalAuthoritativeSkillTargets =
+            new List<Dictionary<string, object>>();
+        private static readonly Queue<AuthoritativeSkillTargetBatch>
+            PendingAuthoritativeSkillTargetBatches =
+            new Queue<AuthoritativeSkillTargetBatch>();
+        private static AuthoritativeSkillTargetBatch activeAuthoritativeSkillTargetBatch;
+        // The batch belonging to the action currently being injected.  The
+        // active batch is not necessarily the one whose native ReceivedMessage
+        // callback is running if a previous operation is still being finalized.
+        private static AuthoritativeSkillTargetBatch currentInjectedAuthoritativeSkillTargetBatch;
+        private static int localAuthoritativeSkillTargetSequence;
+        private static bool receivedAuthoritativeActionActive;
+        private static bool processingReceivedBattleAction;
+        private static bool receivedBattleActionPendingUntilVfx;
+        private static DateTime receivedBattleActionStartedUtc;
+        private static bool receivedBattleActionStallReported;
+        private static bool nativeReceivedMetadataActive;
         private const string PlayerHistoryStateKey = "p2pPlayerHistory";
+        private const string PlayerHistoryStateBeforeKey =
+            "p2pPlayerHistoryBefore";
         private static readonly Dictionary<string, PendingPlayerHistoryState>
             ReceivedPlayerHistoryStates =
             new Dictionary<string, PendingPlayerHistoryState>();
+        private static readonly Dictionary<int, Dictionary<string, object>>
+            PendingPreActionPlayerHistoryStates =
+            new Dictionary<int, Dictionary<string, object>>();
         private static readonly Dictionary<int, int> AppliedPlayerHistoryRevisions =
             new Dictionary<int, int>();
         private static string localPlayerHistoryStateSignature = string.Empty;
         private static int localPlayerHistoryRevision;
+        private static string localPlayerHistoryBaselineSignature = string.Empty;
+        private static Dictionary<string, object> localPlayerHistoryBaselineState;
+        private static int localPlayerHistoryBaselineRevision;
+        private static Dictionary<string, object> localActionPreHistoryState;
+        private static int localActionPreHistoryRevision;
         private static List<int> hostMulliganHand;
         private static List<int> guestMulliganHand;
         private static bool hostSwapped;
@@ -181,6 +234,9 @@ namespace Shadowbus
             TryApplyPendingHiddenCardStates();
             TryApplyPendingPlayerHistoryStates();
             TryApplyPendingFusionActions();
+            TryCompleteReceivedBattleAction();
+            TryClearConsumedAuthoritativeSkillTargets();
+            TryInjectPendingReceivedPlayAction();
             ObserveLocalHiddenCardStates();
             TryCheckPendingBattleStates();
             if (!peerDisconnected)
@@ -417,13 +473,61 @@ namespace Shadowbus
             {
                 return;
             }
+
+            Dictionary<string, object> preActionHistoryState = null;
+            int preActionHistoryRevision = 0;
+            if (IsOrderedLocalBattleMessage(uri))
+            {
+                preActionHistoryState = localActionPreHistoryState == null
+                    ? null
+                    : P2PJson.CloneDictionary(localActionPreHistoryState);
+                preActionHistoryRevision = localActionPreHistoryRevision;
+                localActionPreHistoryState = null;
+                localActionPreHistoryRevision = 0;
+            }
+
+            // ActionProcessor and BattlePlayer finish their model mutations while
+            // constructing the action VFX. Sending here lets both peers play that
+            // VFX concurrently; waiting for the local queue to drain serializes
+            // every animation and makes the whole match feel delayed.
+            HandleEmitNow(uri, data,
+                preActionHistoryState, preActionHistoryRevision);
+        }
+
+        private static bool IsOrderedLocalBattleMessage(string uri)
+        {
+            return string.Equals(uri,
+                       NetworkBattleDefine.NetworkBattleURI.PlayActions.ToString(),
+                       StringComparison.Ordinal) ||
+                string.Equals(uri,
+                    NetworkBattleDefine.NetworkBattleURI.TurnEndActions.ToString(),
+                    StringComparison.Ordinal) ||
+                string.Equals(uri,
+                    NetworkBattleDefine.NetworkBattleURI.TurnStart.ToString(),
+                    StringComparison.Ordinal) ||
+                string.Equals(uri,
+                    NetworkBattleDefine.NetworkBattleURI.TurnEnd.ToString(),
+                    StringComparison.Ordinal) ||
+                string.Equals(uri,
+                    NetworkBattleDefine.NetworkBattleURI.TurnEndFinal.ToString(),
+                    StringComparison.Ordinal);
+        }
+
+        private static void HandleEmitNow(
+            string uri,
+            Dictionary<string, object> data,
+            Dictionary<string, object> preActionHistoryState = null,
+            int preActionHistoryRevision = 0)
+        {
             CacheLocalBattleCardIdentities();
             Dictionary<string, object> messageData = P2PJson.CloneDictionary(data);
             messageData["uri"] = uri;
             messageData["viewerId"] = LocalProfile?.ViewerId ?? P2PIdentity.ViewerId;
             messageData["bid"] = BattleId ?? string.Empty;
             AppendLocalHiddenCardState(uri, messageData);
-            AppendLocalPlayerHistoryState(uri, messageData);
+            AppendLocalPlayerHistoryState(uri, messageData,
+                preActionHistoryState, preActionHistoryRevision);
+            AppendLocalAuthoritativeSkillTargets(uri, messageData);
             RemovePrivateTwoPickDraftData(messageData, uri);
             if (string.Equals(
                     uri,
@@ -628,6 +732,7 @@ namespace Shadowbus
             LocalHiddenCardStateSignatures.Clear();
             LocalHiddenCardStates.Clear();
             ReceivedHiddenCardStates.Clear();
+            PendingReceivedHiddenCardStates.Clear();
             ReceivedHiddenCardStateSignatures.Clear();
             AppliedReceivedHiddenCardStates.Clear();
             PrivateConditionWarnings.Clear();
@@ -636,10 +741,29 @@ namespace Shadowbus
             PendingFusionActions.Clear();
             PendingFusionActionSignatures.Clear();
             StagedPreNativeFusionActions.Clear();
+            LocalAuthoritativeSkillTargets.Clear();
+            PendingAuthoritativeSkillTargetBatches.Clear();
+            activeAuthoritativeSkillTargetBatch = null;
+            currentInjectedAuthoritativeSkillTargetBatch = null;
+            localAuthoritativeSkillTargetSequence = 0;
+            receivedAuthoritativeActionActive = false;
+            processingReceivedBattleAction = false;
+            receivedBattleActionPendingUntilVfx = false;
+            receivedBattleActionStartedUtc = DateTime.MinValue;
+            receivedBattleActionStallReported = false;
+            nativeReceivedMetadataActive = false;
+            PendingReceivedBattleMessages.Clear();
+            LocalFusionIngredientSnapshots.Clear();
             ReceivedPlayerHistoryStates.Clear();
+            PendingPreActionPlayerHistoryStates.Clear();
             AppliedPlayerHistoryRevisions.Clear();
             localPlayerHistoryStateSignature = string.Empty;
             localPlayerHistoryRevision = 0;
+            localPlayerHistoryBaselineSignature = string.Empty;
+            localPlayerHistoryBaselineState = null;
+            localPlayerHistoryBaselineRevision = 0;
+            localActionPreHistoryState = null;
+            localActionPreHistoryRevision = 0;
             BattleSelectionTracker.Reset();
             PendingBattleStateChecks.Clear();
             hostMulliganHand = null;
@@ -1822,6 +1946,33 @@ namespace Shadowbus
 
         private static void Inject(Dictionary<string, object> data)
         {
+            string incomingUri = GetUri(data);
+            if (IsOrderedReceivedBattleMessage(incomingUri) &&
+                ShouldDeferReceivedPlayAction())
+            {
+                if (PendingReceivedBattleMessages.Count >=
+                    MaxPendingReceivedBattleMessages)
+                {
+                    ReportBattleDiagnostic(
+                        $"Received battle-message queue exceeded " +
+                        $"{MaxPendingReceivedBattleMessages}; dropping " +
+                        $"{incomingUri} playIdx={GetMessagePlayIndex(data)}.");
+                    return;
+                }
+
+                PendingReceivedBattleMessages.Enqueue(P2PJson.CloneDictionary(data));
+                Plugin.Logger.LogDebug(
+                    $"[P2P] Deferred incoming {incomingUri} playIdx=" +
+                    $"{GetMessagePlayIndex(data)} until the previous battle " +
+                    "operation's VFX and state synchronization completed.");
+                return;
+            }
+
+            InjectNow(data);
+        }
+
+        private static void InjectNow(Dictionary<string, object> data)
+        {
             string uri = data != null && data.TryGetValue("uri", out object value)
                 ? value?.ToString() ?? "?"
                 : "?";
@@ -1859,10 +2010,16 @@ namespace Shadowbus
                 expectedBattleState = rawState as Dictionary<string, object>;
                 data.Remove(P2PBattleStateDiagnostics.StateKey);
             }
-            RememberReceivedHiddenCardStates(data);
-            RememberReceivedPlayerHistoryState(data, false);
-            TryApplyPendingHiddenCardStates();
-            ApplyReceivedFusionAction(data, false);
+            bool isOrderedReceivedBattleMessage =
+                IsOrderedReceivedBattleMessage(uri);
+            if (!isOrderedReceivedBattleMessage)
+            {
+                // Ordered packets may be held by the native playSeq queue. Their
+                // action metadata is bound later, in ReceivedMessage, so it cannot
+                // be overwritten by another packet while waiting for its turn.
+                RememberReceivedHiddenCardStates(data, false);
+                TryApplyPendingHiddenCardStates();
+            }
             if (string.Equals(
                     uri,
                     NetworkBattleDefine.NetworkBattleURI.JudgeResult.ToString(),
@@ -1949,12 +2106,843 @@ namespace Shadowbus
             }
             finally
             {
-                StagedPreNativeFusionActions.Clear();
+                if (nativeReceivedMetadataActive)
+                {
+                    Plugin.Logger.LogWarning(
+                        $"[P2P] Aborting incomplete native receive metadata for " +
+                        $"{uri} playIdx={GetMessagePlayIndex(data)}.");
+                    CompleteNativeReceivedActionMetadata(data, false);
+                }
+                currentInjectedAuthoritativeSkillTargetBatch = null;
+            }
+        }
+
+        private static bool ShouldDeferReceivedPlayAction()
+        {
+            if (!IsActive)
+            {
+                return false;
+            }
+
+            if (receivedBattleActionPendingUntilVfx ||
+                processingReceivedBattleAction)
+            {
+                return true;
+            }
+
+            NetworkBattleManagerBase manager =
+                BattleManagerBase.GetIns() as NetworkBattleManagerBase;
+            return manager?.VfxMgr != null && !manager.VfxMgr.IsEnd;
+        }
+
+        private static void TryInjectPendingReceivedPlayAction()
+        {
+            if (!IsActive || PendingReceivedBattleMessages.Count == 0 ||
+                receivedBattleActionPendingUntilVfx ||
+                processingReceivedBattleAction)
+            {
+                return;
+            }
+
+            NetworkBattleManagerBase manager =
+                BattleManagerBase.GetIns() as NetworkBattleManagerBase;
+            if (manager?.VfxMgr == null || !manager.VfxMgr.IsEnd)
+            {
+                return;
+            }
+
+            Inject(PendingReceivedBattleMessages.Dequeue());
+        }
+
+        private static bool IsOrderedReceivedBattleMessage(string uri)
+        {
+            return string.Equals(uri,
+                       NetworkBattleDefine.NetworkBattleURI.PlayActions.ToString(),
+                       StringComparison.Ordinal) ||
+                string.Equals(uri,
+                    NetworkBattleDefine.NetworkBattleURI.TurnEndActions.ToString(),
+                    StringComparison.Ordinal) ||
+                string.Equals(uri,
+                    NetworkBattleDefine.NetworkBattleURI.TurnStart.ToString(),
+                    StringComparison.Ordinal) ||
+                string.Equals(uri,
+                    NetworkBattleDefine.NetworkBattleURI.TurnEnd.ToString(),
+                    StringComparison.Ordinal) ||
+                string.Equals(uri,
+                    NetworkBattleDefine.NetworkBattleURI.TurnEndFinal.ToString(),
+                    StringComparison.Ordinal);
+        }
+
+        private static int GetMessagePlayIndex(Dictionary<string, object> data)
+        {
+            return data != null && TryGetStateInt(data, "playIdx", out int index)
+                ? index
+                : -1;
+        }
+
+        private static void TryCompleteReceivedBattleAction()
+        {
+            if (!receivedBattleActionPendingUntilVfx)
+            {
+                return;
+            }
+
+            NetworkBattleManagerBase manager =
+                BattleManagerBase.GetIns() as NetworkBattleManagerBase;
+            bool timedOut = receivedBattleActionStartedUtc != DateTime.MinValue &&
+                DateTime.UtcNow - receivedBattleActionStartedUtc >=
+                    TimeSpan.FromSeconds(BattleStateCheckTimeoutSeconds);
+            if (manager?.VfxMgr == null || !manager.VfxMgr.IsEnd)
+            {
+                if (timedOut && !receivedBattleActionStallReported)
+                {
+                    receivedBattleActionStallReported = true;
+                    ReportBattleDiagnostic(
+                        $"RECEIVE ACTION STALL: the effect queue did not finish " +
+                        $"within {BattleStateCheckTimeoutSeconds} seconds; " +
+                        DescribeEffectQueue(manager) + ". Pending remote messages=" +
+                        PendingReceivedBattleMessages.Count + ".");
+                }
+                return;
+            }
+
+            if (HasPendingReceivedPostActionState())
+            {
+                if (!timedOut)
+                {
+                    return;
+                }
+
+                if (!receivedBattleActionStallReported)
+                {
+                    receivedBattleActionStallReported = true;
+                    ReportBattleDiagnostic(
+                        $"RECEIVE STATE APPLY STALL: native effects completed, but " +
+                        $"post-action state could not be resolved within " +
+                        $"{BattleStateCheckTimeoutSeconds} seconds. " +
+                        DescribePendingReceivedPostActionState() + ".");
+                }
+                DiscardUnresolvedReceivedPostActionState();
+            }
+
+            // Promote post-action hidden-zone state only after all effects from
+            // this message have run. The next native action then sees the same
+            // hand/deck modifiers as the source client.
+            ApplyPendingReceivedHiddenCardStates();
+
+            processingReceivedBattleAction = false;
+            receivedBattleActionPendingUntilVfx = false;
+            receivedBattleActionStartedUtc = DateTime.MinValue;
+            receivedBattleActionStallReported = false;
+        }
+
+        private static bool HasPendingReceivedPostActionState()
+        {
+            if (PendingFusionActions.Count > 0)
+            {
+                return true;
+            }
+
+            int localOwner = Role == P2PRole.Host ? 1 : 0;
+            return ReceivedPlayerHistoryStates.Values.Any(state =>
+                state.ReadyToApply && state.Owner != localOwner);
+        }
+
+        private static void ApplyPendingReceivedHiddenCardStates()
+        {
+            if (!IsActive || PendingReceivedHiddenCardStates.Count == 0)
+            {
+                return;
+            }
+
+            foreach (KeyValuePair<string, Dictionary<string, object>> item in
+                PendingReceivedHiddenCardStates.ToList())
+            {
+                ReceivedHiddenCardStates[item.Key] = item.Value;
+                ReceivedHiddenCardStateSignatures[item.Key] =
+                    JsonConvert.SerializeObject(item.Value, P2PJson.Settings);
+                AppliedReceivedHiddenCardStates.Remove(item.Key);
+            }
+            PendingReceivedHiddenCardStates.Clear();
+            TryApplyPendingHiddenCardStates();
+        }
+
+        private static string DescribePendingReceivedPostActionState()
+        {
+            int localOwner = Role == P2PRole.Host ? 1 : 0;
+            string fusion = PendingFusionActions.Count == 0
+                ? "none"
+                : string.Join(",", PendingFusionActions.Select(action =>
+                {
+                    TryGetStateInt(action, "owner", out int owner);
+                    TryGetStateInt(action, "targetIdx", out int targetIndex);
+                    return $"owner={owner}/targetIdx={targetIndex}";
+                }));
+            string history = string.Join(",",
+                ReceivedPlayerHistoryStates.Values
+                    .Where(state => state.ReadyToApply &&
+                        state.Owner != localOwner)
+                    .OrderBy(state => state.Revision)
+                    .Select(state =>
+                        $"owner={state.Owner}/revision={state.Revision}/" +
+                        $"attempts={state.Attempts}/unresolved=" +
+                        (string.IsNullOrEmpty(state.LastUnresolved)
+                            ? "unknown" : state.LastUnresolved)));
+            return $"pendingFusion=[{fusion}], pendingHistory=[{history}], " +
+                $"queuedMessages={PendingReceivedBattleMessages.Count}";
+        }
+
+        private static void DiscardUnresolvedReceivedPostActionState()
+        {
+            PendingFusionActions.Clear();
+            PendingFusionActionSignatures.Clear();
+            int localOwner = Role == P2PRole.Host ? 1 : 0;
+            foreach (string key in ReceivedPlayerHistoryStates
+                .Where(item => item.Value.ReadyToApply &&
+                    item.Value.Owner != localOwner)
+                .Select(item => item.Key)
+                .ToList())
+            {
+                ReceivedPlayerHistoryStates.Remove(key);
             }
         }
 
         private static bool IsPrivateStateSyncActive =>
             localPrivateStateSent && remotePrivateStateReceived;
+
+        internal static void SynchronizeAuthoritativeRandomSkillTargets(
+            SkillBase skill,
+            ref VfxWith<List<BattleCardBase>, Dictionary<int, BattleCardBase>> result)
+        {
+            if (!IsActive || skill?.SkillPrm?.ownerCard == null || result == null ||
+                BattleManagerBase.IsForecast || !RegisterTool.IsSkillRandom(skill))
+            {
+                return;
+            }
+
+            // A local action can also activate a random skill owned by the
+            // opponent (last words, reactions, etc.). Authority belongs to the
+            // action source, not to skill.ownerCard.IsPlayer. The presence of a
+            // staged source result is therefore the reliable receive-side test.
+            if (!receivedAuthoritativeActionActive)
+            {
+                // A peer action can contain random skills even when the sender is
+                // older and did not publish the authoritative side channel. Do not
+                // capture those remote calculations as if they belonged to our next
+                // local action.
+                if (processingReceivedBattleAction)
+                {
+                    return;
+                }
+                CaptureAuthoritativeSkillTargets(
+                    skill, result.Value_1, result.Value_2);
+                return;
+            }
+
+            if (!TryConsumeAuthoritativeSkillTargets(
+                    skill,
+                    out List<BattleCardBase> targets,
+                    out Dictionary<int, BattleCardBase> independentTargets,
+                    out string diagnostic))
+            {
+                if (!string.IsNullOrEmpty(diagnostic))
+                {
+                    Plugin.Logger.LogWarning(
+                        "[P2P] Could not apply authoritative random targets: " +
+                        diagnostic + ".");
+                }
+                return;
+            }
+
+            List<BattleCardBase> originalTargets = result.Value_1 ??
+                new List<BattleCardBase>();
+            if (!originalTargets.Select(CardReferenceDiagnostic).SequenceEqual(
+                    targets.Select(CardReferenceDiagnostic)))
+            {
+                Plugin.Logger.LogInfo(
+                    $"[P2P] Replaced locally calculated random targets for " +
+                    $"card idx={skill.SkillPrm.ownerCard.Index}, " +
+                    $"skill={skill.GetType().Name}: " +
+                    $"local=[{string.Join(",", originalTargets.Select(CardReferenceDiagnostic))}], " +
+                    $"source=[{string.Join(",", targets.Select(CardReferenceDiagnostic))}].");
+            }
+
+            result = new VfxWith<List<BattleCardBase>, Dictionary<int, BattleCardBase>>(
+                result.Vfx,
+                targets,
+                independentTargets);
+        }
+
+        private static void CaptureAuthoritativeSkillTargets(
+            SkillBase skill,
+            IEnumerable<BattleCardBase> targets,
+            IDictionary<int, BattleCardBase> independentTargets)
+        {
+            BattleCardBase ownerCard = skill.SkillPrm.ownerCard;
+            bool localOwnerIsHost = Role == P2PRole.Host;
+            bool skillOwnerIsHost = ownerCard.IsPlayer
+                ? localOwnerIsHost
+                : !localOwnerIsHost;
+            List<object> targetReferences = (targets ??
+                    Enumerable.Empty<BattleCardBase>())
+                .Where(card => card != null && card.Index > 0)
+                .Select(card => (object)CapturePlayerCardReference(
+                    card, localOwnerIsHost))
+                .ToList();
+            int movement = GetSkillMovement(skill);
+            Dictionary<string, object> capture =
+                new Dictionary<string, object>
+                {
+                    ["seq"] = ++localAuthoritativeSkillTargetSequence,
+                    ["owner"] = skillOwnerIsHost ? 1 : 0,
+                    ["ownerIdx"] = ownerCard.Index,
+                    ["ownerCardId"] = ownerCard.CardId,
+                    ["skillIndex"] = GetNetworkSkillIndex(skill),
+                    ["published"] = NetworkBattleGenericTool.GetPublishSkillCount(skill),
+                    ["movement"] = movement,
+                    ["skillType"] = skill.GetType().FullName ??
+                        skill.GetType().Name,
+                    ["targets"] = targetReferences
+                };
+            if (independentTargets != null && independentTargets.Count > 0)
+            {
+                capture["independent"] = independentTargets
+                    .Where(item => item.Value != null && item.Value.Index > 0)
+                    .Select(item => (object)new Dictionary<string, object>
+                    {
+                        ["slot"] = item.Key,
+                        ["card"] = CapturePlayerCardReference(
+                            item.Value, localOwnerIsHost)
+                    })
+                    .ToList();
+            }
+            LocalAuthoritativeSkillTargets.Add(capture);
+        }
+
+        private static void AppendLocalAuthoritativeSkillTargets(
+            string uri,
+            Dictionary<string, object> data)
+        {
+            if (data == null || LocalAuthoritativeSkillTargets.Count == 0 ||
+                !IsOrderedLocalBattleMessage(uri))
+            {
+                return;
+            }
+
+            data[AuthoritativeSkillTargetsKey] =
+                LocalAuthoritativeSkillTargets
+                    .Select(target => (object)P2PJson.CloneDictionary(target))
+                    .ToList();
+            Plugin.Logger.LogDebug(
+                $"[P2P] Attached {LocalAuthoritativeSkillTargets.Count} " +
+                $"authoritative random skill target result(s) to {uri}.");
+            LocalAuthoritativeSkillTargets.Clear();
+        }
+
+        private static void RememberReceivedAuthoritativeSkillTargets(
+            Dictionary<string, object> data)
+        {
+            if (data == null ||
+                !data.TryGetValue(AuthoritativeSkillTargetsKey, out object rawTargets) ||
+                rawTargets is string || !(rawTargets is IEnumerable targetEntries))
+            {
+                return;
+            }
+
+            List<Dictionary<string, object>> entries =
+                new List<Dictionary<string, object>>();
+            foreach (object rawEntry in targetEntries)
+            {
+                if (rawEntry is Dictionary<string, object> entry)
+                {
+                    entries.Add(P2PJson.CloneDictionary(entry));
+                }
+            }
+            if (entries.Count == 0)
+            {
+                return;
+            }
+            AuthoritativeSkillTargetBatch batch =
+                new AuthoritativeSkillTargetBatch(entries);
+            PendingAuthoritativeSkillTargetBatches.Enqueue(batch);
+            currentInjectedAuthoritativeSkillTargetBatch = batch;
+            ActivateNextAuthoritativeSkillTargetBatch();
+        }
+
+        internal static void MarkReceivedAuthoritativeSkillTargetsReady()
+        {
+            if (IsActive && currentInjectedAuthoritativeSkillTargetBatch != null)
+            {
+                // ReceivedMessage only schedules the native operation. Keep its
+                // source targets until the VFX queue has actually executed it.
+                currentInjectedAuthoritativeSkillTargetBatch.ReadyForCleanup = true;
+            }
+        }
+
+        internal static void PrepareNativeReceivedActionMetadata(
+            NetworkBattleDefine.NetworkBattleURI uri,
+            Dictionary<string, object> data)
+        {
+            if (!IsActive || data == null)
+            {
+                return;
+            }
+
+            // ProcessingRecivedData can stock an ordered packet and invoke the
+            // native receiver later. Bind metadata here, at the actual receiver
+            // call, so a stocked action cannot lose the hidden/history/fusion/
+            // random state that belongs to it while waiting for its sequence.
+            bool ordered = IsOrderedReceivedBattleMessage(uri.ToString());
+            if (ordered)
+            {
+                // Unity may run the native network-agent Update before the mod's
+                // Update on the first idle frame. Finish the preceding operation's
+                // post-state here before staging metadata for the next operation.
+                TryApplyPendingPlayerHistoryStates();
+                TryApplyPendingFusionActions();
+                TryCompleteReceivedBattleAction();
+                if (receivedBattleActionPendingUntilVfx)
+                {
+                    ReportBattleDiagnostic(
+                        "A new native battle action started before the previous " +
+                        "P2P post-action state finished applying; finalizing the " +
+                        "previous boundary. " +
+                        DescribePendingReceivedPostActionState() + ".");
+                    DiscardUnresolvedReceivedPostActionState();
+                    ApplyPendingReceivedHiddenCardStates();
+                    processingReceivedBattleAction = false;
+                    receivedBattleActionPendingUntilVfx = false;
+                    receivedBattleActionStartedUtc = DateTime.MinValue;
+                    receivedBattleActionStallReported = false;
+                }
+                TryClearConsumedAuthoritativeSkillTargets();
+
+                processingReceivedBattleAction = true;
+                receivedBattleActionPendingUntilVfx = true;
+                receivedBattleActionStartedUtc = DateTime.UtcNow;
+                receivedBattleActionStallReported = false;
+            }
+
+            nativeReceivedMetadataActive = true;
+            currentInjectedAuthoritativeSkillTargetBatch = null;
+            RememberReceivedHiddenCardStates(data, ordered);
+            RememberReceivedPlayerHistoryBeforeState(data);
+            RememberReceivedPlayerHistoryState(data, false);
+            TryApplyPendingHiddenCardStates();
+            RememberReceivedAuthoritativeSkillTargets(data);
+            ApplyReceivedFusionAction(data, false);
+        }
+
+        internal static void CompleteNativeReceivedActionMetadata(
+            Dictionary<string, object> data,
+            bool accepted)
+        {
+            if (!IsActive)
+            {
+                return;
+            }
+
+            if (accepted)
+            {
+                MarkReceivedAuthoritativeSkillTargetsReady();
+            }
+            else
+            {
+                RejectReceivedAuthoritativeSkillTargets();
+                DiscardReceivedPlayerHistoryState(data);
+                PendingReceivedHiddenCardStates.Clear();
+                processingReceivedBattleAction = false;
+                receivedBattleActionPendingUntilVfx = false;
+                receivedBattleActionStartedUtc = DateTime.MinValue;
+                receivedBattleActionStallReported = false;
+            }
+
+            // Every safe pre-native hook has run by the time ReceivedMessage
+            // returns. Unresolved pre-action entries must not leak into the next
+            // action and roll its history/fusion state back to an older boundary.
+            if (PendingPreActionPlayerHistoryStates.Count > 0)
+            {
+                Plugin.Logger.LogWarning(
+                    "[P2P] Discarding unresolved pre-action player history after " +
+                    "the native receive boundary: " +
+                    string.Join(",", PendingPreActionPlayerHistoryStates.Keys) + ".");
+                PendingPreActionPlayerHistoryStates.Clear();
+            }
+            StagedPreNativeFusionActions.Clear();
+            currentInjectedAuthoritativeSkillTargetBatch = null;
+            nativeReceivedMetadataActive = false;
+        }
+
+        private static void DiscardReceivedPlayerHistoryState(
+            Dictionary<string, object> data)
+        {
+            if (data == null ||
+                !data.TryGetValue(PlayerHistoryStateKey, out object rawState) ||
+                !(rawState is Dictionary<string, object> state) ||
+                !TryGetStateInt(state, "owner", out int owner) ||
+                !TryGetStateInt(state, "revision", out int revision))
+            {
+                return;
+            }
+
+            ReceivedPlayerHistoryStates.Remove(
+                PlayerHistoryStateKeyFor(owner, revision));
+        }
+
+        internal static void RejectReceivedAuthoritativeSkillTargets()
+        {
+            if (!IsActive || currentInjectedAuthoritativeSkillTargetBatch == null)
+            {
+                return;
+            }
+
+            currentInjectedAuthoritativeSkillTargetBatch.Rejected = true;
+            currentInjectedAuthoritativeSkillTargetBatch.ReadyForCleanup = true;
+        }
+
+        private static void ActivateNextAuthoritativeSkillTargetBatch()
+        {
+            if (activeAuthoritativeSkillTargetBatch != null ||
+                PendingAuthoritativeSkillTargetBatches.Count == 0)
+            {
+                return;
+            }
+            activeAuthoritativeSkillTargetBatch =
+                PendingAuthoritativeSkillTargetBatches.Dequeue();
+            receivedAuthoritativeActionActive = true;
+        }
+
+        private static void TryClearConsumedAuthoritativeSkillTargets()
+        {
+            if (!receivedAuthoritativeActionActive ||
+                activeAuthoritativeSkillTargetBatch == null ||
+                !activeAuthoritativeSkillTargetBatch.ReadyForCleanup ||
+                processingReceivedBattleAction ||
+                receivedBattleActionPendingUntilVfx ||
+                !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
+                manager.VfxMgr == null || !manager.VfxMgr.IsEnd)
+            {
+                return;
+            }
+
+            if (activeAuthoritativeSkillTargetBatch.Rejected)
+            {
+                Plugin.Logger.LogWarning(
+                    "[P2P] Discarded authoritative random target results for a " +
+                    "native action that was rejected by the receiver.");
+            }
+            else if (activeAuthoritativeSkillTargetBatch.Entries.Count > 0)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[P2P] {activeAuthoritativeSkillTargetBatch.Entries.Count} authoritative " +
+                    "random target result(s) were not consumed by the matching " +
+                    "native action; discarded them at the completed action boundary.");
+            }
+            activeAuthoritativeSkillTargetBatch = null;
+            receivedAuthoritativeActionActive = false;
+            ActivateNextAuthoritativeSkillTargetBatch();
+        }
+
+        private static bool TryConsumeAuthoritativeSkillTargets(
+            SkillBase skill,
+            out List<BattleCardBase> targets,
+            out Dictionary<int, BattleCardBase> independentTargets,
+            out string diagnostic)
+        {
+            targets = null;
+            independentTargets = new Dictionary<int, BattleCardBase>();
+            diagnostic = string.Empty;
+            if (activeAuthoritativeSkillTargetBatch == null ||
+                activeAuthoritativeSkillTargetBatch.Entries.Count == 0)
+            {
+                return false;
+            }
+
+            int entryIndex = FindAuthoritativeSkillTargetEntry(skill,
+                out bool usedFallback);
+            if (entryIndex < 0)
+            {
+                diagnostic =
+                    $"no source result matched card idx={skill.SkillPrm.ownerCard.Index}, " +
+                    $"cardId={skill.SkillPrm.ownerCard.CardId}, " +
+                    $"skill={skill.GetType().Name}, " +
+                    $"pending={activeAuthoritativeSkillTargetBatch.Entries.Count}";
+                return false;
+            }
+
+            if (usedFallback)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[P2P] Matched authoritative random target by " +
+                    $"owner/index fallback: card idx={skill.SkillPrm.ownerCard.Index}, " +
+                    $"skill={skill.GetType().Name}.");
+            }
+
+            Dictionary<string, object> selected =
+                activeAuthoritativeSkillTargetBatch.Entries[entryIndex];
+            if (!selected.TryGetValue("targets", out object rawReferences) ||
+                rawReferences is string || !(rawReferences is IEnumerable references))
+            {
+                diagnostic = "the matched source result had no target array";
+                activeAuthoritativeSkillTargetBatch.Entries.RemoveAt(entryIndex);
+                return false;
+            }
+
+            List<BattleCardBase> resolved = new List<BattleCardBase>();
+            if (!TryResolveAuthoritativeReferences(
+                    references, resolved, out diagnostic))
+            {
+                return false;
+            }
+
+            if (selected.TryGetValue("independent", out object rawIndependent) &&
+                rawIndependent is IEnumerable independentEntries &&
+                !(rawIndependent is string))
+            {
+                foreach (object rawEntry in independentEntries)
+                {
+                    if (!(rawEntry is Dictionary<string, object> entry) ||
+                        !TryGetStateInt(entry, "slot", out int slot) ||
+                        !entry.TryGetValue("card", out object rawReference) ||
+                        !(rawReference is Dictionary<string, object> reference))
+                    {
+                        diagnostic = "an independent source target entry was malformed";
+                        return false;
+                    }
+                    List<BattleCardBase> one = new List<BattleCardBase>();
+                    if (!TryResolveAuthoritativeReferences(
+                            new[] { (object)reference }, one, out diagnostic))
+                    {
+                        return false;
+                    }
+                    if (one.Count > 0)
+                    {
+                        independentTargets[slot] = one[0];
+                    }
+                }
+            }
+
+            activeAuthoritativeSkillTargetBatch.Entries.RemoveAt(entryIndex);
+            targets = resolved;
+            return true;
+        }
+
+        private static int FindAuthoritativeSkillTargetEntry(
+            SkillBase skill,
+            out bool usedFallback)
+        {
+            usedFallback = false;
+            if (activeAuthoritativeSkillTargetBatch == null || skill == null)
+            {
+                return -1;
+            }
+
+            int strict = activeAuthoritativeSkillTargetBatch.Entries.FindIndex(
+                entry => AuthoritativeSkillTargetMatches(entry, skill));
+            if (strict >= 0)
+            {
+                return strict;
+            }
+
+            BattleCardBase owner = skill.SkillPrm?.ownerCard;
+            if (owner == null)
+            {
+                return -1;
+            }
+            bool localOwnerIsHost = Role == P2PRole.Host;
+            bool ownerIsHost = owner.IsPlayer
+                ? localOwnerIsHost
+                : !localOwnerIsHost;
+            int expectedOwner = ownerIsHost ? 1 : 0;
+            int ownerIndex = owner.Index;
+            int ownerCardId = owner.CardId;
+            string skillType = skill.GetType().FullName ?? skill.GetType().Name;
+
+            // Fusion metamorphose and attached/copied skills can rebuild the
+            // concrete SkillBase and publish counters between the source and
+            // receiver. The card's absolute owner/index remains stable for the
+            // duration of this ordered action, so use it as the deterministic
+            // fallback and keep FIFO ordering for repeated skills.
+            int fallback = activeAuthoritativeSkillTargetBatch.Entries.FindIndex(
+                entry =>
+                TryGetStateInt(entry, "ownerIdx", out int idx) && idx == ownerIndex &&
+                (!TryGetStateInt(entry, "owner", out int side) || side == expectedOwner) &&
+                (!TryGetStateInt(entry, "ownerCardId", out int id) ||
+                    id <= 0 || ownerCardId <= 0 || id == ownerCardId) &&
+                (!entry.TryGetValue("skillType", out object rawType) ||
+                    string.Equals(rawType?.ToString(), skillType,
+                        StringComparison.Ordinal)));
+            if (fallback < 0)
+            {
+                // Last-resort owner/index match. This is only possible inside the
+                // current action batch and is preferable to executing a random
+                // selection locally and silently diverging.
+                fallback = activeAuthoritativeSkillTargetBatch.Entries.FindIndex(
+                    entry =>
+                    TryGetStateInt(entry, "ownerIdx", out int idx) &&
+                        idx == ownerIndex &&
+                    (!TryGetStateInt(entry, "owner", out int side) ||
+                        side == expectedOwner));
+            }
+            if (fallback >= 0)
+            {
+                usedFallback = true;
+            }
+            return fallback;
+        }
+
+        private static bool TryResolveAuthoritativeReferences(
+            IEnumerable references,
+            List<BattleCardBase> resolved,
+            out string diagnostic)
+        {
+            diagnostic = string.Empty;
+            if (references == null || resolved == null)
+            {
+                return true;
+            }
+            foreach (object rawReference in references)
+            {
+                if (!(rawReference is Dictionary<string, object> reference))
+                {
+                    diagnostic = "a source target reference was malformed";
+                    return false;
+                }
+                BattleCardBase card = ResolveCardReference(reference);
+                if (card == null)
+                {
+                    diagnostic =
+                        "source target " + FormatCardReference(reference) +
+                        " is not present in the synchronized battle history";
+                    return false;
+                }
+                if (TryGetStateInt(reference, "cardId", out int cardId) &&
+                    cardId > 0 && card.CardId != cardId)
+                {
+                    diagnostic =
+                        $"source target {FormatCardReference(reference)} resolved " +
+                        $"to cardId={card.CardId}";
+                    return false;
+                }
+                resolved.Add(card);
+            }
+            return true;
+        }
+
+        private static bool AuthoritativeSkillTargetMatches(
+            Dictionary<string, object> entry,
+            SkillBase skill)
+        {
+            BattleCardBase owner = skill?.SkillPrm?.ownerCard;
+            if (entry == null || owner == null ||
+                !TryGetStateInt(entry, "ownerIdx", out int ownerIndex) ||
+                ownerIndex != owner.Index)
+            {
+                return false;
+            }
+            if (TryGetStateInt(entry, "ownerCardId", out int ownerCardId) &&
+                ownerCardId > 0 && owner.CardId != ownerCardId)
+            {
+                return false;
+            }
+            bool localOwnerIsHost = Role == P2PRole.Host;
+            bool ownerIsHost = owner.IsPlayer
+                ? localOwnerIsHost
+                : !localOwnerIsHost;
+            if (TryGetStateInt(entry, "owner", out int expectedOwner) &&
+                (expectedOwner == 0 || expectedOwner == 1) &&
+                expectedOwner != (ownerIsHost ? 1 : 0))
+            {
+                return false;
+            }
+            int skillIndex = GetNetworkSkillIndex(skill);
+            int published = NetworkBattleGenericTool.GetPublishSkillCount(skill);
+            int movement = GetSkillMovement(skill);
+            bool indexMatches =
+                !TryGetStateInt(entry, "skillIndex", out int expectedIndex) ||
+                expectedIndex < 0 || expectedIndex == skillIndex;
+            bool publishedMatches =
+                !TryGetStateInt(entry, "published", out int expectedPublished) ||
+                expectedPublished < 0 || published < 0 ||
+                expectedPublished == published;
+            bool movementMatches =
+                !TryGetStateInt(entry, "movement", out int expectedMovement) ||
+                expectedMovement < 0 || movement < 0 ||
+                expectedMovement == movement;
+            bool typeMatches =
+                !entry.TryGetValue("skillType", out object rawSkillType) ||
+                string.Equals(rawSkillType?.ToString(),
+                    skill.GetType().FullName ?? skill.GetType().Name,
+                    StringComparison.Ordinal);
+            // Attached and copied skills can have different concrete network
+            // wrapper types on the two clients. Stable native identifiers take
+            // precedence; type is only a fallback when those identifiers are all
+            // unavailable.
+            bool hasStableIdentity =
+                (TryGetStateInt(entry, "skillIndex", out int storedIndex) &&
+                    storedIndex >= 0 && skillIndex >= 0) ||
+                (TryGetStateInt(entry, "published", out int storedPublished) &&
+                    storedPublished >= 0 && published >= 0) ||
+                (TryGetStateInt(entry, "movement", out int storedMovement) &&
+                    storedMovement >= 0 && movement >= 0);
+            return indexMatches && publishedMatches && movementMatches &&
+                (hasStableIdentity || typeMatches);
+        }
+
+        private static int GetNetworkSkillIndex(SkillBase skill)
+        {
+            try
+            {
+                return NetworkBattleGenericTool.GetSkillIndex(skill);
+            }
+            catch (Exception)
+            {
+                return -1;
+            }
+        }
+
+        private static int GetSkillMovement(SkillBase skill)
+        {
+            try
+            {
+                return skill?._executionInfoCreator is NetworkExecutionInfoCreator creator
+                    ? creator.GetSkillMovementNum()
+                    : -1;
+            }
+            catch (Exception)
+            {
+                return -1;
+            }
+        }
+
+        private static string CardReferenceDiagnostic(BattleCardBase card)
+        {
+            if (card == null)
+            {
+                return "null";
+            }
+            return (card.IsPlayer ? "self:" : "opponent:") +
+                card.Index.ToString(CultureInfo.InvariantCulture) + ":" +
+                card.CardId.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static string FormatCardReference(
+            Dictionary<string, object> reference)
+        {
+            string owner = reference != null &&
+                TryGetStateInt(reference, "owner", out int ownerValue)
+                    ? ownerValue.ToString(CultureInfo.InvariantCulture)
+                    : "?";
+            string index = reference != null &&
+                TryGetStateInt(reference, "idx", out int indexValue)
+                    ? indexValue.ToString(CultureInfo.InvariantCulture)
+                    : "?";
+            string cardId = reference != null &&
+                TryGetStateInt(reference, "cardId", out int cardIdValue)
+                    ? cardIdValue.ToString(CultureInfo.InvariantCulture)
+                    : "?";
+            return $"owner={owner}/idx={index}/cardId={cardId}";
+        }
 
         private static void TrySendInitialPrivateStateSnapshot()
         {
@@ -2074,7 +3062,8 @@ namespace Shadowbus
         }
 
         private static void RememberReceivedHiddenCardStates(
-            Dictionary<string, object> data)
+            Dictionary<string, object> data,
+            bool deferForCurrentAction)
         {
             if (data == null ||
                 !data.TryGetValue("p2pHiddenOwner", out object rawOwner))
@@ -2120,13 +3109,42 @@ namespace Shadowbus
                     continue;
                 }
 
-                StoreReceivedHiddenCardState(ownerIsHost, card);
+                StoreReceivedHiddenCardState(
+                    ownerIsHost,
+                    card,
+                    deferForCurrentAction &&
+                    !ContainsReceivedHiddenRemoval(data, index));
             }
+        }
+
+        private static bool ContainsReceivedHiddenRemoval(
+            Dictionary<string, object> data,
+            int index)
+        {
+            if (data == null || index <= 0 ||
+                !data.TryGetValue("p2pHiddenRemoved", out object rawRemoved) ||
+                rawRemoved is string || !(rawRemoved is IEnumerable removed))
+            {
+                return false;
+            }
+
+            foreach (object rawIndex in removed)
+            {
+                if (TryGetStateInt(
+                        new Dictionary<string, object> { ["value"] = rawIndex },
+                        "value",
+                        out int removedIndex) && removedIndex == index)
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private static void StoreReceivedHiddenCardState(
             bool ownerIsHost,
-            Dictionary<string, object> card)
+            Dictionary<string, object> card,
+            bool deferForCurrentAction = false)
         {
             if (card == null || !TryGetStateInt(card, "idx", out int index) ||
                 index <= 0)
@@ -2135,6 +3153,13 @@ namespace Shadowbus
             }
             string key = HiddenStateKey(ownerIsHost, index);
             Dictionary<string, object> clone = P2PJson.CloneDictionary(card);
+            if (deferForCurrentAction)
+            {
+                PendingReceivedHiddenCardStates[key] = clone;
+                return;
+            }
+
+            PendingReceivedHiddenCardStates.Remove(key);
             ReceivedHiddenCardStates[key] = clone;
             ReceivedHiddenCardStateSignatures[key] =
                 JsonConvert.SerializeObject(clone, P2PJson.Settings);
@@ -2295,6 +3320,7 @@ namespace Shadowbus
                     bool complete = ApplyPlayerHistoryState(
                         target, pending.State, out string unresolved);
                     pending.Attempts++;
+                    pending.LastUnresolved = unresolved;
                     if (!complete)
                     {
                         pending.NextAttemptUtc = now.AddMilliseconds(100);
@@ -2354,39 +3380,18 @@ namespace Shadowbus
                 return false;
             }
 
-            int previousPp = player.Pp;
-            int previousPpTotal = player.PpTotal;
-            if (state.TryGetValue("scalars", out object rawScalars) &&
-                rawScalars is Dictionary<string, object> scalars)
-            {
-                ApplyPlayerHistoryScalars(player, scalars);
-                if (previousPp != player.Pp || previousPpTotal != player.PpTotal)
-                {
-                    try
-                    {
-                        player.StatusPanelControl?.SetPp(
-                            player.Pp, player.PpTotal, false);
-                    }
-                    catch (Exception)
-                    {
-                    }
-                }
-            }
             List<string> unresolvedLists = new List<string>();
-            if (state.TryGetValue("class", out object rawClassState) &&
-                rawClassState is Dictionary<string, object> classState &&
-                classState.Count > 0 &&
-                !ApplyPlayerClassState(player.Class, classState))
-            {
-                unresolvedLists.Add("class=card references or preprocess state");
-            }
             if (!state.TryGetValue("lists", out object rawLists) ||
                 !(rawLists is Dictionary<string, object> lists))
             {
-                unresolved = string.Join(", ", unresolvedLists);
-                return unresolvedLists.Count == 0;
+                lists = new Dictionary<string, object>();
             }
 
+            // Resolve every reference before mutating anything. A failed history
+            // revision is retried later, so partially clearing lists here would
+            // corrupt the native card-zone topology between attempts.
+            List<KeyValuePair<IList, List<object>>> preparedLists =
+                new List<KeyValuePair<IList, List<object>>>();
             foreach (KeyValuePair<string, object> listState in lists)
             {
                 if (!PlayerHistoryListNameSet.Contains(listState.Key) ||
@@ -2412,43 +3417,104 @@ namespace Shadowbus
                     unresolvedLists.Add(listState.Key + "=" + listUnresolved);
                     continue;
                 }
-
-                target.Clear();
-                foreach (object replacement in replacements)
-                {
-                    target.Add(replacement);
-                }
+                preparedLists.Add(
+                    new KeyValuePair<IList, List<object>>(target, replacements));
             }
 
             unresolved = string.Join(", ", unresolvedLists);
-            return unresolvedLists.Count == 0;
-        }
-
-        private static bool ApplyPlayerClassState(
-            BattleCardBase card,
-            Dictionary<string, object> state)
-        {
-            if (card == null || state == null)
+            if (unresolvedLists.Count > 0)
             {
                 return false;
             }
 
-            ApplyNativeCompatibleState(card, state);
-            ApplyCardModifierState(card, state);
-            ApplyPrimitiveState(card, state, "p2pCardPrimitive");
-            ApplySkillPrimitiveState(card, state);
-            ApplyCardSkillState(card, state);
-            ApplyGenericState(card, state);
-            ApplyIntegerListState(card, state);
-            ApplyStructuredSkillCollectionState(card, state);
-            ApplyDamagedCounterState(card, state);
-            ApplyAttackCountState(card, state);
-            ApplySkillActivationState(card, state);
-            ApplySkillCounterState(card, state);
-            bool referencesComplete = ApplyCardReferenceState(card, state);
-            bool preprocessComplete = ApplyPreprocessState(card, state);
-            return ApplyFusionState(card, state) &&
-                referencesComplete && preprocessComplete;
+            int previousPp = player.Pp;
+            int previousPpTotal = player.PpTotal;
+            if (state.TryGetValue("scalars", out object rawScalars) &&
+                rawScalars is Dictionary<string, object> scalars)
+            {
+                ApplyPlayerHistoryScalars(player, scalars);
+                if (previousPp != player.Pp || previousPpTotal != player.PpTotal)
+                {
+                    try
+                    {
+                        player.StatusPanelControl?.SetPp(
+                            player.Pp, player.PpTotal, false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+
+            foreach (KeyValuePair<IList, List<object>> prepared in preparedLists)
+            {
+                prepared.Key.Clear();
+                foreach (object replacement in prepared.Value)
+                {
+                    prepared.Key.Add(replacement);
+                }
+            }
+            return true;
+        }
+
+        internal static void RepairDuplicateReceivedCardZoneIndices(
+            BattlePlayerBase player,
+            int cardIndex,
+            int expectedCardId)
+        {
+            if (!IsActive || player == null || cardIndex <= 0)
+            {
+                return;
+            }
+
+            RepairDuplicateReceivedCardZoneIndex(
+                player.DeckCardList, "deck", player, cardIndex, expectedCardId);
+            RepairDuplicateReceivedCardZoneIndex(
+                player.HandCardList, "hand", player, cardIndex, expectedCardId);
+        }
+
+        private static void RepairDuplicateReceivedCardZoneIndex(
+            List<BattleCardBase> zone,
+            string zoneName,
+            BattlePlayerBase player,
+            int cardIndex,
+            int expectedCardId)
+        {
+            if (zone == null)
+            {
+                return;
+            }
+
+            List<BattleCardBase> matches = zone
+                .Where(card => card != null && card.Index == cardIndex)
+                .ToList();
+            if (matches.Count <= 1)
+            {
+                return;
+            }
+
+            bool localOwnerIsHost = Role == P2PRole.Host;
+            bool ownerIsHost = player.IsPlayer
+                ? localOwnerIsHost
+                : !localOwnerIsHost;
+            string key = HiddenStateKey(ownerIsHost, cardIndex);
+            AppliedReceivedHiddenCardStates.TryGetValue(
+                key, out AppliedHiddenCardState applied);
+            BattleCardBase canonical = matches.FirstOrDefault(card =>
+                    applied != null && ReferenceEquals(card, applied.Card)) ??
+                matches.FirstOrDefault(card => card.CardId == expectedCardId) ??
+                matches[matches.Count - 1];
+
+            int position = zone.FindIndex(card =>
+                card != null && card.Index == cardIndex);
+            zone.RemoveAll(card => card != null && card.Index == cardIndex);
+            zone.Insert(Math.Min(Math.Max(position, 0), zone.Count), canonical);
+
+            Plugin.Logger.LogWarning(
+                $"[P2P] Repaired duplicate card index before native replacement: " +
+                $"zone={zoneName}, idx={cardIndex}, expectedCardId={expectedCardId}, " +
+                $"keptCardId={canonical.CardId}, candidates=[" +
+                $"{string.Join(",", matches.Select(card => card.CardId))}].");
         }
 
         private static void ApplyPlayerHistoryScalars(
@@ -2787,10 +3853,6 @@ namespace Shadowbus
             Dictionary<string, object> data,
             bool afterNative)
         {
-            if (!afterNative)
-            {
-                StagedPreNativeFusionActions.Clear();
-            }
             if (!IsActive || data == null ||
                 !data.TryGetValue("p2pFusionActions", out object rawActions) ||
                 rawActions is string)
@@ -2800,12 +3862,24 @@ namespace Shadowbus
 
             if (rawActions is Dictionary<string, object> singleAction)
             {
+                if (!afterNative)
+                {
+                    StagedPreNativeFusionActions.Clear();
+                }
                 ApplyFusionActionAtBoundary(singleAction, afterNative);
                 return;
             }
             if (!(rawActions is IEnumerable actions))
             {
                 return;
+            }
+            if (!afterNative)
+            {
+                // A non-fusion message must not discard an unresolved pre-fusion
+                // snapshot from the operation currently waiting for card
+                // replacement. Only a message that actually owns fusion metadata
+                // may replace the staged boundary state.
+                StagedPreNativeFusionActions.Clear();
             }
             foreach (object rawAction in actions)
             {
@@ -2827,12 +3901,11 @@ namespace Shadowbus
                 return;
             }
 
-            if (TryApplyFusionAction(action, true))
-            {
-                PendingFusionActionSignatures.Remove(
-                    JsonConvert.SerializeObject(action, P2PJson.Settings));
-                return;
-            }
+            // ReceivedMessage returns after the fusion VFX was scheduled, not after
+            // it ran. Applying the post-action snapshot here would make the queued
+            // native FusionMaterialized append the current ingredients a second
+            // time. Always defer the N-state calibration until the shared VFX queue
+            // is idle and the native operation has actually completed.
             Dictionary<string, object> copy = P2PJson.CloneDictionary(action);
             string signature = JsonConvert.SerializeObject(copy, P2PJson.Settings);
             if (PendingFusionActionSignatures.Add(signature))
@@ -2855,10 +3928,15 @@ namespace Shadowbus
             {
                 if (!TryApplyFusionAction(action, false))
                 {
+                    // The native receiver may call this hook before its
+                    // ReplaceReceivedCards pass has created the real card. Keep
+                    // the action staged and retry after that pass instead of
+                    // silently losing the N-1 fusion state.
+                    StagedPreNativeFusionActions.Add(action);
                     Plugin.Logger.LogWarning(
                         "[P2P] Could not restore the pre-fusion cumulative state " +
                         "immediately before native fusion processing; using the " +
-                        "currently resolved card state.");
+                        "currently resolved card state; retrying after card replacement.");
                 }
             }
         }
@@ -2866,6 +3944,11 @@ namespace Shadowbus
         private static void TryApplyPendingFusionActions()
         {
             if (!IsActive || PendingFusionActions.Count == 0)
+            {
+                return;
+            }
+            if (!(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
+                manager.VfxMgr == null || !manager.VfxMgr.IsEnd)
             {
                 return;
             }
@@ -3652,13 +4735,172 @@ namespace Shadowbus
                 return;
             }
 
-            card.attackCountinfo.Clear();
-            if (count != 1)
+            RepairInvalidAttackCountState(card, "hidden-state apply");
+            int current = CalculateAttackCount(card.attackCountinfo);
+            if (current == count)
             {
-                // Native replay data represents remote attack-count changes as
-                // one absolute SetAttackCountInfo entry too.
+                // The native action already rebuilt the real Skill_attack_count
+                // relationship. Preserve it so VirtualClone and skill removal
+                // can continue to dereference the originating skill safely.
+                return;
+            }
+
+            if (count == 1)
+            {
+                card.attackCountinfo.Clear();
+                return;
+            }
+
+            Skill_attack_count skill = FindAttackCountSkill(card);
+            if (skill == null)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[P2P] Could not synchronize maximum attack count for " +
+                    $"idx={card.Index}, cardId={card.CardId}: expected={count}, " +
+                    $"actual={current}; no real Skill_attack_count was available. " +
+                    "Kept the native state instead of creating an unsafe null-skill record.");
+                return;
+            }
+
+            card.attackCountinfo.Clear();
+            if (SafeIsSetAttackCount(skill))
+            {
                 card.attackCountinfo.Add(
-                    new BattleCardBase.SetAttackCountInfo(null, count));
+                    new BattleCardBase.SetAttackCountInfo(skill, count));
+            }
+            else
+            {
+                card.attackCountinfo.Add(
+                    new BattleCardBase.AddAttackCountInfo(skill, count - 1));
+            }
+        }
+
+        internal static void RepairInvalidAttackCountState(
+            BattleCardBase card,
+            string boundary)
+        {
+            if (!IsActive || card?.attackCountinfo == null)
+            {
+                return;
+            }
+
+            int invalidCount = card.attackCountinfo.Count(info =>
+                info == null || info.Skill == null);
+            if (invalidCount == 0)
+            {
+                return;
+            }
+
+            int expected = CalculateAttackCount(card.attackCountinfo);
+            card.attackCountinfo.RemoveAll(info =>
+                info == null || info.Skill == null);
+            int repaired = CalculateAttackCount(card.attackCountinfo);
+            if (repaired != expected && expected != 1)
+            {
+                Skill_attack_count skill = FindAttackCountSkill(card);
+                if (skill != null)
+                {
+                    card.attackCountinfo.Clear();
+                    if (SafeIsSetAttackCount(skill))
+                    {
+                        card.attackCountinfo.Add(
+                            new BattleCardBase.SetAttackCountInfo(skill, expected));
+                    }
+                    else
+                    {
+                        card.attackCountinfo.Add(
+                            new BattleCardBase.AddAttackCountInfo(
+                                skill, expected - 1));
+                    }
+                    repaired = CalculateAttackCount(card.attackCountinfo);
+                }
+            }
+
+            Plugin.Logger.LogWarning(
+                $"[P2P] Removed {invalidCount} unsafe attack-count record(s) " +
+                $"before {boundary ?? "card operation"}: idx={card.Index}, " +
+                $"cardId={card.CardId}, expected={expected}, repaired={repaired}.");
+        }
+
+        private static int CalculateAttackCount(
+            IEnumerable<BattleCardBase.AttackCountInfo> entries)
+        {
+            int count = 1;
+            if (entries == null)
+            {
+                return count;
+            }
+            foreach (BattleCardBase.AttackCountInfo entry in entries)
+            {
+                if (entry != null)
+                {
+                    count = entry.CalcAttackCount(count);
+                }
+            }
+            return count;
+        }
+
+        private static Skill_attack_count FindAttackCountSkill(
+            BattleCardBase card)
+        {
+            if (card == null)
+            {
+                return null;
+            }
+
+            List<Skill_attack_count> candidates = new List<Skill_attack_count>();
+            if (card.attackCountinfo != null)
+            {
+                candidates.AddRange(card.attackCountinfo
+                    .Where(info => info?.Skill != null)
+                    .Select(info => info.Skill));
+            }
+            if (card.BuffInfoList != null)
+            {
+                candidates.AddRange(card.BuffInfoList
+                    .Where(buff => buff?.SkillFrom is Skill_attack_count)
+                    .Select(buff => (Skill_attack_count)buff.SkillFrom));
+            }
+            if (card.NormalSkills != null)
+            {
+                candidates.AddRange(card.NormalSkills
+                    .OfType<Skill_attack_count>());
+            }
+            if (card.EvolutionSkills != null)
+            {
+                candidates.AddRange(card.EvolutionSkills
+                    .OfType<Skill_attack_count>());
+            }
+
+            List<Skill_attack_count> distinct = candidates
+                .Where(skill => skill != null)
+                .Distinct()
+                .ToList();
+            return distinct.FirstOrDefault(SafeIsSetAttackCount) ??
+                distinct.FirstOrDefault(SafeIsAddAttackCount);
+        }
+
+        private static bool SafeIsSetAttackCount(Skill_attack_count skill)
+        {
+            try
+            {
+                return skill != null && skill.IsSetAttackCount();
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private static bool SafeIsAddAttackCount(Skill_attack_count skill)
+        {
+            try
+            {
+                return skill != null && skill.IsAddAttackCount();
+            }
+            catch (Exception)
+            {
+                return false;
             }
         }
 
@@ -3901,7 +5143,8 @@ namespace Shadowbus
                 }
             }
 
-            foreach (string name in PlayerHistoryListNames)
+            foreach (string name in
+                P2PPlayerHistoryPolicy.SynchronizedListNames)
             {
                 if (!TryGetPlayerHistoryListMember(
                         player, name, out _, out object rawList))
@@ -4567,6 +5810,9 @@ namespace Shadowbus
                 new Dictionary<int, BattleCardBase>();
             List<Dictionary<string, object>> changedCards =
                 new List<Dictionary<string, object>>();
+            Dictionary<int, Dictionary<string, object>>
+                fusionMetamorphoseOriginalStates =
+                new Dictionary<int, Dictionary<string, object>>();
 
             try
             {
@@ -4597,6 +5843,27 @@ namespace Shadowbus
                             $"[P2P] Could not capture hidden card idx={card.Index}: " +
                             ex.Message);
                         continue;
+                    }
+
+                    // EmitMsg observes the hand after a fusion metamorphose. Keep
+                    // the cached pre-action object in knownList so the receiver's
+                    // native Skill_fusion_metamorphose can perform ReplaceInHand
+                    // and play its animation. The new state remains in the P2P
+                    // post-action snapshot below.
+                    if (P2PBattleProtocol.IsFusionMetamorphoseTarget(
+                            data, card.Index) &&
+                        LocalHiddenCardStates.TryGetValue(
+                            card.Index,
+                            out Dictionary<string, object> originalState) &&
+                        TryGetStateInt(originalState, "cardId",
+                            out int originalCardId) && originalCardId > 0)
+                    {
+                        Dictionary<string, object> originalClone =
+                            P2PJson.CloneDictionary(originalState);
+                        fusionMetamorphoseOriginalStates[card.Index] =
+                            originalClone;
+                        AttachFusionMetamorphoseOriginal(
+                            data, card.Index, originalClone);
                     }
                     LocalHiddenCardStates[card.Index] =
                         P2PJson.CloneDictionary(state);
@@ -4655,7 +5922,15 @@ namespace Shadowbus
                 List<object> knownList = GetOrCreateKnownList(data);
                 foreach (Dictionary<string, object> state in changedCards)
                 {
-                    MergeKnownCardState(knownList, state);
+                    Dictionary<string, object> nativeState = state;
+                    if (TryGetStateInt(state, "idx", out int stateIndex) &&
+                        fusionMetamorphoseOriginalStates.TryGetValue(
+                            stateIndex,
+                            out Dictionary<string, object> originalState))
+                    {
+                        nativeState = originalState;
+                    }
+                    MergeKnownCardState(knownList, nativeState);
                 }
                 data["p2pHiddenCards"] = changedCards
                     .Select(state => (object)P2PJson.CloneDictionary(state))
@@ -4673,6 +5948,52 @@ namespace Shadowbus
                 $"[P2P] Attached {changedCards.Count} hidden hand/deck state " +
                 $"snapshot(s) and {removedIndices.Count} tombstone(s) to {uri}" +
                 $"{(scanAllCards ? " (full scan)" : string.Empty)}.");
+        }
+
+        private static void AttachFusionMetamorphoseOriginal(
+            Dictionary<string, object> data,
+            int index,
+            Dictionary<string, object> state)
+        {
+            if (data == null || state == null || index <= 0 ||
+                !TryGetStateInt(state, "cardId", out int cardId) || cardId <= 0)
+            {
+                return;
+            }
+
+            List<object> entries;
+            if (data.TryGetValue(
+                    P2PBattleProtocol.FusionMetamorphoseOriginalsKey,
+                    out object rawEntries) && rawEntries is List<object> existing)
+            {
+                entries = existing;
+            }
+            else
+            {
+                entries = new List<object>();
+                data[P2PBattleProtocol.FusionMetamorphoseOriginalsKey] = entries;
+            }
+
+            int owner = Role == P2PRole.Host ? 1 : 0;
+            Dictionary<string, object> entry = entries
+                .OfType<Dictionary<string, object>>()
+                .FirstOrDefault(candidate =>
+                    TryGetStateInt(candidate, "owner", out int candidateOwner) &&
+                    candidateOwner == owner &&
+                    TryGetStateInt(candidate, "idx", out int candidateIndex) &&
+                    candidateIndex == index);
+            if (entry == null)
+            {
+                entry = new Dictionary<string, object>();
+                entries.Add(entry);
+            }
+            entry["owner"] = owner;
+            entry["idx"] = index;
+            entry["cardId"] = cardId;
+            if (TryGetStateInt(state, "cost", out int cost) && cost >= 0)
+            {
+                entry["cost"] = cost;
+            }
         }
 
         private static HashSet<int> CollectLocalCardIndices(
@@ -4808,12 +6129,11 @@ namespace Shadowbus
 
         private static void AppendLocalPlayerHistoryState(
             string uri,
-            Dictionary<string, object> data)
+            Dictionary<string, object> data,
+            Dictionary<string, object> preActionState = null,
+            int preActionRevision = 0)
         {
-            if (data == null || string.Equals(uri, P2PBattleProtocol.EchoUri,
-                    StringComparison.Ordinal) ||
-                (IsPrivateStateSyncActive &&
-                    !P2PBattleProtocol.CarriesBattleStateCheckpoint(uri)) ||
+            if (data == null || !IsOrderedLocalBattleMessage(uri) ||
                 !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
                 manager.BattlePlayer == null)
             {
@@ -4827,23 +6147,217 @@ namespace Shadowbus
                     CapturePlayerHistoryState(manager.BattlePlayer, ownerIsHost);
                 string signature = JsonConvert.SerializeObject(
                     state, P2PJson.Settings);
-                if (string.Equals(signature, localPlayerHistoryStateSignature,
-                        StringComparison.Ordinal))
+                bool ordered = IsOrderedLocalBattleMessage(uri);
+                Dictionary<string, object> beforeState =
+                    ordered && P2PPlayerHistoryPolicy.ShouldAttachPreActionHistory(
+                        uri, manager.BattlePlayer.Turn)
+                    ? preActionState ?? localPlayerHistoryBaselineState
+                    : null;
+                int beforeRevision = preActionRevision > 0
+                    ? preActionRevision
+                    : localPlayerHistoryBaselineRevision;
+                if (ordered && beforeState != null)
                 {
-                    return;
+                    Dictionary<string, object> before =
+                        P2PJson.CloneDictionary(beforeState);
+                    before.Remove("revision");
+                    string beforeSignature = JsonConvert.SerializeObject(
+                        before, P2PJson.Settings);
+                    bool isNormalAction = string.Equals(
+                        uri,
+                        NetworkBattleDefine.NetworkBattleURI.PlayActions.ToString(),
+                        StringComparison.Ordinal);
+                    bool receiverAlreadyHasBeforeState = isNormalAction &&
+                        !string.IsNullOrEmpty(localPlayerHistoryStateSignature) &&
+                        string.Equals(beforeSignature,
+                            localPlayerHistoryStateSignature,
+                            StringComparison.Ordinal);
+                    if (!receiverAlreadyHasBeforeState)
+                    {
+                        before["revision"] = Math.Max(1, beforeRevision);
+                        data[PlayerHistoryStateBeforeKey] = before;
+                        Plugin.Logger.LogDebug(
+                            $"[P2P] Attached pre-action player history revision " +
+                            $"{beforeRevision} to {uri}.");
+                    }
                 }
 
-                localPlayerHistoryStateSignature = signature;
-                state["revision"] = ++localPlayerHistoryRevision;
-                data[PlayerHistoryStateKey] = state;
-                Plugin.Logger.LogDebug(
-                    $"[P2P] Attached player history revision " +
-                    $"{localPlayerHistoryRevision} to {uri}.");
+                if (!string.Equals(signature, localPlayerHistoryStateSignature,
+                        StringComparison.Ordinal))
+                {
+                    localPlayerHistoryStateSignature = signature;
+                    state["revision"] = ++localPlayerHistoryRevision;
+                    data[PlayerHistoryStateKey] = state;
+                    Plugin.Logger.LogDebug(
+                        $"[P2P] Attached player history revision " +
+                        $"{localPlayerHistoryRevision} to {uri}.");
+                }
+
+                // This is the first stable point after the action's synchronous
+                // state mutations and VFX have completed. Use it as the next
+                // action's fallback baseline instead of reflecting and serializing
+                // every player-history field once per rendered frame.
+                localPlayerHistoryBaselineSignature = signature;
+                localPlayerHistoryBaselineState = P2PJson.CloneDictionary(state);
+                localPlayerHistoryBaselineState.Remove("revision");
+                localPlayerHistoryBaselineRevision = Math.Max(1,
+                    localPlayerHistoryRevision);
             }
             catch (Exception ex)
             {
                 Plugin.Logger.LogDebug(
                     "[P2P] Could not capture player history state: " + ex.Message);
+            }
+        }
+
+        internal static void CaptureLocalActionStart(BattleCardBase sourceCard)
+        {
+            if (!IsActive || sourceCard == null || !sourceCard.IsPlayer ||
+                !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
+                manager.BattlePlayer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                bool ownerIsHost = Role == P2PRole.Host;
+                Dictionary<string, object> state = CapturePlayerHistoryState(
+                    manager.BattlePlayer, ownerIsHost);
+                localActionPreHistoryState = state;
+                localActionPreHistoryRevision = Math.Max(1,
+                    localPlayerHistoryRevision);
+                localPlayerHistoryBaselineState = P2PJson.CloneDictionary(state);
+                localPlayerHistoryBaselineSignature = JsonConvert.SerializeObject(
+                    state, P2PJson.Settings);
+                localPlayerHistoryBaselineRevision = localActionPreHistoryRevision;
+                Plugin.Logger.LogDebug(
+                    $"[P2P] Captured action-start player history revision " +
+                    $"{localActionPreHistoryRevision} for card idx={sourceCard.Index}.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogDebug(
+                    "[P2P] Could not capture action-start player history: " +
+                    ex.Message);
+            }
+        }
+
+        internal static void CaptureLocalActionStart()
+        {
+            if (!IsActive ||
+                !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
+                manager.BattlePlayer == null || !manager.BattlePlayer.IsSelfTurn)
+            {
+                return;
+            }
+
+            try
+            {
+                bool ownerIsHost = Role == P2PRole.Host;
+                Dictionary<string, object> state = CapturePlayerHistoryState(
+                    manager.BattlePlayer, ownerIsHost);
+                localActionPreHistoryState = state;
+                localActionPreHistoryRevision = Math.Max(1,
+                    localPlayerHistoryRevision);
+                localPlayerHistoryBaselineState = P2PJson.CloneDictionary(state);
+                localPlayerHistoryBaselineSignature = JsonConvert.SerializeObject(
+                    state, P2PJson.Settings);
+                localPlayerHistoryBaselineRevision = localActionPreHistoryRevision;
+                Plugin.Logger.LogDebug(
+                    $"[P2P] Captured action-start player history revision " +
+                    $"{localActionPreHistoryRevision}.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogDebug(
+                    "[P2P] Could not capture action-start player history: " +
+                    ex.Message);
+            }
+        }
+
+        internal static void CaptureLocalAutomaticActionStart(
+            BattlePlayerBase player,
+            string boundary)
+        {
+            if (!IsActive || player == null || !player.IsPlayer ||
+                !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
+                !ReferenceEquals(player, manager.BattlePlayer))
+            {
+                return;
+            }
+
+            try
+            {
+                bool ownerIsHost = Role == P2PRole.Host;
+                Dictionary<string, object> state = CapturePlayerHistoryState(
+                    manager.BattlePlayer, ownerIsHost);
+                localActionPreHistoryState = state;
+                localActionPreHistoryRevision = Math.Max(1,
+                    localPlayerHistoryRevision);
+                localPlayerHistoryBaselineState = P2PJson.CloneDictionary(state);
+                localPlayerHistoryBaselineSignature = JsonConvert.SerializeObject(
+                    state, P2PJson.Settings);
+                localPlayerHistoryBaselineRevision = localActionPreHistoryRevision;
+                Plugin.Logger.LogDebug(
+                    $"[P2P] Captured {boundary ?? "automatic"} action-start " +
+                    $"player history revision {localActionPreHistoryRevision}.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogDebug(
+                    $"[P2P] Could not capture {boundary ?? "automatic"} " +
+                    "action-start player history: " + ex.Message);
+            }
+        }
+
+        private static void RememberReceivedPlayerHistoryBeforeState(
+            Dictionary<string, object> data)
+        {
+            if (data == null ||
+                !data.TryGetValue(PlayerHistoryStateBeforeKey,
+                    out object rawState) ||
+                !(rawState is Dictionary<string, object> state) ||
+                !TryGetStateInt(state, "owner", out int owner) ||
+                (owner != 0 && owner != 1) ||
+                owner == (Role == P2PRole.Host ? 1 : 0))
+            {
+                return;
+            }
+
+            PendingPreActionPlayerHistoryStates[owner] =
+                P2PJson.CloneDictionary(state);
+        }
+
+        internal static void ApplyPendingPreActionPlayerHistoryState()
+        {
+            if (!IsActive || PendingPreActionPlayerHistoryStates.Count == 0 ||
+                !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager))
+            {
+                return;
+            }
+
+            foreach (KeyValuePair<int, Dictionary<string, object>> item in
+                PendingPreActionPlayerHistoryStates.ToList())
+            {
+                BattlePlayerBase target = item.Key ==
+                    (Role == P2PRole.Host ? 1 : 0)
+                    ? manager.BattlePlayer
+                    : manager.BattleEnemy;
+                if (ApplyPlayerHistoryState(target, item.Value,
+                        out string unresolved))
+                {
+                    PendingPreActionPlayerHistoryStates.Remove(item.Key);
+                    Plugin.Logger.LogDebug(
+                        $"[P2P] Applied pre-action player history for owner=" +
+                        $"{item.Key}.");
+                }
+                else if (!string.IsNullOrEmpty(unresolved))
+                {
+                    Plugin.Logger.LogDebug(
+                        $"[P2P] Pre-action player history owner={item.Key} " +
+                        $"is waiting for {unresolved}.");
+                }
             }
         }
 
@@ -4872,7 +6386,8 @@ namespace Shadowbus
 
             Dictionary<string, object> lists =
                 new Dictionary<string, object>();
-            foreach (string propertyName in PlayerHistoryListNames)
+            foreach (string propertyName in
+                P2PPlayerHistoryPolicy.SynchronizedListNames)
             {
                 if (!TryGetPlayerHistoryListMember(
                         player, propertyName, out Type listType,
@@ -4901,10 +6416,7 @@ namespace Shadowbus
             {
                 ["owner"] = ownerIsHost ? 1 : 0,
                 ["scalars"] = scalars,
-                ["lists"] = lists,
-                ["class"] = player.Class == null
-                    ? new Dictionary<string, object>()
-                    : CreateHiddenCardState(player.Class)
+                ["lists"] = lists
             };
         }
 
@@ -5084,6 +6596,9 @@ namespace Shadowbus
                 {
                     player.HandCardList,
                     player.DeckCardList,
+                    player.ClassAndInPlayCardList,
+                    player.CemeteryList,
+                    player.BanishList,
                     player.FusionIngredientList,
                     player.ReservedCardList,
                     // Necromance cards are not always public in the local
@@ -5906,76 +7421,10 @@ namespace Shadowbus
             "p2pFusion"
         };
 
-        private static readonly string[] PlayerHistoryListNames =
-        {
-            "HandCardList",
-            "DeckCardList",
-            "BattleStartDeckCardList",
-            "DeckSkillCardList",
-            "FusionIngredientList",
-            "TurnFusionCards",
-            "NecromanceZoneList",
-            "DiscardedCardList",
-            "FusionIngredientAndDiscardedCardList",
-            "ReservedCardList",
-            "UniteList",
-            "GetOnList",
-            "BlackHole",
-            "ChoiceBraveCardList",
-            "PredictionCemeteryRandomCards",
-            "PredictionDamageRandomCards",
-            "PredictionBanishRandomCards",
-            "ReturnList",
-            "LastTargetCardsList",
-            "InHandCards",
-            "SkillDiscards",
-            "SelfDiscardList",
-            "SkillBanishCards",
-            "HealingCards",
-            "SkillSummonedCards",
-            "SummonedCards",
-            "EvolvedCards",
-            "DestroyedWhenDestroyCards",
-            "TurnPlayCardCountInfo",
-            "TurnFusionCountInfo",
-            "TurnEvolveCardCountInfo",
-            "TurnPlayCards",
-            "TurnDrawCards",
-            "TurnDrawTokenCardsWithId",
-            "GameDrawCards",
-            "GameDrawTokenCards",
-            "GameAddUpdateDeckCards",
-            "GameSummonCards",
-            "GameSummonMomentTribe",
-            "GamePlayMomentTribe",
-            "GamePlayMomentSpellChargeCards",
-            "GameUpdateDeckMomentTribe",
-            "GamePlayCards",
-            "GameTurnPlayCards",
-            "GameEnhancePlayCards",
-            "GameCrystallizedPlayCards",
-            "GameLeftCards",
-            "GameTurnLeftCards",
-            "GameReturnedCards",
-            "GameSuperSkyboundArtCards",
-            "GameInplayMetamorphoseCards",
-            "TurnDestroyCards",
-            "TurnWhenHealingCount",
-            "GameBurialRiteCards",
-            "TurnBurialRiteCards",
-            "BurialRiteOrDiscardCardHandIndexList",
-            "GameReanimatedCards",
-            "AddToDeckCardList",
-            "TurnStartLifeList",
-            "GameSkillReturnCardCountList",
-            "GameSkillDiscardCountList",
-            "GameSkillBuffCountList",
-            "GameSkillMetamorphoseCountList",
-            "GameQuickAttackCards"
-        };
-
         private static readonly HashSet<string> PlayerHistoryListNameSet =
-            new HashSet<string>(PlayerHistoryListNames, StringComparer.Ordinal);
+            new HashSet<string>(
+                P2PPlayerHistoryPolicy.SynchronizedListNames,
+                StringComparer.Ordinal);
 
         private static readonly string[] PlayerHistoryScalarNames =
         {
@@ -6173,31 +7622,7 @@ namespace Shadowbus
                         value.Value, P2PJson.Settings);
                 }
             }
-            if (state.TryGetValue("class", out object rawClass) &&
-                rawClass is Dictionary<string, object> classState)
-            {
-                result["class"] = NormalizeDiagnosticValue(classState);
-            }
             return result;
-        }
-
-        private static object NormalizeDiagnosticValue(object value)
-        {
-            if (value is Dictionary<string, object> dictionary)
-            {
-                Dictionary<string, object> normalized =
-                    new Dictionary<string, object>();
-                foreach (KeyValuePair<string, object> item in dictionary)
-                {
-                    normalized[item.Key] = NormalizeDiagnosticValue(item.Value);
-                }
-                return normalized;
-            }
-            if (!(value is string) && value is IEnumerable)
-            {
-                return JsonConvert.SerializeObject(value, P2PJson.Settings);
-            }
-            return value;
         }
 
         private static string FormatCardIndices(IEnumerable<BattleCardBase> cards)
@@ -6743,14 +8168,12 @@ namespace Shadowbus
         private static IEnumerable<P2PFusionIngredientState>
             ResolveLocalFusionIngredients(int index)
         {
-            SkillApplyInformation information = ResolveLocalCard(index)?
+            BattleCardBase card = ResolveLocalCard(index);
+            SkillApplyInformation information = card?
                 .SkillApplyInformation as SkillApplyInformation;
-            if (information?.FusionIngredients == null)
-            {
-                return Enumerable.Empty<P2PFusionIngredientState>();
-            }
-
-            return information.FusionIngredients
+            List<P2PFusionIngredientState> current = information?.FusionIngredients == null
+                ? new List<P2PFusionIngredientState>()
+                : information.FusionIngredients
                 .Where(ingredient => ingredient?.Card != null &&
                     ingredient.Card.Index > 0)
                 .Select(ingredient => new P2PFusionIngredientState(
@@ -6758,6 +8181,53 @@ namespace Shadowbus
                     ingredient.Card.CardId,
                     ingredient.FusionTurn))
                 .ToList();
+
+            int key = index;
+            if (current.Count > 0)
+            {
+                LocalFusionIngredientSnapshots[key] = current
+                    .Select(item => new P2PFusionIngredientState(
+                        item.Index, item.CardId, item.Turn))
+                    .ToList();
+                return current;
+            }
+
+            return LocalFusionIngredientSnapshots.TryGetValue(key,
+                    out List<P2PFusionIngredientState> snapshot)
+                ? snapshot.ToList()
+                : Enumerable.Empty<P2PFusionIngredientState>();
+        }
+
+        internal static void RememberLocalFusionIngredientState(
+            BattleCardBase fusionCard)
+        {
+            if (!IsActive || fusionCard == null || fusionCard.Index <= 0 ||
+                !fusionCard.IsPlayer)
+            {
+                return;
+            }
+
+            SkillApplyInformation information = fusionCard.SkillApplyInformation as
+                SkillApplyInformation;
+            if (information?.FusionIngredients == null)
+            {
+                return;
+            }
+
+            int key = fusionCard.Index;
+            LocalFusionIngredientSnapshots[key] = information.FusionIngredients
+                .Where(ingredient => ingredient?.Card != null &&
+                    ingredient.Card.Index > 0)
+                .Select(ingredient => new P2PFusionIngredientState(
+                    ingredient.Card.Index,
+                    ingredient.Card.CardId,
+                    ingredient.FusionTurn))
+                .ToList();
+            Plugin.Logger.LogDebug(
+                $"[P2P] Captured cumulative fusion state for local card " +
+                $"idx={fusionCard.Index}: " +
+                $"[{string.Join(",", LocalFusionIngredientSnapshots[key].Select(
+                    item => item.Index.ToString(CultureInfo.InvariantCulture)))}].");
         }
 
         private static IEnumerable<int> ResolveLocalBurialRiteSkillIndexes(int index)
@@ -6966,6 +8436,21 @@ namespace Shadowbus
             internal DateTime FirstSeenUtc { get; set; }
             internal DateTime NextAttemptUtc { get; set; }
             internal bool WarningLogged { get; set; }
+            internal string LastUnresolved { get; set; }
+        }
+
+        private sealed class AuthoritativeSkillTargetBatch
+        {
+            internal AuthoritativeSkillTargetBatch(
+                IEnumerable<Dictionary<string, object>> entries)
+            {
+                Entries = entries?.ToList() ??
+                    new List<Dictionary<string, object>>();
+            }
+
+            internal List<Dictionary<string, object>> Entries { get; }
+            internal bool ReadyForCleanup { get; set; }
+            internal bool Rejected { get; set; }
         }
     }
 }

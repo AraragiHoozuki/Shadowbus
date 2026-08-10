@@ -495,7 +495,14 @@ namespace Shadowbus
                     string.Equals(key, "p2pHiddenOwner", StringComparison.Ordinal) ||
                     string.Equals(key, "p2pPlayerHistory", StringComparison.Ordinal) ||
                     string.Equals(key, "p2pFusionActions", StringComparison.Ordinal) ||
-                    string.Equals(key, "p2pMetamorphoses", StringComparison.Ordinal))
+                    string.Equals(key, "p2pMetamorphoses", StringComparison.Ordinal) ||
+                    string.Equals(key,
+                        P2PBattleProtocol.FusionMetamorphoseOriginalsKey,
+                        StringComparison.Ordinal) ||
+                    string.Equals(key, "p2pAuthoritativeSkillTargets",
+                        StringComparison.Ordinal) ||
+                    string.Equals(key, "p2pPlayerHistoryBefore",
+                        StringComparison.Ordinal))
                 {
                     // P2P private snapshots use absolute host/guest ownership and
                     // are consumed by the mod before/after the native receiver.

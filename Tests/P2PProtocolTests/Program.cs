@@ -24,6 +24,7 @@ namespace Shadowbus
                 TestHiddenSnapshotPerspectiveTransform();
                 TestBattleResults();
                 TestBattleProtocol();
+                TestPlayerHistoryPolicy();
                 TestBattleStateDiagnostics();
                 TestDealState();
                 TestDeliverySequence();
@@ -38,6 +39,67 @@ namespace Shadowbus
                 Console.Error.WriteLine(ex);
                 return 1;
             }
+        }
+
+        private static void TestPlayerHistoryPolicy()
+        {
+            HashSet<string> synchronized = new HashSet<string>(
+                P2PPlayerHistoryPolicy.SynchronizedListNames,
+                StringComparer.Ordinal);
+            foreach (string required in new[]
+            {
+                "BattleStartDeckCardList",
+                "DeckSkillCardList",
+                "TurnFusionCountInfo",
+                "GameTurnPlayCards",
+                "TurnDestroyCards"
+            })
+            {
+                Assert(synchronized.Contains(required),
+                    "A persistent player-history list is no longer synchronized: " +
+                    required);
+            }
+
+            foreach (string temporary in new[]
+            {
+                "ClassAndInPlayCardList",
+                "PredictionCemeteryRandomCards",
+                "PredictionDamageRandomCards",
+                "PredictionBanishRandomCards",
+                "ReturnList",
+                "LastTargetCardsList",
+                "InHandCards",
+                "SkillDiscards",
+                "SelfDiscardList",
+                "SkillBanishCards",
+                "HealingCards",
+                "SkillSummonedCards",
+                "SummonedCards",
+                "EvolvedCards",
+                "DestroyedWhenDestroyCards"
+            })
+            {
+                Assert(!synchronized.Contains(temporary),
+                    "A native action work list entered player-history sync: " +
+                    temporary);
+            }
+
+            foreach (string nativeZone in
+                P2PPlayerHistoryPolicy.NativeCardZoneListNames)
+            {
+                Assert(!synchronized.Contains(nativeZone),
+                    "A native card zone entered reflective player-history sync: " +
+                    nativeZone);
+            }
+
+            Assert(!P2PPlayerHistoryPolicy.ShouldAttachPreActionHistory(
+                    "TurnStart", 1),
+                "The initial TurnStart would overwrite the native opening state.");
+            Assert(P2PPlayerHistoryPolicy.ShouldAttachPreActionHistory(
+                    "TurnStart", 2) &&
+                P2PPlayerHistoryPolicy.ShouldAttachPreActionHistory(
+                    "PlayActions", 1),
+                "A normal action lost its pre-action player-history state.");
         }
 
         private static void TestLocalDeckCodes()
@@ -576,6 +638,24 @@ namespace Shadowbus
                     },
                     ["lists"] = new Dictionary<string, object>
                     {
+                        ["CemeteryList"] = new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["owner"] = 1,
+                                ["idx"] = 17,
+                                ["cardId"] = 101001001
+                            }
+                        },
+                        ["DestroyedWhenDestroyCards"] = new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["owner"] = 1,
+                                ["idx"] = 17,
+                                ["cardId"] = 101001001
+                            }
+                        },
                         ["GameTurnPlayCards"] = new List<object>
                         {
                             new Dictionary<string, object>
@@ -587,6 +667,50 @@ namespace Shadowbus
                                     ["idx"] = 42,
                                     ["isSelf"] = 9
                                 }
+                            }
+                        }
+                    }
+                },
+                ["p2pPlayerHistoryBefore"] = new Dictionary<string, object>
+                {
+                    ["owner"] = 1,
+                    ["revision"] = 3,
+                    ["lists"] = new Dictionary<string, object>
+                    {
+                        ["TurnDestroyCards"] = new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["turnOwner"] = 1,
+                                ["card"] = new Dictionary<string, object>
+                                {
+                                    ["owner"] = 1,
+                                    ["idx"] = 17,
+                                    ["cardId"] = 101001001
+                                }
+                            }
+                        }
+                    }
+                },
+                ["p2pAuthoritativeSkillTargets"] = new List<object>
+                {
+                    new Dictionary<string, object>
+                    {
+                        ["owner"] = 1,
+                        ["ownerIdx"] = 42,
+                        ["targets"] = new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["owner"] = 1,
+                                ["idx"] = 17,
+                                ["cardId"] = 101001001
+                            },
+                            new Dictionary<string, object>
+                            {
+                                ["owner"] = 0,
+                                ["idx"] = 29,
+                                ["cardId"] = 102001001
                             }
                         }
                     }
@@ -653,6 +777,40 @@ namespace Shadowbus
                 Convert.ToInt32(historyCard["owner"]) == 1 &&
                 Convert.ToInt32(historyCard["isSelf"]) == 9,
                 "Player history metadata was corrupted by perspective conversion.");
+            Dictionary<string, object> cemeteryCard =
+                (Dictionary<string, object>)
+                    ((List<object>)historyLists["CemeteryList"])[0];
+            Dictionary<string, object> destroyedCard =
+                (Dictionary<string, object>)
+                    ((List<object>)historyLists["DestroyedWhenDestroyCards"])[0];
+            Assert(Convert.ToInt32(cemeteryCard["owner"]) == 1 &&
+                Convert.ToInt32(destroyedCard["owner"]) == 1,
+                "Destroyed-card history ownership was perspective-flipped.");
+            Dictionary<string, object> preHistory =
+                (Dictionary<string, object>)flipped["p2pPlayerHistoryBefore"];
+            Dictionary<string, object> preHistoryLists =
+                (Dictionary<string, object>)preHistory["lists"];
+            Dictionary<string, object> turnDestroyEntry =
+                (Dictionary<string, object>)
+                    ((List<object>)preHistoryLists["TurnDestroyCards"])[0];
+            Dictionary<string, object> turnDestroyCard =
+                (Dictionary<string, object>)turnDestroyEntry["card"];
+            Assert(Convert.ToInt32(preHistory["owner"]) == 1 &&
+                Convert.ToInt32(preHistory["revision"]) == 3 &&
+                Convert.ToInt32(turnDestroyEntry["turnOwner"]) == 1 &&
+                Convert.ToInt32(turnDestroyCard["owner"]) == 1,
+                "Pre-action destroyed-card history was perspective-flipped.");
+            Dictionary<string, object> authoritativeTargets =
+                (Dictionary<string, object>)
+                    ((List<object>)flipped["p2pAuthoritativeSkillTargets"])[0];
+            List<object> targetReferences =
+                (List<object>)authoritativeTargets["targets"];
+            Assert(Convert.ToInt32(authoritativeTargets["owner"]) == 1 &&
+                Convert.ToInt32(
+                    ((Dictionary<string, object>)targetReferences[0])["owner"]) == 1 &&
+                Convert.ToInt32(
+                    ((Dictionary<string, object>)targetReferences[1])["owner"]) == 0,
+                "Authoritative random target ownership was perspective-flipped.");
         }
 
         private static void TestDealState()
@@ -1864,6 +2022,197 @@ namespace Shadowbus
                 ((List<object>)receivedFusionAction["beforeIngredients"]).Count == 1 &&
                 ((List<object>)receivedFusionAction["afterIngredients"]).Count == 3,
                 "Fusion metadata ownership was incorrectly perspective-flipped.");
+
+            P2PBattleCardTracker fusionMetamorphoseTracker =
+                new P2PBattleCardTracker();
+            fusionMetamorphoseTracker.Reset(new List<int>(), new List<int>());
+            fusionMetamorphoseTracker.RememberSourceCard(
+                true, 12, 130234011, 2);
+            fusionMetamorphoseTracker.RememberSourceCard(
+                true, 13, 130001001, 1);
+            Dictionary<string, object> fusionMetamorphose =
+                new Dictionary<string, object>
+                {
+                    ["uri"] = "PlayActions",
+                    ["type"] = 40,
+                    ["playIdx"] = 12,
+                    ["knownList"] = new List<object>
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["idx"] = 12,
+                            ["cardId"] = 130234011,
+                            ["cost"] = 2,
+                            ["isSelf"] = 1,
+                            ["is_open"] = 1
+                        }
+                    },
+                    ["orderList"] = new List<object>
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["fusion"] = new Dictionary<string, object>
+                            {
+                                ["idx"] = new List<object> { 12 },
+                                ["ingredients"] = new List<object> { 13 },
+                                ["isSelf"] = 1
+                            }
+                        },
+                        new Dictionary<string, object>
+                        {
+                            ["metamorphose"] = new Dictionary<string, object>
+                            {
+                                ["idx"] = new List<object> { 12 },
+                                ["isSelf"] = 1,
+                                ["isFusion"] = 1,
+                                ["after"] = new Dictionary<string, object>
+                                {
+                                    ["cardId"] = 920234011
+                                }
+                            }
+                        }
+                    },
+                    [P2PBattleProtocol.FusionMetamorphoseOriginalsKey] =
+                        new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["owner"] = 1,
+                                ["idx"] = 12,
+                                ["cardId"] = 130234011,
+                                ["cost"] = 2
+                            }
+                        },
+                    ["p2pHiddenCards"] = new List<object>
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["idx"] = 12,
+                            ["cardId"] = 920234011,
+                            ["cost"] = 1
+                        }
+                    },
+                    ["p2pHiddenOwner"] = 1
+                };
+            Assert(fusionMetamorphoseTracker.PrepareOutgoingAction(
+                    true, fusionMetamorphose,
+                    out int fusionMetamorphoseIndex,
+                    out int fusionMetamorphoseCardId,
+                    index => index == 12 ? 920234011 :
+                        index == 13 ? 130001001 : 0,
+                    index => index == 12 || index == 13 ? 1 : -1),
+                "A fusion-metamorphose action was not prepared.");
+            Dictionary<string, object> originalFusionCard =
+                ((List<object>)fusionMetamorphose["knownList"])
+                .OfType<Dictionary<string, object>>()
+                .Single(card => Convert.ToInt32(card["idx"]) == 12);
+            Dictionary<string, object> transformedFusionCard =
+                (Dictionary<string, object>)((List<object>)
+                    fusionMetamorphose["p2pHiddenCards"])[0];
+            Dictionary<string, object> fusionMetamorphoseResult =
+                (Dictionary<string, object>)((List<object>)
+                    fusionMetamorphose["p2pMetamorphoses"])[0];
+            Assert(fusionMetamorphoseIndex == 12 &&
+                fusionMetamorphoseCardId == 130234011 &&
+                Convert.ToInt32(originalFusionCard["cardId"]) == 130234011 &&
+                Convert.ToInt32(originalFusionCard["cost"]) == 2,
+                "Fusion metamorphose exposed the transformed identity before " +
+                "the native fusion skill executed.");
+            Assert(Convert.ToInt32(transformedFusionCard["cardId"]) == 920234011 &&
+                Convert.ToInt32(fusionMetamorphoseResult["cardId"]) == 920234011,
+                "Fusion metamorphose lost its post-action transformed identity.");
+
+            Dictionary<string, object> receivedFusionMetamorphose =
+                P2PMessageTransform.PrepareOpponentBattleMessage(
+                    fusionMetamorphose);
+            Dictionary<string, object> receivedOriginalFusionCard =
+                ((List<object>)receivedFusionMetamorphose["knownList"])
+                .OfType<Dictionary<string, object>>()
+                .Single(card => Convert.ToInt32(card["idx"]) == 12);
+            Dictionary<string, object> receivedFusionOriginalMetadata =
+                (Dictionary<string, object>)((List<object>)
+                    receivedFusionMetamorphose[
+                        P2PBattleProtocol.FusionMetamorphoseOriginalsKey])[0];
+            Assert(Convert.ToInt32(receivedOriginalFusionCard["isSelf"]) == 0 &&
+                Convert.ToInt32(receivedOriginalFusionCard["cardId"]) == 130234011 &&
+                Convert.ToInt32(receivedFusionOriginalMetadata["owner"]) == 1 &&
+                Convert.ToInt32(receivedFusionOriginalMetadata["cardId"]) == 130234011,
+                "Fusion metamorphose pre-action identity was corrupted while " +
+                "converting the receiver perspective.");
+
+            Dictionary<string, object> ordinaryMetamorphose =
+                new Dictionary<string, object>
+                {
+                    ["uri"] = "PlayActions",
+                    ["playIdx"] = 51,
+                    ["orderList"] = new List<object>
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["metamorphose"] = new Dictionary<string, object>
+                            {
+                                ["idx"] = new List<object> { 52 },
+                                ["isSelf"] = 1,
+                                ["after"] = new Dictionary<string, object>
+                                {
+                                    ["cardId"] = 900052
+                                }
+                            }
+                        }
+                    }
+                };
+            fusionMetamorphoseTracker.PrepareOutgoingAction(
+                true, ordinaryMetamorphose, out _, out _,
+                index => index == 51 ? 900051 :
+                    index == 52 ? 900052 : 0,
+                index => 3);
+            Dictionary<string, object> ordinaryMetamorphosedCard =
+                ((List<object>)ordinaryMetamorphose["knownList"])
+                .OfType<Dictionary<string, object>>()
+                .Single(card => Convert.ToInt32(card["idx"]) == 52);
+            Assert(Convert.ToInt32(
+                    ordinaryMetamorphosedCard["cardId"]) == 900052,
+                "The fusion-specific identity delay affected an ordinary " +
+                "metamorphose action.");
+
+            Dictionary<string, object> randomTargetMessage = new Dictionary<string, object>
+            {
+                ["p2pAuthoritativeSkillTargets"] = new List<object>
+                {
+                    new Dictionary<string, object>
+                    {
+                        ["owner"] = 1,
+                        ["ownerIdx"] = 2,
+                        ["targets"] = new List<object>(),
+                        ["independent"] = new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["slot"] = 0,
+                                ["card"] = new Dictionary<string, object>
+                                {
+                                    ["owner"] = 0,
+                                    ["idx"] = 77,
+                                    ["cardId"] = 1077
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            Dictionary<string, object> flippedRandomTargetMessage =
+                P2PMessageTransform.PrepareOpponentBattleMessage(randomTargetMessage);
+            Dictionary<string, object> flippedRandomTarget =
+                (Dictionary<string, object>)((List<object>)
+                    flippedRandomTargetMessage["p2pAuthoritativeSkillTargets"])[0];
+            Dictionary<string, object> flippedIndependent =
+                (Dictionary<string, object>)((List<object>)
+                    flippedRandomTarget["independent"])[0];
+            Dictionary<string, object> flippedIndependentCard =
+                (Dictionary<string, object>)flippedIndependent["card"];
+            Assert(Convert.ToInt32(flippedRandomTarget["owner"]) == 1 &&
+                Convert.ToInt32(flippedIndependentCard["owner"]) == 0,
+                "Independent authoritative target ownership was perspective-flipped.");
 
             List<P2PFusionIngredientState> cumulativeFusion =
                 new List<P2PFusionIngredientState>();

@@ -747,6 +747,163 @@ namespace Shadowbus
         }
 
         [HarmonyPatch(
+            typeof(BattleCardBase),
+            nameof(BattleCardBase.FusionMaterialized))]
+        [HarmonyPostfix]
+        private static void BattleCardBase_FusionMaterialized_Postfix(
+            BattleCardBase fusionCard)
+        {
+            if (!P2PRuntime.IsActive || fusionCard == null)
+            {
+                return;
+            }
+
+            // FusionMaterialized is the native mutation point. Capturing here
+            // preserves the exact cumulative N-state before metamorphose or the
+            // outbound PlayActions callback can replace the card object.
+            P2PRuntime.RememberLocalFusionIngredientState(fusionCard);
+        }
+
+        [HarmonyPatch(
+            typeof(ActionProcessor),
+            nameof(ActionProcessor.PlayCard),
+            new[]
+            {
+                typeof(BattleCardBase),
+                typeof(IEnumerable<BattleCardBase>),
+                typeof(List<int>),
+                typeof(bool)
+            })]
+        [HarmonyPrefix]
+        private static void ActionProcessor_PlayCard_Prefix(
+            BattleCardBase card)
+        {
+            P2PRuntime.CaptureLocalActionStart(card);
+        }
+
+        [HarmonyPatch(
+            typeof(ActionProcessor),
+            nameof(ActionProcessor.Evolution),
+            new[]
+            {
+                typeof(BattleCardBase),
+                typeof(IEnumerable<BattleCardBase>),
+                typeof(List<int>)
+            })]
+        [HarmonyPrefix]
+        private static void ActionProcessor_Evolution_Prefix(
+            BattleCardBase card)
+        {
+            P2PRuntime.CaptureLocalActionStart(card);
+        }
+
+        [HarmonyPatch(
+            typeof(ActionProcessor),
+            nameof(ActionProcessor.Fusion),
+            new[] { typeof(BattleCardBase), typeof(List<BattleCardBase>) })]
+        [HarmonyPrefix]
+        private static void ActionProcessor_Fusion_Prefix(
+            BattleCardBase fusionCard)
+        {
+            P2PRuntime.CaptureLocalActionStart(fusionCard);
+        }
+
+        [HarmonyPatch(
+            typeof(ActionProcessor),
+            nameof(ActionProcessor.Attack),
+            new[] { typeof(IBattleCardUniqueID), typeof(IBattleCardUniqueID) })]
+        [HarmonyPrefix]
+        private static void ActionProcessor_Attack_Prefix()
+        {
+            P2PRuntime.CaptureLocalActionStart();
+        }
+
+        [HarmonyPatch(typeof(BattleCardBase), "CopyToVirtualCardBase")]
+        [HarmonyPrefix]
+        private static void BattleCardBase_CopyToVirtualCardBase_Prefix(
+            BattleCardBase __instance)
+        {
+            // Older P2P snapshots could create AttackCountInfo with a null
+            // originating skill. The native clone path dereferences that skill
+            // without checking it, so sanitize any state already present in a
+            // running battle before damage/forecast code creates a virtual card.
+            P2PRuntime.RepairInvalidAttackCountState(
+                __instance, "virtual-card clone");
+        }
+
+        [HarmonyPatch(
+            typeof(Wizard.Battle.Touch.PlayCardProcessor),
+            nameof(Wizard.Battle.Touch.PlayCardProcessor.End))]
+        [HarmonyPrefix]
+        private static void PlayCardProcessor_End_Prefix(
+            Wizard.Battle.Touch.PlayCardProcessor __instance)
+        {
+            if (!P2PRuntime.IsActive || __instance == null)
+            {
+                return;
+            }
+
+            try
+            {
+                var actCardField = AccessTools.Field(
+                    typeof(Wizard.Battle.Touch.PlayCardProcessor), "_actCard");
+                BattleCardBase staleCard =
+                    actCardField?.GetValue(__instance) as BattleCardBase;
+                List<BattleCardBase> hand =
+                    staleCard?.SelfBattlePlayer?.HandCardList;
+                if (staleCard == null || hand == null ||
+                    hand.Contains(staleCard) || staleCard.Index <= 0)
+                {
+                    return;
+                }
+
+                BattleCardBase currentCard = hand.SingleOrDefault(card =>
+                    card != null && card.Index == staleCard.Index);
+                if (currentCard == null ||
+                    !ReferenceEquals(
+                        currentCard.SelfBattlePlayer,
+                        staleCard.SelfBattlePlayer))
+                {
+                    Plugin.Logger.LogError(
+                        $"[P2P] Play-card touch state lost its hand object: " +
+                        $"idx={staleCard.Index}, cardId={staleCard.CardId}, " +
+                        $"hand=[{string.Join(",", hand.Where(card => card != null)
+                            .Select(card => $"{card.Index}:{card.CardId}"))}].");
+                    return;
+                }
+
+                actCardField.SetValue(__instance, currentCard);
+                Plugin.Logger.LogWarning(
+                    $"[P2P] Rebound stale fusion/metamorphose play-card object: " +
+                    $"idx={staleCard.Index}, oldCardId={staleCard.CardId}, " +
+                    $"currentCardId={currentCard.CardId}.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError(
+                    "[P2P] Could not repair a stale play-card touch object: " + ex);
+            }
+        }
+
+        [HarmonyPatch(typeof(BattlePlayerBase), nameof(BattlePlayerBase.TurnStart))]
+        [HarmonyPrefix]
+        private static void BattlePlayerBase_TurnStart_Prefix(
+            BattlePlayerBase __instance)
+        {
+            P2PRuntime.CaptureLocalAutomaticActionStart(
+                __instance, "turn-start");
+        }
+
+        [HarmonyPatch(typeof(BattlePlayerBase), nameof(BattlePlayerBase.TurnEnd))]
+        [HarmonyPrefix]
+        private static void BattlePlayerBase_TurnEnd_Prefix(
+            BattlePlayerBase __instance)
+        {
+            P2PRuntime.CaptureLocalAutomaticActionStart(
+                __instance, "turn-end");
+        }
+
+        [HarmonyPatch(
             typeof(NetworkBattleManagerBase),
             nameof(NetworkBattleManagerBase.ConductReceiveData))]
         [HarmonyPrefix]
@@ -763,10 +920,6 @@ namespace Shadowbus
             // so conditions in this operation see the authoritative counters.
             P2PRuntime.TryApplyPendingHiddenCardStates();
             P2PRuntime.TryApplyPendingPlayerHistoryStates();
-            // ConvertReceiveDataToMakeData may replace a hidden fusion target from
-            // knownList. Restore N-1 only after that replacement and immediately
-            // before the native fusion action evaluates its Nth-fusion conditions.
-            P2PRuntime.ApplyStagedPreNativeFusionActions();
             if (receiveData == null ||
                 !receiveData.IsAcceleratedOrCrystallize)
             {
@@ -803,18 +956,173 @@ namespace Shadowbus
         [HarmonyPatch(
             typeof(NetworkBattleReceiver),
             nameof(NetworkBattleReceiver.ReceivedMessage))]
+        [HarmonyPrefix]
+        private static void NetworkBattleReceiver_ReceivedMessage_Prefix(
+            NetworkBattleDefine.NetworkBattleURI uri,
+            Dictionary<string, object> data)
+        {
+            if (!P2PRuntime.IsActive)
+            {
+                return;
+            }
+
+            if (!TryRunReceiveMetadataStage(
+                    "prepare metadata", uri, GetReceivePlayIndex(data),
+                    () => P2PRuntime.PrepareNativeReceivedActionMetadata(
+                        uri, data)))
+            {
+                TryRunReceiveMetadataStage(
+                    "cleanup after prepare failure", uri,
+                    GetReceivePlayIndex(data),
+                    () => P2PRuntime.CompleteNativeReceivedActionMetadata(
+                        data, false));
+            }
+        }
+
+        [HarmonyPatch(
+            typeof(NetworkBattleReceiver),
+            nameof(NetworkBattleReceiver.ReceivedMessage))]
         [HarmonyPostfix]
         private static void NetworkBattleReceiver_ReceivedMessage_Postfix(
+            NetworkBattleDefine.NetworkBattleURI uri,
             Dictionary<string, object> data,
             bool __result)
         {
-            if (P2PRuntime.IsActive && __result)
+            if (!P2PRuntime.IsActive)
+            {
+                return;
+            }
+
+            int playIndex = GetReceivePlayIndex(data);
+            bool metadataAccepted = __result;
+            if (__result)
             {
                 // The payload is a post-action snapshot. It must not become
                 // eligible until the matching native operation was accepted.
-                P2PRuntime.MarkReceivedPlayerHistoryStateReady(data);
-                P2PRuntime.ApplyReceivedFusionAction(data, true);
-                P2PRuntime.FinalizeReceivedHiddenCardRemovals(data);
+                metadataAccepted &= TryRunReceiveMetadataStage(
+                    "mark player history ready", uri, playIndex,
+                    () => P2PRuntime.MarkReceivedPlayerHistoryStateReady(data));
+                metadataAccepted &= TryRunReceiveMetadataStage(
+                    "apply post-action fusion", uri, playIndex,
+                    () => P2PRuntime.ApplyReceivedFusionAction(data, true));
+                metadataAccepted &= TryRunReceiveMetadataStage(
+                    "finalize hidden-card removals", uri, playIndex,
+                    () => P2PRuntime.FinalizeReceivedHiddenCardRemovals(data));
+            }
+            TryRunReceiveMetadataStage(
+                "complete metadata", uri, playIndex,
+                () => P2PRuntime.CompleteNativeReceivedActionMetadata(
+                    data, metadataAccepted));
+        }
+
+        [HarmonyPatch(
+            typeof(NetworkBattleReceiver),
+            nameof(NetworkBattleReceiver.ReceivedMessage))]
+        [HarmonyFinalizer]
+        private static Exception NetworkBattleReceiver_ReceivedMessage_Finalizer(
+            NetworkBattleDefine.NetworkBattleURI uri,
+            Dictionary<string, object> data,
+            Exception __exception)
+        {
+            if (P2PRuntime.IsActive && __exception != null)
+            {
+                int playIndex = GetReceivePlayIndex(data);
+                LogReceiveMetadataFailure(
+                    "native ReceivedMessage", uri, playIndex, __exception);
+                TryRunReceiveMetadataStage(
+                    "cleanup after native failure", uri, playIndex,
+                    () => P2PRuntime.CompleteNativeReceivedActionMetadata(
+                        data, false));
+            }
+            return __exception;
+        }
+
+        [HarmonyPatch(
+            typeof(NetworkBattleData),
+            nameof(NetworkBattleData.BeforeSettingReceiveData))]
+        [HarmonyPostfix]
+        private static void NetworkBattleData_BeforeSettingReceiveData_Postfix(
+            NetworkBattleData __instance)
+        {
+            if (!P2PRuntime.IsActive)
+            {
+                return;
+            }
+
+            NetworkBattleReceiver.ReceiveData receiveData = null;
+            try
+            {
+                receiveData = __instance?.GetReceiveData();
+            }
+            catch (Exception ex)
+            {
+                LogReceiveMetadataFailure(
+                    "read converted receive data",
+                    default(NetworkBattleDefine.NetworkBattleURI), -1, ex);
+            }
+            NetworkBattleDefine.NetworkBattleURI uri = receiveData == null
+                ? default(NetworkBattleDefine.NetworkBattleURI)
+                : receiveData.dataUri;
+            int playIndex = receiveData?.playCardIndex ?? -1;
+
+            // NetworkBattleData has now replaced knownList/unapproved cards.
+            // Apply the source's action-start hidden history and cumulative
+            // fusion state against those real objects before the operation
+            // collection evaluates any private-state condition.
+            TryRunReceiveMetadataStage(
+                "apply pre-action hidden cards", uri, playIndex,
+                P2PRuntime.TryApplyPendingHiddenCardStates);
+            TryRunReceiveMetadataStage(
+                "apply pre-action player history", uri, playIndex,
+                P2PRuntime.ApplyPendingPreActionPlayerHistoryState);
+            TryRunReceiveMetadataStage(
+                "apply pre-action fusion", uri, playIndex,
+                P2PRuntime.ApplyStagedPreNativeFusionActions);
+        }
+
+        private static bool TryRunReceiveMetadataStage(
+            string stage,
+            NetworkBattleDefine.NetworkBattleURI uri,
+            int playIndex,
+            Action action)
+        {
+            try
+            {
+                action();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogReceiveMetadataFailure(stage, uri, playIndex, ex);
+                return false;
+            }
+        }
+
+        private static void LogReceiveMetadataFailure(
+            string stage,
+            NetworkBattleDefine.NetworkBattleURI uri,
+            int playIndex,
+            Exception exception)
+        {
+            Plugin.Logger.LogError(
+                $"[P2P] Receive stage failed: stage={stage}, uri={uri}, " +
+                $"playIdx={playIndex}. {exception}");
+        }
+
+        private static int GetReceivePlayIndex(
+            Dictionary<string, object> data)
+        {
+            if (data == null || !data.TryGetValue("playIdx", out object rawIndex))
+            {
+                return -1;
+            }
+            try
+            {
+                return Convert.ToInt32(rawIndex);
+            }
+            catch (Exception)
+            {
+                return -1;
             }
         }
 
@@ -834,6 +1142,55 @@ namespace Shadowbus
             // skills, so the resulting card is authoritative before it enters
             // the hand/deck list.
             P2PRuntime.ApplyReceivedHiddenCardState(receivedCard, true);
+        }
+
+        [HarmonyPatch(
+            typeof(ReplaceReceivedCard),
+            "SearchForDummyCardInHandAndDeck")]
+        [HarmonyPrefix]
+        private static void
+            ReplaceReceivedCard_SearchForDummyCardInHandAndDeck_Prefix(
+                ReplaceReceivedCard __instance,
+                BattlePlayerBase battlePlayer)
+        {
+            if (!P2PRuntime.IsActive || __instance == null || battlePlayer == null)
+            {
+                return;
+            }
+
+            P2PRuntime.RepairDuplicateReceivedCardZoneIndices(
+                battlePlayer, __instance.CardIdx, __instance.CardId);
+        }
+
+        [HarmonyPatch(
+            typeof(NetworkExecutionInfoCreator),
+            nameof(NetworkExecutionInfoCreator.FixedSkillApplyTarget))]
+        [HarmonyPostfix]
+        private static void
+            NetworkExecutionInfoCreator_FixedSkillApplyTarget_Postfix(
+                NetworkExecutionInfoCreator __instance,
+                ref Wizard.Battle.View.Vfx.VfxWith<
+                    List<BattleCardBase>, Dictionary<int, BattleCardBase>> __result)
+        {
+            if (!P2PRuntime.IsActive || __instance == null || __result == null)
+            {
+                return;
+            }
+
+            try
+            {
+                SkillBase skill = AccessTools.Field(
+                        typeof(ExecutionInfoCreatorBase), "_skill")?
+                    .GetValue(__instance) as SkillBase;
+                P2PRuntime.SynchronizeAuthoritativeRandomSkillTargets(
+                    skill, ref __result);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning(
+                    "[P2P] Could not synchronize authoritative random targets: " +
+                    ex.Message);
+            }
         }
 
         [HarmonyPatch(
