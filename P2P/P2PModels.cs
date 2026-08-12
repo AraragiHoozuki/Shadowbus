@@ -501,6 +501,8 @@ namespace Shadowbus
                         StringComparison.Ordinal) ||
                     string.Equals(key, "p2pAuthoritativeSkillTargets",
                         StringComparison.Ordinal) ||
+                    string.Equals(key, "p2pAuthoritativeSkillEvaluations",
+                        StringComparison.Ordinal) ||
                     string.Equals(key, "p2pPlayerHistoryBefore",
                         StringComparison.Ordinal))
                 {

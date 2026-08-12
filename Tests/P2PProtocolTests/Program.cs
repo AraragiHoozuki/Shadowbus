@@ -714,6 +714,24 @@ namespace Shadowbus
                             }
                         }
                     }
+                },
+                ["p2pAuthoritativeSkillEvaluations"] = new List<object>
+                {
+                    new Dictionary<string, object>
+                    {
+                        ["owner"] = 1,
+                        ["ownerIdx"] = 42,
+                        ["values"] = new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["keyword"] = "damage",
+                                ["value"] = 6,
+                                ["isSelf"] = 9
+                            }
+                        },
+                        ["preprocess"] = new List<object> { 1, 0 }
+                    }
                 }
             };
 
@@ -811,6 +829,21 @@ namespace Shadowbus
                 Convert.ToInt32(
                     ((Dictionary<string, object>)targetReferences[1])["owner"]) == 0,
                 "Authoritative random target ownership was perspective-flipped.");
+            Dictionary<string, object> authoritativeEvaluation =
+                (Dictionary<string, object>)
+                    ((List<object>)flipped[
+                        "p2pAuthoritativeSkillEvaluations"])[0];
+            Dictionary<string, object> authoritativeValue =
+                (Dictionary<string, object>)
+                    ((List<object>)authoritativeEvaluation["values"])[0];
+            List<object> preprocessResults =
+                (List<object>)authoritativeEvaluation["preprocess"];
+            Assert(Convert.ToInt32(authoritativeEvaluation["owner"]) == 1 &&
+                Convert.ToInt32(authoritativeValue["value"]) == 6 &&
+                Convert.ToInt32(authoritativeValue["isSelf"]) == 9 &&
+                Convert.ToInt32(preprocessResults[0]) == 1 &&
+                Convert.ToInt32(preprocessResults[1]) == 0,
+                "Authoritative private skill evaluation was perspective-flipped.");
         }
 
         private static void TestDealState()

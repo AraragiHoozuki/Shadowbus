@@ -1193,6 +1193,78 @@ namespace Shadowbus
             }
         }
 
+        [HarmonyPatch(typeof(SkillBase), nameof(SkillBase.CallStart))]
+        [HarmonyPrefix]
+        private static void SkillBase_CallStart_AuthoritativeEvaluation_Prefix(
+            SkillBase __instance,
+            ref P2PRuntime.AuthoritativeSkillEvaluationScope __state)
+        {
+            __state = P2PRuntime.BeginAuthoritativeSkillEvaluation(__instance);
+        }
+
+        [HarmonyPatch(typeof(SkillBase), nameof(SkillBase.CallStart))]
+        [HarmonyFinalizer]
+        private static Exception SkillBase_CallStart_AuthoritativeEvaluation_Finalizer(
+            P2PRuntime.AuthoritativeSkillEvaluationScope __state,
+            Exception __exception)
+        {
+            P2PRuntime.CompleteAuthoritativeSkillEvaluation(
+                __state, __exception == null);
+            return __exception;
+        }
+
+        [HarmonyPatch(
+            typeof(SkillOptionValue),
+            nameof(SkillOptionValue.GetInt),
+            new[]
+            {
+                typeof(SkillFilterCreator.ContentKeyword),
+                typeof(int?),
+                typeof(bool)
+            })]
+        [HarmonyPostfix]
+        private static void SkillOptionValue_GetInt_AuthoritativeEvaluation_Postfix(
+            SkillOptionValue __instance,
+            SkillFilterCreator.ContentKeyword nameType,
+            ref int __result)
+        {
+            // Let the native method consume one-shot replacement data first,
+            // then make the acting peer's resolved value authoritative.
+            if (P2PRuntime.TryGetAuthoritativeSkillOptionValue(
+                    __instance, nameType, out int value))
+            {
+                __result = value;
+            }
+            P2PRuntime.ObserveAuthoritativeSkillOptionValue(
+                __instance, nameType, __result);
+        }
+
+        [HarmonyPatch(
+            typeof(NetworkSkillPreprocessConditionCheck),
+            nameof(NetworkSkillPreprocessConditionCheck.IsRight),
+            new[]
+            {
+                typeof(BattlePlayerReadOnlyInfoPair),
+                typeof(SkillConditionCheckerOption),
+                typeof(bool)
+            })]
+        [HarmonyPostfix]
+        private static void
+            NetworkSkillPreprocessConditionCheck_IsRight_AuthoritativeEvaluation_Postfix(
+                bool preexecutionCheck,
+                ref bool __result)
+        {
+            // Preserve the native event registration/state updates, but do not
+            // trust its hidden-zone result on the receiving peer.
+            if (P2PRuntime.TryGetAuthoritativePreprocessResult(
+                    preexecutionCheck, out bool result))
+            {
+                __result = result;
+            }
+            P2PRuntime.ObserveAuthoritativePreprocessResult(
+                preexecutionCheck, __result);
+        }
+
         [HarmonyPatch(
             typeof(NetworkExecutionInfoCreator),
             nameof(NetworkExecutionInfoCreator.CheckCondition),
@@ -1222,8 +1294,11 @@ namespace Shadowbus
                 SkillBase skill = AccessTools.Field(
                         typeof(ExecutionInfoCreatorBase), "_skill")?
                     .GetValue(__instance) as SkillBase;
-                if (skill?.SkillPrm?.ownerCard == null ||
-                    skill.SkillPrm.ownerCard.IsPlayer ||
+                if (skill?.SkillPrm?.ownerCard == null)
+                {
+                    return;
+                }
+                if (skill.SkillPrm.ownerCard.IsPlayer ||
                     !UsesPrivateCardInformation(skill))
                 {
                     return;
@@ -1271,7 +1346,9 @@ namespace Shadowbus
                 RegisterSkillConditionCheck.IsHighlander(
                     skill.ConditionFilterCollection) ||
                 RegisterSkillConditionCheck.IsHighlanderPreprocessConditionCheck(
-                    skill);
+                    skill) ||
+                skill.PreprocessList.Any(preprocess =>
+                    preprocess is NetworkSkillPreprocessConditionCheck);
         }
 
         [HarmonyPatch(typeof(ActionProcessor), "SetSkillConditionCheckeroptionSelectCards")]

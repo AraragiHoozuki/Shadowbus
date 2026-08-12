@@ -121,6 +121,8 @@ namespace Shadowbus
             new Dictionary<int, List<P2PFusionIngredientState>>();
         private const string AuthoritativeSkillTargetsKey =
             "p2pAuthoritativeSkillTargets";
+        private const string AuthoritativeSkillEvaluationsKey =
+            "p2pAuthoritativeSkillEvaluations";
         // The official server resolves random skill targets and returns the
         // selected card indices. In P2P the acting client is the authority, so
         // record the actual post-filter targets and replay those exact cards on
@@ -138,6 +140,25 @@ namespace Shadowbus
         private static AuthoritativeSkillTargetBatch currentInjectedAuthoritativeSkillTargetBatch;
         private static int localAuthoritativeSkillTargetSequence;
         private static bool receivedAuthoritativeActionActive;
+        // Private hand/deck expressions are resolved by the official server into
+        // concrete skill parameters and preprocess decisions. In P2P the acting
+        // client records the values it actually used so the peer does not have to
+        // reevaluate a hidden-zone expression at a different action boundary.
+        private static readonly List<Dictionary<string, object>>
+            LocalAuthoritativeSkillEvaluations =
+            new List<Dictionary<string, object>>();
+        private static readonly Queue<AuthoritativeSkillEvaluationBatch>
+            PendingAuthoritativeSkillEvaluationBatches =
+            new Queue<AuthoritativeSkillEvaluationBatch>();
+        private static AuthoritativeSkillEvaluationBatch
+            activeAuthoritativeSkillEvaluationBatch;
+        private static AuthoritativeSkillEvaluationBatch
+            currentInjectedAuthoritativeSkillEvaluationBatch;
+        private static readonly Stack<AuthoritativeSkillEvaluationScope>
+            AuthoritativeSkillEvaluationScopes =
+            new Stack<AuthoritativeSkillEvaluationScope>();
+        private static int localAuthoritativeSkillEvaluationSequence;
+        private static bool receivedAuthoritativeSkillEvaluationActive;
         private static bool processingReceivedBattleAction;
         private static bool receivedBattleActionPendingUntilVfx;
         private static DateTime receivedBattleActionStartedUtc;
@@ -236,6 +257,7 @@ namespace Shadowbus
             TryApplyPendingFusionActions();
             TryCompleteReceivedBattleAction();
             TryClearConsumedAuthoritativeSkillTargets();
+            TryClearConsumedAuthoritativeSkillEvaluations();
             TryInjectPendingReceivedPlayAction();
             ObserveLocalHiddenCardStates();
             TryCheckPendingBattleStates();
@@ -528,6 +550,7 @@ namespace Shadowbus
             AppendLocalPlayerHistoryState(uri, messageData,
                 preActionHistoryState, preActionHistoryRevision);
             AppendLocalAuthoritativeSkillTargets(uri, messageData);
+            AppendLocalAuthoritativeSkillEvaluations(uri, messageData);
             RemovePrivateTwoPickDraftData(messageData, uri);
             if (string.Equals(
                     uri,
@@ -747,6 +770,13 @@ namespace Shadowbus
             currentInjectedAuthoritativeSkillTargetBatch = null;
             localAuthoritativeSkillTargetSequence = 0;
             receivedAuthoritativeActionActive = false;
+            LocalAuthoritativeSkillEvaluations.Clear();
+            PendingAuthoritativeSkillEvaluationBatches.Clear();
+            activeAuthoritativeSkillEvaluationBatch = null;
+            currentInjectedAuthoritativeSkillEvaluationBatch = null;
+            AuthoritativeSkillEvaluationScopes.Clear();
+            localAuthoritativeSkillEvaluationSequence = 0;
+            receivedAuthoritativeSkillEvaluationActive = false;
             processingReceivedBattleAction = false;
             receivedBattleActionPendingUntilVfx = false;
             receivedBattleActionStartedUtc = DateTime.MinValue;
@@ -2114,6 +2144,7 @@ namespace Shadowbus
                     CompleteNativeReceivedActionMetadata(data, false);
                 }
                 currentInjectedAuthoritativeSkillTargetBatch = null;
+                currentInjectedAuthoritativeSkillEvaluationBatch = null;
             }
         }
 
@@ -2439,6 +2470,294 @@ namespace Shadowbus
             LocalAuthoritativeSkillTargets.Clear();
         }
 
+        internal static AuthoritativeSkillEvaluationScope
+            BeginAuthoritativeSkillEvaluation(SkillBase skill)
+        {
+            if (!IsActive || skill?.SkillPrm?.ownerCard == null ||
+                BattleManagerBase.IsForecast ||
+                !UsesAuthoritativePrivateSkillEvaluation(skill))
+            {
+                return null;
+            }
+
+            if (processingReceivedBattleAction ||
+                receivedAuthoritativeSkillEvaluationActive)
+            {
+                if (!receivedAuthoritativeSkillEvaluationActive ||
+                    activeAuthoritativeSkillEvaluationBatch == null)
+                {
+                    return null;
+                }
+
+                int entryIndex = FindAuthoritativeSkillEntry(
+                    activeAuthoritativeSkillEvaluationBatch.Entries,
+                    skill,
+                    out bool usedFallback);
+                if (entryIndex < 0)
+                {
+                    return null;
+                }
+
+                Dictionary<string, object> entry =
+                    activeAuthoritativeSkillEvaluationBatch.Entries[entryIndex];
+                activeAuthoritativeSkillEvaluationBatch.Entries.RemoveAt(entryIndex);
+                if (usedFallback)
+                {
+                    Plugin.Logger.LogWarning(
+                        $"[P2P] Matched authoritative private skill evaluation by " +
+                        $"owner/index fallback: card idx={skill.SkillPrm.ownerCard.Index}, " +
+                        $"skill={skill.GetType().Name}.");
+                }
+
+                AuthoritativeSkillEvaluationScope receivedScope =
+                    new AuthoritativeSkillEvaluationScope(skill, false, entry);
+                AuthoritativeSkillEvaluationScopes.Push(receivedScope);
+                return receivedScope;
+            }
+
+            BattleCardBase ownerCard = skill.SkillPrm.ownerCard;
+            bool localOwnerIsHost = Role == P2PRole.Host;
+            bool skillOwnerIsHost = ownerCard.IsPlayer
+                ? localOwnerIsHost
+                : !localOwnerIsHost;
+            Dictionary<string, object> capture =
+                new Dictionary<string, object>
+                {
+                    ["seq"] = ++localAuthoritativeSkillEvaluationSequence,
+                    ["owner"] = skillOwnerIsHost ? 1 : 0,
+                    ["ownerIdx"] = ownerCard.Index,
+                    ["ownerCardId"] = ownerCard.CardId,
+                    ["skillIndex"] = GetNetworkSkillIndex(skill),
+                    ["published"] = NetworkBattleGenericTool.GetPublishSkillCount(skill),
+                    ["movement"] = GetSkillMovement(skill),
+                    ["skillType"] = skill.GetType().FullName ??
+                        skill.GetType().Name
+                };
+            AuthoritativeSkillEvaluationScope sourceScope =
+                new AuthoritativeSkillEvaluationScope(skill, true, capture);
+            AuthoritativeSkillEvaluationScopes.Push(sourceScope);
+            return sourceScope;
+        }
+
+        internal static void CompleteAuthoritativeSkillEvaluation(
+            AuthoritativeSkillEvaluationScope scope,
+            bool completed)
+        {
+            if (scope == null)
+            {
+                return;
+            }
+
+            if (AuthoritativeSkillEvaluationScopes.Count > 0 &&
+                ReferenceEquals(AuthoritativeSkillEvaluationScopes.Peek(), scope))
+            {
+                AuthoritativeSkillEvaluationScopes.Pop();
+            }
+            else
+            {
+                Plugin.Logger.LogWarning(
+                    "[P2P] Authoritative private skill evaluation scopes completed " +
+                    "out of order; clearing the transient scope stack.");
+                AuthoritativeSkillEvaluationScopes.Clear();
+            }
+
+            if (!scope.IsSource || !completed ||
+                (scope.Values.Count == 0 && scope.PreprocessResults.Count == 0))
+            {
+                return;
+            }
+
+            if (scope.Values.Count > 0)
+            {
+                scope.Entry["values"] = scope.Values
+                    .Select(item => (object)new Dictionary<string, object>
+                    {
+                        ["keyword"] = item.Keyword,
+                        ["value"] = item.Value
+                    })
+                    .ToList();
+            }
+            if (scope.PreprocessResults.Count > 0)
+            {
+                scope.Entry["preprocess"] = scope.PreprocessResults
+                    .Select(result => (object)(result ? 1 : 0))
+                    .ToList();
+            }
+            LocalAuthoritativeSkillEvaluations.Add(scope.Entry);
+        }
+
+        internal static void ObserveAuthoritativeSkillOptionValue(
+            SkillOptionValue optionValue,
+            SkillFilterCreator.ContentKeyword keyword,
+            int value)
+        {
+            if (AuthoritativeSkillEvaluationScopes.Count == 0)
+            {
+                return;
+            }
+            AuthoritativeSkillEvaluationScope scope =
+                AuthoritativeSkillEvaluationScopes.Peek();
+            if (!scope.IsSource || scope.Skill?.OptionValue != optionValue ||
+                !IsAuthoritativePrivateOptionKeyword(keyword) ||
+                !scope.Skill.OptionValue.HasInfoByName(keyword) ||
+                !RegisterSkillConditionCheck.DoesSkillUsePrivateCount(
+                    scope.Skill, false, false))
+            {
+                return;
+            }
+            scope.Values.Add(new AuthoritativeSkillOptionValue(
+                keyword.ToString(), value));
+        }
+
+        internal static bool TryGetAuthoritativeSkillOptionValue(
+            SkillOptionValue optionValue,
+            SkillFilterCreator.ContentKeyword keyword,
+            out int value)
+        {
+            value = 0;
+            if (AuthoritativeSkillEvaluationScopes.Count == 0)
+            {
+                return false;
+            }
+            AuthoritativeSkillEvaluationScope scope =
+                AuthoritativeSkillEvaluationScopes.Peek();
+            if (scope.IsSource || scope.Skill?.OptionValue != optionValue)
+            {
+                return false;
+            }
+
+            string keywordName = keyword.ToString();
+            int valueIndex = scope.Values.FindIndex(item =>
+                string.Equals(item.Keyword, keywordName, StringComparison.Ordinal));
+            if (valueIndex < 0)
+            {
+                return false;
+            }
+            value = scope.Values[valueIndex].Value;
+            scope.Values.RemoveAt(valueIndex);
+            return true;
+        }
+
+        internal static bool TryGetAuthoritativePreprocessResult(
+            bool preexecutionCheck,
+            out bool result)
+        {
+            result = false;
+            if (!preexecutionCheck ||
+                AuthoritativeSkillEvaluationScopes.Count == 0)
+            {
+                return false;
+            }
+            AuthoritativeSkillEvaluationScope scope =
+                AuthoritativeSkillEvaluationScopes.Peek();
+            if (scope.IsSource ||
+                scope.NextPreprocessResult >= scope.PreprocessResults.Count)
+            {
+                return false;
+            }
+            result = scope.PreprocessResults[scope.NextPreprocessResult++];
+            return true;
+        }
+
+        internal static void ObserveAuthoritativePreprocessResult(
+            bool preexecutionCheck,
+            bool result)
+        {
+            if (!preexecutionCheck ||
+                AuthoritativeSkillEvaluationScopes.Count == 0)
+            {
+                return;
+            }
+            AuthoritativeSkillEvaluationScope scope =
+                AuthoritativeSkillEvaluationScopes.Peek();
+            if (scope.IsSource)
+            {
+                scope.PreprocessResults.Add(result);
+            }
+        }
+
+        private static bool UsesAuthoritativePrivateSkillEvaluation(
+            SkillBase skill)
+        {
+            try
+            {
+                return RegisterSkillConditionCheck.DoesSkillUsePrivateCount(
+                        skill, false, false) ||
+                    skill.PreprocessList.Any(preprocess =>
+                        preprocess is NetworkSkillPreprocessConditionCheck);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private static bool IsAuthoritativePrivateOptionKeyword(
+            SkillFilterCreator.ContentKeyword keyword)
+        {
+            return keyword == SkillFilterCreator.ContentKeyword.damage ||
+                keyword == SkillFilterCreator.ContentKeyword.add_offense ||
+                keyword == SkillFilterCreator.ContentKeyword.add_life ||
+                keyword == SkillFilterCreator.ContentKeyword.repeat_count ||
+                keyword == SkillFilterCreator.ContentKeyword.healing ||
+                keyword == SkillFilterCreator.ContentKeyword.add_pp ||
+                keyword == SkillFilterCreator.ContentKeyword.gain_chant ||
+                keyword == SkillFilterCreator.ContentKeyword.add;
+        }
+
+        private static void AppendLocalAuthoritativeSkillEvaluations(
+            string uri,
+            Dictionary<string, object> data)
+        {
+            if (data == null || LocalAuthoritativeSkillEvaluations.Count == 0 ||
+                !IsOrderedLocalBattleMessage(uri))
+            {
+                return;
+            }
+
+            data[AuthoritativeSkillEvaluationsKey] =
+                LocalAuthoritativeSkillEvaluations
+                    .Select(entry => (object)P2PJson.CloneDictionary(entry))
+                    .ToList();
+            Plugin.Logger.LogDebug(
+                $"[P2P] Attached {LocalAuthoritativeSkillEvaluations.Count} " +
+                $"authoritative private skill evaluation(s) to {uri}.");
+            LocalAuthoritativeSkillEvaluations.Clear();
+        }
+
+        private static void RememberReceivedAuthoritativeSkillEvaluations(
+            Dictionary<string, object> data)
+        {
+            if (data == null ||
+                !data.TryGetValue(AuthoritativeSkillEvaluationsKey,
+                    out object rawEvaluations) ||
+                rawEvaluations is string ||
+                !(rawEvaluations is IEnumerable evaluationEntries))
+            {
+                return;
+            }
+
+            List<Dictionary<string, object>> entries =
+                new List<Dictionary<string, object>>();
+            foreach (object rawEntry in evaluationEntries)
+            {
+                if (rawEntry is Dictionary<string, object> entry)
+                {
+                    entries.Add(P2PJson.CloneDictionary(entry));
+                }
+            }
+            if (entries.Count == 0)
+            {
+                return;
+            }
+
+            AuthoritativeSkillEvaluationBatch batch =
+                new AuthoritativeSkillEvaluationBatch(entries);
+            PendingAuthoritativeSkillEvaluationBatches.Enqueue(batch);
+            currentInjectedAuthoritativeSkillEvaluationBatch = batch;
+            ActivateNextAuthoritativeSkillEvaluationBatch();
+        }
+
         private static void RememberReceivedAuthoritativeSkillTargets(
             Dictionary<string, object> data)
         {
@@ -2476,6 +2795,11 @@ namespace Shadowbus
                 // ReceivedMessage only schedules the native operation. Keep its
                 // source targets until the VFX queue has actually executed it.
                 currentInjectedAuthoritativeSkillTargetBatch.ReadyForCleanup = true;
+            }
+            if (IsActive &&
+                currentInjectedAuthoritativeSkillEvaluationBatch != null)
+            {
+                currentInjectedAuthoritativeSkillEvaluationBatch.ReadyForCleanup = true;
             }
         }
 
@@ -2516,6 +2840,7 @@ namespace Shadowbus
                     receivedBattleActionStallReported = false;
                 }
                 TryClearConsumedAuthoritativeSkillTargets();
+                TryClearConsumedAuthoritativeSkillEvaluations();
 
                 processingReceivedBattleAction = true;
                 receivedBattleActionPendingUntilVfx = true;
@@ -2525,11 +2850,13 @@ namespace Shadowbus
 
             nativeReceivedMetadataActive = true;
             currentInjectedAuthoritativeSkillTargetBatch = null;
+            currentInjectedAuthoritativeSkillEvaluationBatch = null;
             RememberReceivedHiddenCardStates(data, ordered);
             RememberReceivedPlayerHistoryBeforeState(data);
             RememberReceivedPlayerHistoryState(data, false);
             TryApplyPendingHiddenCardStates();
             RememberReceivedAuthoritativeSkillTargets(data);
+            RememberReceivedAuthoritativeSkillEvaluations(data);
             ApplyReceivedFusionAction(data, false);
         }
 
@@ -2570,6 +2897,7 @@ namespace Shadowbus
             }
             StagedPreNativeFusionActions.Clear();
             currentInjectedAuthoritativeSkillTargetBatch = null;
+            currentInjectedAuthoritativeSkillEvaluationBatch = null;
             nativeReceivedMetadataActive = false;
         }
 
@@ -2591,13 +2919,20 @@ namespace Shadowbus
 
         internal static void RejectReceivedAuthoritativeSkillTargets()
         {
-            if (!IsActive || currentInjectedAuthoritativeSkillTargetBatch == null)
+            if (!IsActive)
             {
                 return;
             }
-
-            currentInjectedAuthoritativeSkillTargetBatch.Rejected = true;
-            currentInjectedAuthoritativeSkillTargetBatch.ReadyForCleanup = true;
+            if (currentInjectedAuthoritativeSkillTargetBatch != null)
+            {
+                currentInjectedAuthoritativeSkillTargetBatch.Rejected = true;
+                currentInjectedAuthoritativeSkillTargetBatch.ReadyForCleanup = true;
+            }
+            if (currentInjectedAuthoritativeSkillEvaluationBatch != null)
+            {
+                currentInjectedAuthoritativeSkillEvaluationBatch.Rejected = true;
+                currentInjectedAuthoritativeSkillEvaluationBatch.ReadyForCleanup = true;
+            }
         }
 
         private static void ActivateNextAuthoritativeSkillTargetBatch()
@@ -2610,6 +2945,18 @@ namespace Shadowbus
             activeAuthoritativeSkillTargetBatch =
                 PendingAuthoritativeSkillTargetBatches.Dequeue();
             receivedAuthoritativeActionActive = true;
+        }
+
+        private static void ActivateNextAuthoritativeSkillEvaluationBatch()
+        {
+            if (activeAuthoritativeSkillEvaluationBatch != null ||
+                PendingAuthoritativeSkillEvaluationBatches.Count == 0)
+            {
+                return;
+            }
+            activeAuthoritativeSkillEvaluationBatch =
+                PendingAuthoritativeSkillEvaluationBatches.Dequeue();
+            receivedAuthoritativeSkillEvaluationActive = true;
         }
 
         private static void TryClearConsumedAuthoritativeSkillTargets()
@@ -2641,6 +2988,38 @@ namespace Shadowbus
             activeAuthoritativeSkillTargetBatch = null;
             receivedAuthoritativeActionActive = false;
             ActivateNextAuthoritativeSkillTargetBatch();
+        }
+
+        private static void TryClearConsumedAuthoritativeSkillEvaluations()
+        {
+            if (!receivedAuthoritativeSkillEvaluationActive ||
+                activeAuthoritativeSkillEvaluationBatch == null ||
+                !activeAuthoritativeSkillEvaluationBatch.ReadyForCleanup ||
+                processingReceivedBattleAction ||
+                receivedBattleActionPendingUntilVfx ||
+                !(BattleManagerBase.GetIns() is NetworkBattleManagerBase manager) ||
+                manager.VfxMgr == null || !manager.VfxMgr.IsEnd)
+            {
+                return;
+            }
+
+            if (activeAuthoritativeSkillEvaluationBatch.Rejected)
+            {
+                Plugin.Logger.LogWarning(
+                    "[P2P] Discarded authoritative private skill evaluations for " +
+                    "a native action that was rejected by the receiver.");
+            }
+            else if (activeAuthoritativeSkillEvaluationBatch.Entries.Count > 0)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[P2P] {activeAuthoritativeSkillEvaluationBatch.Entries.Count} " +
+                    "authoritative private skill evaluation(s) were not consumed " +
+                    "by the matching native action; discarded them at the " +
+                    "completed action boundary.");
+            }
+            activeAuthoritativeSkillEvaluationBatch = null;
+            receivedAuthoritativeSkillEvaluationActive = false;
+            ActivateNextAuthoritativeSkillEvaluationBatch();
         }
 
         private static bool TryConsumeAuthoritativeSkillTargets(
@@ -2731,13 +3110,24 @@ namespace Shadowbus
             SkillBase skill,
             out bool usedFallback)
         {
+            return FindAuthoritativeSkillEntry(
+                activeAuthoritativeSkillTargetBatch?.Entries,
+                skill,
+                out usedFallback);
+        }
+
+        private static int FindAuthoritativeSkillEntry(
+            List<Dictionary<string, object>> entries,
+            SkillBase skill,
+            out bool usedFallback)
+        {
             usedFallback = false;
-            if (activeAuthoritativeSkillTargetBatch == null || skill == null)
+            if (entries == null || skill == null)
             {
                 return -1;
             }
 
-            int strict = activeAuthoritativeSkillTargetBatch.Entries.FindIndex(
+            int strict = entries.FindIndex(
                 entry => AuthoritativeSkillTargetMatches(entry, skill));
             if (strict >= 0)
             {
@@ -2763,7 +3153,7 @@ namespace Shadowbus
             // receiver. The card's absolute owner/index remains stable for the
             // duration of this ordered action, so use it as the deterministic
             // fallback and keep FIFO ordering for repeated skills.
-            int fallback = activeAuthoritativeSkillTargetBatch.Entries.FindIndex(
+            int fallback = entries.FindIndex(
                 entry =>
                 TryGetStateInt(entry, "ownerIdx", out int idx) && idx == ownerIndex &&
                 (!TryGetStateInt(entry, "owner", out int side) || side == expectedOwner) &&
@@ -2777,7 +3167,7 @@ namespace Shadowbus
                 // Last-resort owner/index match. This is only possible inside the
                 // current action batch and is preferable to executing a random
                 // selection locally and silently diverging.
-                fallback = activeAuthoritativeSkillTargetBatch.Entries.FindIndex(
+                fallback = entries.FindIndex(
                     entry =>
                     TryGetStateInt(entry, "ownerIdx", out int idx) &&
                         idx == ownerIndex &&
@@ -8442,6 +8832,91 @@ namespace Shadowbus
         private sealed class AuthoritativeSkillTargetBatch
         {
             internal AuthoritativeSkillTargetBatch(
+                IEnumerable<Dictionary<string, object>> entries)
+            {
+                Entries = entries?.ToList() ??
+                    new List<Dictionary<string, object>>();
+            }
+
+            internal List<Dictionary<string, object>> Entries { get; }
+            internal bool ReadyForCleanup { get; set; }
+            internal bool Rejected { get; set; }
+        }
+
+        internal sealed class AuthoritativeSkillEvaluationScope
+        {
+            internal AuthoritativeSkillEvaluationScope(
+                SkillBase skill,
+                bool isSource,
+                Dictionary<string, object> entry)
+            {
+                Skill = skill;
+                IsSource = isSource;
+                Entry = entry ?? new Dictionary<string, object>();
+                Values = new List<AuthoritativeSkillOptionValue>();
+                PreprocessResults = new List<bool>();
+
+                if (isSource)
+                {
+                    return;
+                }
+                if (Entry.TryGetValue("values", out object rawValues) &&
+                    rawValues is IEnumerable values && !(rawValues is string))
+                {
+                    foreach (object rawValue in values)
+                    {
+                        if (!(rawValue is Dictionary<string, object> item) ||
+                            !item.TryGetValue("keyword", out object rawKeyword) ||
+                            string.IsNullOrEmpty(rawKeyword?.ToString()) ||
+                            !TryGetStateInt(item, "value", out int value))
+                        {
+                            continue;
+                        }
+                        Values.Add(new AuthoritativeSkillOptionValue(
+                            rawKeyword.ToString(), value));
+                    }
+                }
+                if (Entry.TryGetValue("preprocess", out object rawPreprocess) &&
+                    rawPreprocess is IEnumerable preprocess &&
+                    !(rawPreprocess is string))
+                {
+                    foreach (object rawResult in preprocess)
+                    {
+                        try
+                        {
+                            PreprocessResults.Add(Convert.ToInt32(
+                                rawResult, CultureInfo.InvariantCulture) != 0);
+                        }
+                        catch (Exception)
+                        {
+                        }
+                    }
+                }
+            }
+
+            internal SkillBase Skill { get; }
+            internal bool IsSource { get; }
+            internal Dictionary<string, object> Entry { get; }
+            internal List<AuthoritativeSkillOptionValue> Values { get; }
+            internal List<bool> PreprocessResults { get; }
+            internal int NextPreprocessResult { get; set; }
+        }
+
+        internal sealed class AuthoritativeSkillOptionValue
+        {
+            internal AuthoritativeSkillOptionValue(string keyword, int value)
+            {
+                Keyword = keyword ?? string.Empty;
+                Value = value;
+            }
+
+            internal string Keyword { get; }
+            internal int Value { get; }
+        }
+
+        private sealed class AuthoritativeSkillEvaluationBatch
+        {
+            internal AuthoritativeSkillEvaluationBatch(
                 IEnumerable<Dictionary<string, object>> entries)
             {
                 Entries = entries?.ToList() ??
