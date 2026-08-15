@@ -505,14 +505,6 @@ namespace Shadowbus
         {
             DataMgr dataMgr = GameMgr.GetIns().GetDataMgr();
             IList<int> playerDeck = dataMgr.GetCurrentDeckData();
-
-            // Only reachable from PracticeDeckSelectConfirmDialog.DecideDeck, which just applied
-            // the deck the player chose in the rematch dialog. Tell the custom practice restore
-            // to leave it alone.
-            AIManager.NotifyRetryDeckChosenByPlayer();
-            Plugin.Logger.LogInfo(
-                $"[Offlinizer] Practice retry will use the deck the player just chose " +
-                $"({playerDeck?.Count ?? 0} card(s)).");
             if (playerDeck != null && playerDeck.Count > 0 && playerDeck.Count < 6)
             {
                 int originalCount = playerDeck.Count;
