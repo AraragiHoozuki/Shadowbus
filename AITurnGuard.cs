@@ -1,4 +1,5 @@
 using HarmonyLib;
+using Shadowbus.LLMAI;
 using System;
 using UnityEngine;
 using Wizard;
@@ -140,6 +141,16 @@ namespace Shadowbus
             EnemyAI ai = _watchedAI;
             if (ai == null || _stallTimeoutSeconds <= 0f)
             {
+                return;
+            }
+
+            // Model requests and plan validation intentionally leave the original operation
+            // queue idle. The LLM controller has its own HTTP and settlement timeouts.
+            if (LLMAITurnController.IsControlling(ai))
+            {
+                _idleSeconds = 0f;
+                _lastActionCount = ai.oprationQueueActCount;
+                _lastQueueCount = ai.AIOperationQueue?.Count ?? 0;
                 return;
             }
 

@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Cute;
+using Shadowbus.LLMAI;
 using UnityEngine;
 using Wizard;
 using Wizard.Dialog.Setting;
@@ -53,6 +54,7 @@ namespace Shadowbus
         private int _playerEmoteCsvIndex;
         private int _logicLevel;
         private int _maxLife;
+        private bool _enableLLMAI;
         private bool _enablePlayerAI;
         private bool _playerAIUseLocalCsv;
         private bool _isStarting;
@@ -78,6 +80,7 @@ namespace Shadowbus
         private UIButton _playerDeckCsvButton;
         private UIButton _playerStyleCsvButton;
         private UIButton _playerEmoteCsvButton;
+        private UIButton _llmAIButton;
         private UIButton _playerAIButton;
         private readonly List<UIButton> _classButtons = new List<UIButton>();
         private readonly List<UIButton> _logicButtons = new List<UIButton>();
@@ -97,6 +100,7 @@ namespace Shadowbus
             _playerDecks = BuildPlayerDeckChoices(decks);
             _logicLevel = 2;
             _maxLife = 20;
+            _enableLLMAI = LLMAITurnController.DefaultEnabled;
             _enablePlayerAI = false;
             _playerAIUseLocalCsv = false;
 
@@ -188,7 +192,13 @@ namespace Shadowbus
             }
 
             CreateSectionHeader("对手设置", new Vector3(-500f, 190f, 0f));
-            CreateSectionHeader("对手 AI 数据", new Vector3(20f, 190f, 0f));
+            CreateSectionHeader("对手 AI 数据", new Vector3(20f, 190f, 0f), 300);
+            _llmAIButton = CreateNativeButton(
+                string.Empty,
+                new Vector3(425f, 190f, 0f),
+                150,
+                34,
+                ToggleLLMAI);
 
             CreateLabel("卡组", new Vector3(-470f, 142f, 0f), 90, 34, 18, NGUIText.Alignment.Left);
             _deckButton = CreateNativeButton(
@@ -911,6 +921,7 @@ namespace Shadowbus
             UpdatePlayerDeckButton();
             RefreshClassDependentControls();
             RefreshCsvControls();
+            UpdateLLMAIControl();
         }
 
         private void UpdateDeckButton()
@@ -963,6 +974,29 @@ namespace Shadowbus
                 ? _playerPresets[Mathf.Clamp(_playerPresetIndex, 0, _playerPresets.Count - 1)].Label
                 : "无可用预设";
             SetNativeButtonText(_playerPresetButton, label);
+        }
+
+        private void ToggleLLMAI()
+        {
+            if (!LLMAITurnController.IsAvailable(out string reason))
+            {
+                _enableLLMAI = false;
+                UpdateLLMAIControl();
+                ShowValidation("LLM AI unavailable: " + reason + ". Configure [LLMAI] and restart the game.");
+                return;
+            }
+
+            _enableLLMAI = !_enableLLMAI;
+            UpdateLLMAIControl();
+            ClearValidation();
+        }
+
+        private void UpdateLLMAIControl()
+        {
+            bool available = LLMAITurnController.IsAvailable(out _);
+            string label = !available ? "LLM AI: UNAVAILABLE" : (_enableLLMAI ? "LLM AI: ON" : "LLM AI: OFF");
+            SetNativeButtonText(_llmAIButton, label);
+            SetButtonSelected(_llmAIButton, available && _enableLLMAI);
         }
 
         private void TogglePlayerAI()
@@ -1219,6 +1253,11 @@ namespace Shadowbus
                 ShowValidation("所选职业没有可用的原作 AI 预设。");
                 return;
             }
+            if (_enableLLMAI && !LLMAITurnController.IsAvailable(out string llmReason))
+            {
+                ShowValidation("LLM AI unavailable: " + llmReason + ". Configure [LLMAI] and restart the game.");
+                return;
+            }
 
             _isStarting = true;
             _dialog.IsButton1Enabled = false;
@@ -1241,6 +1280,7 @@ namespace Shadowbus
                 LocalEmoteCsvPath = GetSelectedPath(_emoteCsvChoices, _emoteCsvIndex),
                 LogicLevel = _logicLevel,
                 MaxLife = _maxLife,
+                EnableLLMAI = _enableLLMAI,
                 EnablePlayerAI = _enablePlayerAI,
                 PlayerAIUseLocalCsv = _playerAIUseLocalCsv,
                 LocalPlayerDeckCsvPath = GetSelectedPath(_deckCsvChoices, _playerDeckCsvIndex),

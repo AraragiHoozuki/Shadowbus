@@ -3,6 +3,7 @@ using BepInEx.Configuration;
 using BepInEx.Logging;
 using BepInEx.Unity.Mono;
 using HarmonyLib;
+using Shadowbus.LLMAI;
 using System.Linq;
 
 
@@ -23,6 +24,24 @@ public class Plugin : BaseUnityPlugin
     private ConfigEntry<string> p2pAdvertisedAddress;
     private ConfigEntry<int> p2pPort;
     private ConfigEntry<float> aiStallTimeout;
+    private ConfigEntry<bool> llmAIEnabled;
+    private ConfigEntry<string> llmAIEndpoint;
+    private ConfigEntry<string> llmAIResponsesEndpoint;
+    private ConfigEntry<string> llmAIChatCompletionsEndpoint;
+    private ConfigEntry<string> llmAIApiMode;
+    private ConfigEntry<string> llmAIApiKey;
+    private ConfigEntry<string> llmAIModel;
+    private ConfigEntry<string> llmAIReasoningEffort;
+    private ConfigEntry<float> llmAITimeout;
+    private ConfigEntry<int> llmAIMaxCandidates;
+    private ConfigEntry<int> llmAIMaxPlanSteps;
+    private ConfigEntry<int> llmAIMaxApiCallsPerTurn;
+    private ConfigEntry<int> llmAIMaxResponseTokens;
+    private ConfigEntry<int> llmAIMaxOutputTokens;
+    private ConfigEntry<int> llmAILethalSearchMaxPatterns;
+    private ConfigEntry<int> llmAILethalSearchBudgetMs;
+    private ConfigEntry<string> llmAIPromptFile;
+    private ConfigEntry<bool> llmAIDebugLogPayloads;
 
     private void Awake()
     {
@@ -56,6 +75,68 @@ public class Plugin : BaseUnityPlugin
             30f,
             "Seconds the enemy AI may make no progress before its turn is force ended. Use 0 to disable.");
         AITurnGuard.Configure(aiStallTimeout.Value);
+        llmAIEnabled = Config.Bind("LLMAI", "Enabled", false,
+            "Default state of the in-game LLM AI switch for new custom practice battles.");
+        llmAIEndpoint = Config.Bind("LLMAI", "Endpoint", "https://api.openai.com/v1/chat/completions",
+            "Backward-compatible API endpoint or /v1 base. Auto derives Responses and Chat Completions URLs.");
+        llmAIResponsesEndpoint = Config.Bind("LLMAI", "ResponsesEndpoint", string.Empty,
+            "Optional Responses API endpoint override.");
+        llmAIChatCompletionsEndpoint = Config.Bind("LLMAI", "ChatCompletionsEndpoint", string.Empty,
+            "Optional Chat Completions endpoint override.");
+        llmAIApiMode = Config.Bind("LLMAI", "ApiMode", "Auto",
+            "API mode: Auto, Responses, or ChatCompletions. Auto prefers Responses.");
+        llmAIApiKey = Config.Bind("LLMAI", "ApiKey", string.Empty,
+            "Bearer API key. This value is never written to the log or model payload.");
+        llmAIModel = Config.Bind("LLMAI", "Model", string.Empty,
+            "Model name.");
+        llmAIReasoningEffort = Config.Bind("LLMAI", "ReasoningEffort", "high",
+            "Reasoning effort: none, minimal, low, medium, high, or xhigh. Empty omits the field.");
+        llmAITimeout = Config.Bind("LLMAI", "TimeoutSeconds", 12f,
+            "Timeout for one model request.");
+        llmAIMaxCandidates = Config.Bind("LLMAI", "MaxCandidates", 512,
+            "Maximum legal actions at one simulated node before falling back to the original AI.");
+        llmAIMaxPlanSteps = Config.Bind("LLMAI", "MaxPlanSteps", 12,
+            "Maximum number of actions accepted in one TurnPlan.");
+        llmAIMaxApiCallsPerTurn = Config.Bind("LLMAI", "MaxApiCallsPerTurn", 12,
+            "Maximum model calls during one turn, including replans.");
+        llmAIMaxResponseTokens = Config.Bind("LLMAI", "MaxResponseTokens", 768,
+            "Legacy Chat Completions maximum response tokens.");
+        llmAIMaxOutputTokens = Config.Bind("LLMAI", "MaxOutputTokens", 4096,
+            "Responses API output budget shared by reasoning and final JSON.");
+        llmAILethalSearchMaxPatterns = Config.Bind("LLMAI", "LethalSearchMaxPatterns", 32,
+            "Maximum original-AI play patterns checked by local lethal search per decision state.");
+        llmAILethalSearchBudgetMs = Config.Bind("LLMAI", "LethalSearchBudgetMs", 1000,
+            "Total local lethal-search budget in milliseconds per decision state.");
+        llmAIPromptFile = Config.Bind("LLMAI", "PromptFile", "Mods/AIData/llm_prompt.txt",
+            "Optional prompt path relative to the game root. A built-in prompt is used when absent.");
+        llmAIDebugLogPayloads = Config.Bind("LLMAI", "DebugLogPayloads", false,
+            "Log public model payloads and responses. Authorization is never logged.");
+        if (!LLMEndpointResolver.TryParseMode(llmAIApiMode.Value, out LLMApiMode apiMode))
+        {
+            Logger.LogWarning($"[LLMAI] Invalid ApiMode '{llmAIApiMode.Value}'; using Auto.");
+            apiMode = LLMApiMode.Auto;
+        }
+        LLMAITurnController.Configure(new LLMAISettings
+        {
+            Enabled = llmAIEnabled.Value,
+            Endpoint = llmAIEndpoint.Value,
+            ResponsesEndpoint = llmAIResponsesEndpoint.Value,
+            ChatCompletionsEndpoint = llmAIChatCompletionsEndpoint.Value,
+            ApiMode = apiMode,
+            ApiKey = llmAIApiKey.Value,
+            Model = llmAIModel.Value,
+            ReasoningEffort = llmAIReasoningEffort.Value,
+            TimeoutSeconds = System.Math.Max(1f, llmAITimeout.Value),
+            MaxCandidates = System.Math.Max(1, llmAIMaxCandidates.Value),
+            MaxPlanSteps = System.Math.Max(1, llmAIMaxPlanSteps.Value),
+            MaxApiCallsPerTurn = System.Math.Max(1, llmAIMaxApiCallsPerTurn.Value),
+            MaxResponseTokens = System.Math.Max(64, llmAIMaxResponseTokens.Value),
+            MaxOutputTokens = System.Math.Max(64, llmAIMaxOutputTokens.Value),
+            LethalSearchMaxPatterns = System.Math.Max(0, llmAILethalSearchMaxPatterns.Value),
+            LethalSearchBudgetMs = System.Math.Max(0, llmAILethalSearchBudgetMs.Value),
+            PromptFile = llmAIPromptFile.Value,
+            DebugLogPayloads = llmAIDebugLogPayloads.Value
+        });
         CustomFormats.Initialize();
         P2PTwoPickRules.Initialize();
         BossRushOfflineData.Initialize();
@@ -75,6 +156,7 @@ public class Plugin : BaseUnityPlugin
             Harmony.CreateAndPatchAll(typeof(FakeConnect));
             Harmony.CreateAndPatchAll(typeof(BossRushPatches));
             Harmony.CreateAndPatchAll(typeof(AIManager));
+            Harmony.CreateAndPatchAll(typeof(LLMAIPatches));
             try
             {
                 Harmony.CreateAndPatchAll(typeof(PracticeDualAI));
@@ -130,6 +212,7 @@ public class Plugin : BaseUnityPlugin
 
     private void OnDestroy()
     {
+        LLMAITurnController.CancelAll("plugin_destroyed");
         P2PRuntime.Shutdown();
     }
 }

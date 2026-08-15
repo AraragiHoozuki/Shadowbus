@@ -120,6 +120,7 @@ namespace Shadowbus
             public string LocalEmoteCsvPath;
             public int LogicLevel;
             public int MaxLife;
+            public bool EnableLLMAI;
             public bool EnablePlayerAI;
             public bool PlayerAIUseLocalCsv;
             public string LocalPlayerDeckCsvPath;
@@ -154,6 +155,7 @@ namespace Shadowbus
             public string EmoteAIKey;
             public int DifficultyDegreeId;
             public int FieldId;
+            public bool LLMAIEnabled;
             public bool PlayerAIEnabled;
             public bool PlayerAIUseLocalCsv;
             public int PlayerClassId;
@@ -163,6 +165,24 @@ namespace Shadowbus
         }
 
         private static CustomPracticeSession ActiveCustomPracticeSession;
+
+        internal static bool IsActiveCustomPracticeBattle(BattleManagerBase battleMgr)
+        {
+            if (ActiveCustomPracticeSession == null || !(battleMgr is SingleBattleMgr) || battleMgr.IsBattleEnd)
+            {
+                return false;
+            }
+
+            DataMgr dataMgr = GameMgr.GetIns()?.GetDataMgr();
+            return dataMgr != null &&
+                   dataMgr.m_BattleType == DataMgr.BattleType.Practice &&
+                   dataMgr.m_EnemyAIDeckId == int.MinValue;
+        }
+
+        internal static bool IsLLMAIEnabledForBattle(BattleManagerBase battleMgr)
+        {
+            return IsActiveCustomPracticeBattle(battleMgr) && ActiveCustomPracticeSession.LLMAIEnabled;
+        }
 
         [HarmonyPatch(typeof(ClassSelectionPage), "CreateClassButton")]
         [HarmonyPostfix]
@@ -964,6 +984,7 @@ namespace Shadowbus
                                 EmoteAIKey = emoteAIKey,
                                 DifficultyDegreeId = dataMgr.PracticeDifficultyDegreeId,
                                 FieldId = fieldId,
+                                LLMAIEnabled = settings.EnableLLMAI,
                                 PlayerAIEnabled = settings.EnablePlayerAI,
                                 PlayerAIUseLocalCsv = settings.PlayerAIUseLocalCsv ||
                                                        !string.IsNullOrEmpty(settings.LocalPlayerDeckCsvPath) ||
@@ -981,7 +1002,7 @@ namespace Shadowbus
                                 $"class={classId}, leader={settings.Leader.chara_id}, skin={settings.Leader.skin_id}, " +
                                 $"leaderVoiceId='{leaderVoiceId}', logic={settings.LogicLevel}, " +
                                 $"maxLife={settings.MaxLife}, deckAI='{deckAIKey}', styleAI='{styleAIKey}', " +
-                                $"emoteAI='{emoteAIKey}', playerAI={settings.EnablePlayerAI}, " +
+                                $"emoteAI='{emoteAIKey}', llmAI={settings.EnableLLMAI}, playerAI={settings.EnablePlayerAI}, " +
                                 $"playerCsvSource={(settings.PlayerAIUseLocalCsv ? "local" : "builtin")}, " +
                                 $"playerDeckAI='{playerDeckAIKey}', playerStyleAI='{playerStyleAIKey}', " +
                                 $"playerEmoteAI='{playerEmoteAIKey}', playerPresetClass={builtinPlayerPreset.ClassId}.");
@@ -1086,7 +1107,8 @@ namespace Shadowbus
                     $"leader={session.EnemyCharaId}, logic={session.LogicLevel}, " +
                     $"maxLife={session.MaxLife}, deckAI='{session.DeckAIKey}', " +
                     $"styleAI='{session.StyleAIKey}', emoteAI='{session.EmoteAIKey}', " +
-                    $"playerAI={session.PlayerAIEnabled}, playerCsvSource={(session.PlayerAIUseLocalCsv ? "local" : "builtin")}, " +
+                    $"llmAI={session.LLMAIEnabled}, playerAI={session.PlayerAIEnabled}, " +
+                    $"playerCsvSource={(session.PlayerAIUseLocalCsv ? "local" : "builtin")}, " +
                     $"playerDeckAI='{session.PlayerDeckAIKey}', playerStyleAI='{session.PlayerStyleAIKey}', " +
                     $"playerEmoteAI='{session.PlayerEmoteAIKey}'.");
                 return true;
