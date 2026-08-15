@@ -42,6 +42,11 @@ public class Plugin : BaseUnityPlugin
     private ConfigEntry<int> llmAILethalSearchBudgetMs;
     private ConfigEntry<string> llmAIPromptFile;
     private ConfigEntry<bool> llmAIDebugLogPayloads;
+    private ConfigEntry<float> aiUnknownCardPlayBonusMin;
+    private ConfigEntry<float> aiUnknownCardPlayBonusMax;
+    private ConfigEntry<bool> aiPriceUnpricedCards;
+    private ConfigEntry<bool> aiRespectPlayLimitLocks;
+    private ConfigEntry<int> aiLowLifeHealThreshold;
 
     private void Awake()
     {
@@ -137,6 +142,37 @@ public class Plugin : BaseUnityPlugin
             PromptFile = llmAIPromptFile.Value,
             DebugLogPayloads = llmAIDebugLogPayloads.Value
         });
+        aiUnknownCardPlayBonusMin = Config.Bind(
+            "AI",
+            "UnknownCardPlayBonusMin",
+            0.5f,
+            "Lowest play bonus given to a card that has no AI data. Set both bounds to 0 to keep the crash fix but stop the AI from playing such cards.");
+        aiUnknownCardPlayBonusMax = Config.Bind(
+            "AI",
+            "UnknownCardPlayBonusMax",
+            1.5f,
+            "Highest play bonus given to a card that has no AI data. The original data keeps most numeric play bonuses between 0 and 2.");
+        aiPriceUnpricedCards = Config.Bind(
+            "AI",
+            "PriceUnpricedCards",
+            true,
+            "Score spells and amulets whose AI tags describe an effect but never give it a value. Without this the AI leaves them in hand for the whole game.");
+        aiRespectPlayLimitLocks = Config.Bind(
+            "AI",
+            "RespectPlayLimitLocks",
+            false,
+            "Leave cards the original data locked with a playLimit tag unpriced. Only 4 cards are both locked and unpriced, and all sit far below their threshold, so this changes nothing today; it guards against a future card whose threshold a synthesized bonus could cross.");
+        aiLowLifeHealThreshold = Config.Bind(
+            "AI",
+            "LowLifeHealThreshold",
+            10,
+            "Leader healing only scores when the AI is at this much life or less. Use 0 to score it like any other unpriced effect.");
+        AICardDataFallback.Configure(
+            aiUnknownCardPlayBonusMin.Value,
+            aiUnknownCardPlayBonusMax.Value,
+            aiPriceUnpricedCards.Value,
+            aiRespectPlayLimitLocks.Value,
+            aiLowLifeHealThreshold.Value);
         CustomFormats.Initialize();
         P2PTwoPickRules.Initialize();
         BossRushOfflineData.Initialize();
@@ -176,6 +212,14 @@ public class Plugin : BaseUnityPlugin
             {
                 Logger.LogError($"[AITurnGuard] FAILED to apply the AI stall patches: {exception}");
             }
+            try
+            {
+                Harmony.CreateAndPatchAll(typeof(AICardDataFallback));
+            }
+            catch (System.Exception exception)
+            {
+                Logger.LogError($"[AICardData] FAILED to apply the AI card data fallback patch: {exception}");
+            }
             Harmony.CreateAndPatchAll(typeof(ActiveSkill));
             Harmony.CreateAndPatchAll(typeof(GeminizeSkillPatcher));
             Harmony.CreateAndPatchAll(typeof(AcquireSkillsSkillPatcher));
@@ -208,6 +252,7 @@ public class Plugin : BaseUnityPlugin
         P2PRuntime.Update();
         PracticeDualAI.Update();
         AITurnGuard.Update();
+        AICardDataFallback.Update();
     }
 
     private void OnDestroy()
