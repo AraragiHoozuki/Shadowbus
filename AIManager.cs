@@ -164,20 +164,6 @@ namespace Shadowbus
 
         private static CustomPracticeSession ActiveCustomPracticeSession;
 
-        // Set while the practice retry flow is starting a rematch the player just picked a deck
-        // for. The session snapshot still holds the deck the first battle was set up with, and
-        // restoring it would silently undo that choice.
-        private static bool RetryDeckChosenByPlayer;
-
-        /// <summary>
-        /// Called from the practice retry flow after the player confirmed a deck in the rematch
-        /// dialog, before the battle is rebuilt.
-        /// </summary>
-        internal static void NotifyRetryDeckChosenByPlayer()
-        {
-            RetryDeckChosenByPlayer = true;
-        }
-
         [HarmonyPatch(typeof(ClassSelectionPage), "CreateClassButton")]
         [HarmonyPostfix]
         public static void ClassSelectionPage_CreateClassButton_Postfix(ClassSelectionPage __instance)
@@ -1039,11 +1025,6 @@ namespace Shadowbus
 
         internal static bool TryRestoreCustomPracticeForRetry(DataMgr dataMgr)
         {
-            // Consumed here whatever happens, so a retry that turns out not to be a custom
-            // practice cannot leave it set for the next one.
-            bool keepPlayerChoice = RetryDeckChosenByPlayer;
-            RetryDeckChosenByPlayer = false;
-
             CustomPracticeSession session = ActiveCustomPracticeSession;
             if (dataMgr == null || session == null ||
                 dataMgr.m_BattleType != DataMgr.BattleType.Practice ||
@@ -1057,21 +1038,14 @@ namespace Shadowbus
                 // Rebuild the runtime library because battle teardown may have replaced
                 // its buffered setup. The local CSV assets remain registered in Master.
                 dataMgr.RegisterAllAIData();
-                // The rematch dialog already applied the player's pick through
-                // DeckListUtility.DataMgrSaveLastSelectDeckData, which sets both the deck and
-                // the leader. Restoring the snapshot on top of it would put the first battle's
-                // deck back and make the dialog look broken.
-                if (!keepPlayerChoice)
+                if (session.PlayerDeck != null && session.PlayerDeck.Count > 0)
                 {
-                    if (session.PlayerDeck != null && session.PlayerDeck.Count > 0)
-                    {
-                        dataMgr.SetCurrentDeckData(session.PlayerDeck.ToList());
-                    }
-                    if (session.PlayerClassId >= 1 && session.PlayerClassId <= 8 &&
-                        session.PlayerClassId != dataMgr.GetPlayerClassId())
-                    {
-                        dataMgr.SetPlayerCharaIdByClassId(session.PlayerClassId, true);
-                    }
+                    dataMgr.SetCurrentDeckData(session.PlayerDeck.ToList());
+                }
+                if (session.PlayerClassId >= 1 && session.PlayerClassId <= 8 &&
+                    session.PlayerClassId != dataMgr.GetPlayerClassId())
+                {
+                    dataMgr.SetPlayerCharaIdByClassId(session.PlayerClassId, true);
                 }
                 dataMgr.SetEnemyCharaId(session.EnemyCharaId);
                 dataMgr.SetEnemyAIDeckFromCustomDeck(

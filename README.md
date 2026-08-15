@@ -1,7 +1,5 @@
 # Shadowbus
 
-**简体中文** | [English](README.en.md)
-
 Shadowverse 国际服的单机化与卡牌 Mod 工具，基于 BepInEx 6 开发。
 
 本仓库同时提供可部署到 GitHub Pages 的[一体化 Web 配置编辑器](WebEditor/README.md)，
@@ -89,23 +87,6 @@ P2P 模式不提供账号服务、房间列表、STUN 打洞或 TURN 中继。�
 - 自定义 Deck、Style、Emote CSV。
 
 自定义 CSV 分别放入 `Mods/AIData/deck/`、`style/` 和 `emote/`。文件需要保持原作对应 CSV 的列格式；配置项留为“使用原作预设”时，会使用当前职业所选预设的原始 AI 数据。配置页打开后新增文件，可点击“刷新 CSV”重新扫描。
-
-### AI 主战者语音
-
-支持自定义主战者语音，`Mods/AIData/emote/ai_emote_sample.csv` 是一份可直接使用的现成文件。皮肤实际拥有哪些语音序号见 [Mods/AIData/README.md](Mods/AIData/README.md)，完整语法见 [Docs/AI_CSV_Guide.md](Docs/AI_CSV_Guide.md)。
-
-### AI 行为配置
-
-`BepInEx/config/` 下插件配置文件的 `[AI]` 段，控制 AI 如何处理原作 AI 数据没有描述的卡牌：
-
-| 配置项 | 默认值 | 说明 |
-| --- | --- | --- |
-| `StallTimeoutSeconds` | `30` | AI 无进展多少秒后强制结束回合，`0` 关闭 |
-| `UnknownCardPlayBonusMin` | `0.5` | 无 AI 数据卡牌的最低出牌加分 |
-| `UnknownCardPlayBonusMax` | `1.5` | 最高出牌加分，两项都填 `0` 则只保留防崩溃 |
-| `PriceUnpricedCards` | `true` | 是否按标签为「有模拟标签、无计分标签」的法术和护符折价 |
-| `RespectPlayLimitLocks` | `false` | 开启后，原作用 `playLimit` 锁定的卡牌跳过定价 |
-| `LowLifeHealThreshold` | `10` | 主战者回复只在该生命值及以下计分 |
 
 ## 卡牌 Mod
 
