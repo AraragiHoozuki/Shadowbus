@@ -92,18 +92,7 @@ P2P 模式不提供账号服务、房间列表、STUN 打洞或 TURN 中继。�
 
 ### AI 主战者语音
 
-Emote CSV 支持两个占位符，一份文件即可适配所有皮肤主战者：
-
-- `VoiceID` 中的 `{LEADER}` 会替换成本场 AI 主战者的语音编号。
-- `FaceID`、`MotionID`、`TextID` 中的 `{AUTO}` 会填入原作中与该语音配套的值，台词取当前语言版本。
-
-```csv
-ID,Category,FaceID,MotionID,VoiceID,TextID
-0,14,{AUTO},{AUTO},{LEADER}_000_007,{AUTO}
-1,13,{AUTO},{AUTO},{LEADER}_000_011,{AUTO}
-```
-
-`Mods/AIData/emote/ai_emote_sample.csv` 是一份可直接使用的现成文件。皮肤实际拥有哪些语音序号见 [Mods/AIData/README.md](Mods/AIData/README.md)，完整语法见 [Docs/AI_CSV_Guide.md](Docs/AI_CSV_Guide.md)。
+支持自定义主战者语音，`Mods/AIData/emote/ai_emote_sample.csv` 是一份可直接使用的现成文件。皮肤实际拥有哪些语音序号见 [Mods/AIData/README.md](Mods/AIData/README.md)，完整语法见 [Docs/AI_CSV_Guide.md](Docs/AI_CSV_Guide.md)。
 
 ### AI 行为配置
 
