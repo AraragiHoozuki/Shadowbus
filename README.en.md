@@ -94,18 +94,7 @@ Custom CSV files go into `Mods/AIData/deck/`, `style/` and `emote/` respectively
 
 ### Leader voices for the AI
 
-An Emote CSV can use two placeholders so that one file works for every leader skin:
-
-- `{LEADER}` in `VoiceID` is replaced with the voice ID of the leader chosen for this battle.
-- `{AUTO}` in `FaceID`, `MotionID` or `TextID` is filled in with the values the stock data pairs with that voice line, including localized text.
-
-```csv
-ID,Category,FaceID,MotionID,VoiceID,TextID
-0,14,{AUTO},{AUTO},{LEADER}_000_007,{AUTO}
-1,13,{AUTO},{AUTO},{LEADER}_000_011,{AUTO}
-```
-
-A ready-to-use file is provided at `Mods/AIData/emote/ai_emote_sample.csv`. See [Mods/AIData/README.md](Mods/AIData/README.md) for which voice numbers a skin actually has, and [Docs/AI_CSV_Guide.md](Docs/AI_CSV_Guide.md) for the full CSV syntax.
+Supports custom leader voices. A ready-to-use file is provided at `Mods/AIData/emote/ai_emote_sample.csv`. See [Mods/AIData/README.md](Mods/AIData/README.md) for which voice numbers a skin actually has, and [Docs/AI_CSV_Guide.md](Docs/AI_CSV_Guide.md) for the full CSV syntax.
 
 ### AI behaviour settings
 
