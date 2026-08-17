@@ -47,6 +47,7 @@ public class Plugin : BaseUnityPlugin
     private ConfigEntry<bool> aiPriceUnpricedCards;
     private ConfigEntry<bool> aiRespectPlayLimitLocks;
     private ConfigEntry<int> aiLowLifeHealThreshold;
+    private ConfigEntry<bool> bossRushAbilityPicker;
 
     private void Awake()
     {
@@ -173,6 +174,12 @@ public class Plugin : BaseUnityPlugin
             aiPriceUnpricedCards.Value,
             aiRespectPlayLimitLocks.Value,
             aiLowLifeHealThreshold.Value);
+        bossRushAbilityPicker = Config.Bind(
+            "BossRush",
+            "AbilityPicker",
+            false,
+            "Adds a 随便选 button to the BossRush ability select screen that offers every configured buff instead of the three random candidates. Testing aid; false hides the button and keeps the original random selection.");
+        BossRushAbilityPicker.Configure(bossRushAbilityPicker.Value);
         CustomFormats.Initialize();
         P2PTwoPickRules.Initialize();
         BossRushOfflineData.Initialize();
@@ -184,6 +191,15 @@ public class Plugin : BaseUnityPlugin
             Harmony.CreateAndPatchAll(typeof(DebugPatcher));
             Harmony.CreateAndPatchAll(typeof(DeckEdit));
             Harmony.CreateAndPatchAll(typeof(CardMasterPatcher));
+            try
+            {
+                // Isolated: a reference dump must never block the card master.
+                Harmony.CreateAndPatchAll(typeof(CardSkillExporter));
+            }
+            catch (System.Exception exception)
+            {
+                Logger.LogError($"[CardSkill] FAILED to apply the card skill export patch: {exception}");
+            }
             Harmony.CreateAndPatchAll(typeof(Offlinizer));
             var deckListHotReloadHarmony = Harmony.CreateAndPatchAll(typeof(DeckListHotReload));
             Logger.LogInfo(
@@ -191,6 +207,16 @@ public class Plugin : BaseUnityPlugin
                 $"{deckListHotReloadHarmony.GetPatchedMethods().Count()} game method(s) patched.");
             Harmony.CreateAndPatchAll(typeof(FakeConnect));
             Harmony.CreateAndPatchAll(typeof(BossRushPatches));
+            try
+            {
+                // Isolated: an optional testing aid must not take down the rest of
+                // the BossRush patches if the ability select screen changes.
+                Harmony.CreateAndPatchAll(typeof(BossRushAbilityPicker));
+            }
+            catch (System.Exception exception)
+            {
+                Logger.LogError($"[BossRush] FAILED to apply the ability picker patch: {exception}");
+            }
             Harmony.CreateAndPatchAll(typeof(AIManager));
             Harmony.CreateAndPatchAll(typeof(LLMAIPatches));
             try

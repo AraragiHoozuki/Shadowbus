@@ -7,6 +7,7 @@ using System.Linq;
 using System.Reflection;
 using UnityEngine;
 using Wizard;
+using Wizard.Dialog.Setting;
 
 namespace Shadowbus
 {
@@ -91,7 +92,7 @@ namespace Shadowbus
                 return;
             }
 
-            int charaId = BossRushOfflineData.GetCurrentBoss()?.EnemyCharaId ?? 1;
+            int charaId = GetCurrentEnemyCharaId();
             ResourcesManager resources = Toolbox.ResourcesManager;
             string[] paths =
             {
@@ -163,6 +164,13 @@ namespace Shadowbus
             setter?.Invoke(target, new[] { value });
         }
 
+        private static int GetCurrentEnemyCharaId()
+        {
+            BossRushBoss boss = BossRushOfflineData.GetCurrentBoss();
+            int charaId = BossRushOfflineData.ResolveCharaId(boss);
+            return charaId > 0 ? charaId : 1;
+        }
+
         [HarmonyPatch(typeof(QuestSelectionPage), "CollectBossRushResourcePaths")]
         [HarmonyPrefix]
         private static bool QuestSelectionPage_CollectBossRushResourcePaths_Prefix(ref List<string> __result)
@@ -183,7 +191,7 @@ namespace Shadowbus
                 UITexture texture = AccessTools.Field(typeof(QuestSelectionPage), "_selectCharaTexture")?.GetValue(__instance) as UITexture;
                 if (texture != null && texture.mainTexture == null)
                 {
-                    int charaId = BossRushOfflineData.GetCurrentBoss()?.EnemyCharaId ?? 1;
+                    int charaId = GetCurrentEnemyCharaId();
                     texture.mainTexture = Toolbox.ResourcesManager.LoadObject<Texture>(
                         Toolbox.ResourcesManager.GetAssetTypePath(charaId.ToString(), ResourcesManager.AssetLoadPathType.ClassCharaBase, true),
                         true,
@@ -205,7 +213,7 @@ namespace Shadowbus
                 UITexture texture = AccessTools.Field(typeof(QuestEventBossRushButton), "_texture")?.GetValue(__instance) as UITexture;
                 if (texture != null && texture.mainTexture == null)
                 {
-                    int charaId = BossRushOfflineData.GetCurrentBoss()?.EnemyCharaId ?? 1;
+                    int charaId = GetCurrentEnemyCharaId();
                     texture.mainTexture = Toolbox.ResourcesManager.LoadObject<Texture>(
                         Toolbox.ResourcesManager.GetAssetTypePath(charaId.ToString(), ResourcesManager.AssetLoadPathType.ClassCharaWideThumbnail, true),
                         true,
@@ -425,6 +433,17 @@ namespace Shadowbus
 
             SetPrivateProperty(battleData, nameof(BossRushBattleData.PlayerEmotionOverride), boss.PlayerEmotionOverride);
             SetPrivateProperty(battleData, nameof(BossRushBattleData.EnemyEmotionOverride), boss.EnemyEmotionOverride);
+
+            // The lobby response already carries the chosen leader, but the client
+            // may still be holding boss data fetched before the player picked one.
+            // This is the last point before the battle scene reads the chara id.
+            int charaId = BossRushOfflineData.ResolveCharaId(boss);
+            if (charaId > 0 && battleData.CharaId != charaId)
+            {
+                Plugin.Logger.LogInfo(
+                    $"[BossRush] Enemy leader for '{boss.Name}' switched from chara {battleData.CharaId} to {charaId}.");
+                SetPrivateProperty(battleData, nameof(BossRushBattleData.CharaId), charaId);
+            }
         }
 
         [HarmonyPatch(typeof(DataMgr), nameof(DataMgr.SetEnemySleeveId))]
@@ -486,6 +505,124 @@ namespace Shadowbus
             {
                 Plugin.Logger.LogWarning($"[BossRush] Could not apply lobby UI theme: {exception.Message}");
             }
+
+            try
+            {
+                CreateLeaderSelectButton(__instance);
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogWarning($"[BossRush] Could not add the leader selection button: {exception.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Adds a local opponent setup button to the lobby. The stock lobby prefab
+        /// has no free control, and its own buttons carry localised or image based
+        /// captions, so a settings-style button is built from scratch next to the
+        /// detail button instead of cloning one.
+        /// </summary>
+        private static void CreateLeaderSelectButton(BossRushLobby lobby)
+        {
+            if (!BossRushOfflineData.IsActive)
+            {
+                return;
+            }
+
+            Transform anchor = GetLobbyButtonAnchor(lobby, out Vector3 position);
+            if (anchor == null)
+            {
+                Plugin.Logger.LogWarning("[BossRush] No lobby anchor found; the opponent setup button was skipped.");
+                return;
+            }
+
+            GameObject parent = anchor.parent == null ? lobby.gameObject : anchor.parent.gameObject;
+            if (parent.transform.Find("BossRushLeaderSelectButton") != null)
+            {
+                // Initialize runs again when the lobby returns from a battle.
+                return;
+            }
+
+            SettingBase settingTemplate = UIManager.GetInstance().OptionSettingPrefab;
+            if (settingTemplate == null || settingTemplate.m_itemButton == null)
+            {
+                Plugin.Logger.LogWarning("[BossRush] OptionSettingPrefab unavailable; the opponent setup button was skipped.");
+                return;
+            }
+
+            GameObject buttonObject = NGUITools.AddChild(parent, settingTemplate.m_itemButton);
+            buttonObject.name = "BossRushLeaderSelectButton";
+            buttonObject.layer = anchor.gameObject.layer;
+            buttonObject.transform.localScale = anchor.localScale;
+            buttonObject.transform.localPosition = position;
+            buttonObject.SetActive(true);
+
+            ItemButton item = buttonObject.GetComponent<ItemButton>();
+            item.SetActive_SeparatorLine(false);
+            item.SetActive_SpriteOnButton(false);
+            item._subLabel.gameObject.SetActive(false);
+            item._sprite.ResetAnchors();
+            item._sprite.pivot = UIWidget.Pivot.Center;
+            item._sprite.transform.localPosition = Vector3.zero;
+            item._sprite.SetDimensions(120, 40);
+            item._label.ResetAnchors();
+            item._label.pivot = UIWidget.Pivot.Center;
+            item._label.alignment = NGUIText.Alignment.Center;
+            item._label.overflowMethod = UILabel.Overflow.ShrinkContent;
+            item._label.SetDimensions(108, 36);
+            item._label.transform.localPosition = Vector3.zero;
+            item.SetValue("自选");
+            item._collider.size = new Vector3(120, 40, item._collider.size.z);
+
+            UIButton button = item._button;
+            button.isEnabled = true;
+            button.onClick.Clear();
+            button.onClick.Add(new EventDelegate(delegate
+            {
+                GameMgr.GetIns().GetSoundMgr().PlaySe(Se.TYPE.SYS_BTN_DECIDE, false);
+                BossRushLeaderSelectWindow.Open(lobby);
+            }));
+
+            UIManager.SetObjectToGrey(buttonObject, false, null, null);
+            Plugin.Logger.LogInfo(
+                $"[BossRush] Opponent setup button placed at {buttonObject.transform.localPosition} " +
+                $"under '{parent.name}'.");
+        }
+
+        /// <summary>
+        /// Picks where the added button sits. The local mode always reports empty
+        /// rewards, so the treasure box slot above the reward label is free space
+        /// in the stock layout; the button row below the boss panel is the
+        /// fallback when that object is missing.
+        /// </summary>
+        private static Transform GetLobbyButtonAnchor(BossRushLobby lobby, out Vector3 position)
+        {
+            UISprite treasureBox = AccessTools.Field(typeof(BossRushLobby), "_treasureBoxSprite")?
+                .GetValue(lobby) as UISprite;
+            if (treasureBox != null)
+            {
+                position = treasureBox.transform.localPosition;
+                return treasureBox.transform;
+            }
+
+            UIButton receiveReward = AccessTools.Field(typeof(BossRushLobby), "_receiveRewardButton")?
+                .GetValue(lobby) as UIButton;
+            if (receiveReward != null)
+            {
+                position = receiveReward.transform.localPosition + new Vector3(0f, 90f, 0f);
+                return receiveReward.transform;
+            }
+
+            UIButton detailButton = AccessTools.Field(typeof(BossRushLobby), "_detailButton")?
+                .GetValue(lobby) as UIButton;
+            if (detailButton != null)
+            {
+                position = detailButton.transform.localPosition + new Vector3(0f, -46f, 0f);
+                return detailButton.transform;
+            }
+
+            position = Vector3.zero;
+            return null;
         }
 
         private static IEnumerator ReapplyLobbyUiTheme(BossRushLobby lobby)
@@ -687,28 +824,45 @@ namespace Shadowbus
             string deckPath = BossRushOfflineData.ResolveAiPath(boss, "deck");
             string stylePath = BossRushOfflineData.ResolveAiPath(boss, "style");
             string emotePath = BossRushOfflineData.ResolveAiPath(boss, "emote");
+            string styleKey = null;
+            string emoteKey = null;
             if (!string.IsNullOrEmpty(deckPath) && System.IO.File.Exists(deckPath)) AIManager.RegisterLocalDeckCsv(deckPath);
-            if (!string.IsNullOrEmpty(stylePath) && System.IO.File.Exists(stylePath)) AIManager.RegisterLocalStyleCsv(stylePath);
-            if (!string.IsNullOrEmpty(emotePath) && System.IO.File.Exists(emotePath)) AIManager.RegisterLocalEmoteCsv(emotePath);
+            if (!string.IsNullOrEmpty(stylePath) && System.IO.File.Exists(stylePath)) styleKey = AIManager.RegisterLocalStyleCsv(stylePath);
+            if (!string.IsNullOrEmpty(emotePath) && System.IO.File.Exists(emotePath))
+            {
+                // Registering without a leader blanks every {LEADER} cell and leaves
+                // {AUTO} unresolved, so the boss would emote silently. The leader is
+                // known here, and one CSV can serve bosses with different leaders as
+                // long as each registration gets its own cache key.
+                ClassCharacterMasterData leader = ResolveBossLeader(boss);
+                string leaderVoiceId = AIManager.ResolveLeaderVoiceId(leader);
+                emoteKey = AIManager.RegisterLocalEmoteCsvForLeader(
+                    emotePath,
+                    leaderVoiceId,
+                    leader,
+                    "bossrush_" + BossRushOfflineData.ResolveCharaId(boss));
+            }
+            int aiId = BossRushOfflineData.ResolveAiId(boss.EnemyAiId);
             try
             {
-                StoryAISettingData setting = Data.Master.QuestAISettingList?.GetSettingData(boss.EnemyAiId);
+                // The battle loads the AI the lobby response reported, which is the
+                // resolved id. Reading the raw one throws on installs that do not
+                // have it and used to skip both aliases.
+                StoryAISettingData setting = Data.Master.QuestAISettingList?.GetSettingData(aiId);
                 if (setting != null)
                 {
-                    if (!string.IsNullOrEmpty(stylePath) && Data.Master.AIStyleDic != null)
+                    if (!string.IsNullOrEmpty(styleKey) && Data.Master.AIStyleDic != null)
                     {
-                        string localKey = "shadowbus/ai/style/" + System.IO.Path.GetFileNameWithoutExtension(stylePath);
                         List<AIPolicyDataAsset> local;
-                        if (Data.Master.AIStyleDic.TryGetValue(localKey, out local))
+                        if (Data.Master.AIStyleDic.TryGetValue(styleKey, out local))
                         {
                             Data.Master.AIStyleDic["ai/" + Data.Master.AIStyleFileNameList.GetFileName(setting.StyleId)] = local;
                         }
                     }
-                    if (!string.IsNullOrEmpty(emotePath) && Data.Master.AIEmoteDic != null)
+                    if (!string.IsNullOrEmpty(emoteKey) && Data.Master.AIEmoteDic != null)
                     {
-                        string localKey = "shadowbus/ai/emote/" + System.IO.Path.GetFileNameWithoutExtension(emotePath);
                         List<AIEmoteDataAsset> local;
-                        if (Data.Master.AIEmoteDic.TryGetValue(localKey, out local))
+                        if (Data.Master.AIEmoteDic.TryGetValue(emoteKey, out local))
                         {
                             Data.Master.AIEmoteDic["ai/" + Data.Master.AIEmoteFileNameList.GetFileName(setting.EmoteId)] = local;
                         }
@@ -717,13 +871,39 @@ namespace Shadowbus
             }
             catch (Exception exception)
             {
-                Plugin.Logger.LogWarning($"[BossRush] Local style/emote alias setup failed: {exception.Message}");
+                Plugin.Logger.LogWarning(
+                    $"[BossRush] Local style/emote alias setup failed for AI id {aiId}: {exception.Message}");
             }
             if (!string.IsNullOrEmpty(deckPath) || !string.IsNullOrEmpty(stylePath) || !string.IsNullOrEmpty(emotePath))
             {
                 DataMgr dataMgr = GameMgr.GetIns().GetDataMgr();
                 dataMgr.RegisterAllAIData();
             }
+        }
+
+        private static ClassCharacterMasterData ResolveBossLeader(BossRushBoss boss)
+        {
+            int charaId = BossRushOfflineData.ResolveCharaId(boss);
+            if (charaId <= 0)
+            {
+                return null;
+            }
+
+            try
+            {
+                ClassCharacterMasterData leader = GameMgr.GetIns().GetDataMgr().GetCharaPrmByCharaId(charaId);
+                if (leader != null)
+                {
+                    return leader;
+                }
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[BossRush] Could not read leader data for chara {charaId}: {exception.Message}");
+            }
+
+            return Data.Master?.ClassCharacterList?.FirstOrDefault(item => item != null && item.chara_id == charaId);
         }
     }
 }
