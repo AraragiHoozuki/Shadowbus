@@ -83,8 +83,8 @@
     {
       "ability_id": 115241011,
       "is_foil": true,
-      "skill": "(skill:powerup)(timing:when_evolve_other)(condition:{me.evolution_card.unit.count}>0&turn=self)(target:character=me&target=evolution_card&card_type=unit&is_inplay=true)(option:add_offense=1&add_life={me.evolved_card_list.count})(preprocess:none)(effect_path:btl_other_up)(se_path:se_btl_other_up)(effect_move_type:DIRECT)(engine_type:SHURIKEN)(effect_time:0)(effect_target_type:SINGLE)",
-      "special_ability_desc": "自己的從者進化時，該從者獲得+1/+X效果。X為這場對戰中，自己的從者進化的次數。",
+      "skill": "(skill:powerup)(timing:when_evolve_other)(condition:{me.evolution_card.unit.count}>0&turn=self)(target:character=me&target=evolution_card&card_type=unit&is_inplay=true)(option:add_offense=1&add_life={me.evolved_card_list.count})(preprocess:per_turn=1)(effect_path:btl_other_up)(se_path:se_btl_other_up)(effect_move_type:DIRECT)(engine_type:SHURIKEN)(effect_time:0)(effect_target_type:SINGLE)",
+      "special_ability_desc": "自己的從者進化時，該從者獲得+1/+X效果。X為這場對戰中，自己的從者進化的次數。每回合限觸發1次。",
       "max_life_change": 0,
       "life_change": 0
     },
@@ -155,8 +155,8 @@
     {
       "ability_id": 126341031,
       "is_foil": true,
-      "skill": "(skill:change_white_ritual_stack)(timing:self_turn_end)(condition:character=me&{me.inplay.class.turn}>=5)(target:none)(option:add=1)(preprocess:none)",
-      "special_ability_desc": "每當自己的第5回合以及之後的回合結束時，使自己戰場上的蓄積+1。",
+      "skill": "(skill:change_white_ritual_stack)(timing:self_turn_end)(condition:character=me&{me.inplay.class.turn}>=2)(target:none)(option:add=1)(preprocess:none)",
+      "special_ability_desc": "每當自己的第2回合以及之後的回合結束時，使自己戰場上的蓄積+1。",
       "max_life_change": 0,
       "life_change": 0
     },
@@ -433,9 +433,9 @@
       "recovery_point": 5,
       "enemy_skill": "",
       "enemy_skills": [
-        "(skill:token_draw)(timing:self_turn_start)(condition:character=me)(target:none)(option:token_draw=119031011)(preprocess:none)(effect_path:btl_other_up)(se_path:se_btl_other_up)(effect_move_type:DIRECT)(engine_type:SHURIKEN)(effect_time:0)"
+        "(skill:token_draw)(timing:self_turn_start)(condition:character=me&{me.inplay.class.turn}=1)(target:none)(option:token_draw=119031011:119031011:119031011)(preprocess:remove_after_action=(count=1))(effect_path:btl_other_up)(se_path:se_btl_other_up)(effect_move_type:DIRECT)(engine_type:SHURIKEN)(effect_time:0)"
       ],
-      "enemy_skill_desc": "每當自己的回合開始時，增加1張「嬌小的赤紅之龍‧碧」到手牌中。",
+      "enemy_skill_desc": "自己的第1回合開始時，增加3張「嬌小的赤紅之龍‧碧」到手牌中。",
       "enemy_ai_id": 8001,
       "player_first_turn": null,
       "player_start_pp": 0,
@@ -506,12 +506,12 @@
       "recovery_point": 0,
       "enemy_skill": "",
       "enemy_skills": [
-        "(skill:summon_card)(timing:self_turn_end)(condition:{me.inplay.class.turn}=1&{me.inplay.unit_and_allfield.count}<5)(target:character=me&target=deck&card_type=unit&cost_no_duplication_random_count=2)(option:none)(preprocess:remove_after_action=(count=1))(effect_path:btl_117541030_2)(se_path:se_btl_117541030_2)(effect_move_type:LINEAR_FROM_DECK)(engine_type:SHURIKEN)(effect_time:0.3)(effect_target_type:SINGLE)",
+        "(skill:summon_card)(timing:self_turn_end)(condition:{me.inplay.class.turn}=1&{me.inplay.unit_and_allfield.count}<5)(target:character=me&target=deck&card_type=unit&cost_no_duplication_random_count=3)(option:none)(preprocess:remove_after_action=(count=1))(effect_path:btl_117541030_2)(se_path:se_btl_117541030_2)(effect_move_type:LINEAR_FROM_DECK)(engine_type:SHURIKEN)(effect_time:0.3)(effect_target_type:SINGLE)",
         "(skill:destroy)(timing:self_turn_end)(condition:{me.inplay.class.turn}=1)(target:character=me&target=skill_summoned_card&card_type=unit)(option:none)(preprocess:remove_after_action=(count=1))(effect_path:btl_117541030_3)(se_path:se_btl_117541030_3)(effect_move_type:DIRECT)(engine_type:SHURIKEN)(effect_time:0.1)(effect_target_type:SINGLE)",
         "(skill:token_draw)(timing:self_turn_start)(condition:character=me&{me.destroyed_card_list.ability=when_destroy.count}>=10)(target:none)(option:token_draw=120531011)(preprocess:none)(effect_path:btl_other_up)(se_path:se_btl_other_up)(effect_move_type:DIRECT)(engine_type:SHURIKEN)(effect_time:0)",
         "(skill:cost_change)(timing:self_turn_start)(condition:character=me&{me.destroyed_card_list.ability=when_destroy.count}>=10)(target:character=me&target=skill_drew_card&card_type=all)(option:add=-4)(preprocess:none)"
       ],
-      "enemy_skill_desc": "自己的第1回合結束時，隨機將2張消費各不相同的從者卡由自己的牌堆召喚到戰場上，並將其全數破壞。每當自己的回合開始時，如果「這場對戰中，被破壞時擁有謝幕曲效果的自己的卡片」為10張以上，增加1張「異族魔境‧克里斯托福」到手牌中，使其消費-4。",
+      "enemy_skill_desc": "自己的第1回合結束時，隨機將3張消費各不相同的從者卡由自己的牌堆召喚到戰場上，並將其全數破壞。每當自己的回合開始時，如果「這場對戰中，被破壞時擁有謝幕曲效果的自己的卡片」為10張以上，增加1張「異族魔境‧克里斯托福」到手牌中，使其消費-4。",
       "enemy_ai_id": 8001,
       "player_first_turn": null,
       "player_start_pp": 0,
