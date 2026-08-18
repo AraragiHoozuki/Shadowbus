@@ -567,6 +567,242 @@ namespace Shadowbus
             return overrideCharaId > 0 ? overrideCharaId : boss.EnemyCharaId;
         }
 
+        /// <summary>Enemy deck picked in the lobby, or null to use the package deck.</summary>
+        public static string GetDeckOverride(int bossIndex)
+        {
+            BossRushState state = GetState();
+            if (state?.DeckOverrides == null || bossIndex == NoBossIndex)
+            {
+                return null;
+            }
+
+            string path;
+            if (!state.DeckOverrides.TryGetValue(GetLeaderOverrideKey(bossIndex), out path) ||
+                string.IsNullOrWhiteSpace(path))
+            {
+                return null;
+            }
+            if (File.Exists(path))
+            {
+                return path;
+            }
+
+            string relocated = Path.Combine(PathHelper.UnlimitedDeckPath, Path.GetFileName(path));
+            if (File.Exists(relocated))
+            {
+                return relocated;
+            }
+
+            Plugin.Logger.LogWarning(
+                $"[BossRush] Selected enemy deck '{path}' no longer exists; using the package deck instead.");
+            return null;
+        }
+
+        public static void SetDeckOverride(int bossIndex, string path)
+        {
+            SetTextOverride(bossIndex, state => state.DeckOverrides, "enemy deck", path);
+        }
+
+        public static int GetSkillOverride(int bossIndex)
+        {
+            return GetNumberOverride(bossIndex, state => state.SkillOverrides);
+        }
+
+        public static void SetSkillOverride(int bossIndex, int abilityId)
+        {
+            SetNumberOverride(bossIndex, state => state.SkillOverrides, "enemy skill", abilityId);
+        }
+
+        public static int GetLifeOverride(int bossIndex)
+        {
+            return GetNumberOverride(bossIndex, state => state.LifeOverrides);
+        }
+
+        public static void SetLifeOverride(int bossIndex, int life)
+        {
+            SetNumberOverride(bossIndex, state => state.LifeOverrides, "enemy life", life);
+        }
+
+        private static int GetNumberOverride(int bossIndex, Func<BossRushState, Dictionary<string, int>> select)
+        {
+            BossRushState state = GetState();
+            Dictionary<string, int> table = state == null ? null : select(state);
+            if (table == null || bossIndex == NoBossIndex)
+            {
+                return 0;
+            }
+
+            int value;
+            return table.TryGetValue(GetLeaderOverrideKey(bossIndex), out value) ? value : 0;
+        }
+
+        private static void SetNumberOverride(
+            int bossIndex,
+            Func<BossRushState, Dictionary<string, int>> select,
+            string description,
+            int value)
+        {
+            if (_current == null || bossIndex == NoBossIndex)
+            {
+                return;
+            }
+
+            BossRushState state = GetState();
+            Dictionary<string, int> table = state == null ? null : select(state);
+            if (table == null)
+            {
+                return;
+            }
+
+            string key = GetLeaderOverrideKey(bossIndex);
+            if (value > 0)
+            {
+                table[key] = value;
+            }
+            else
+            {
+                table.Remove(key);
+            }
+
+            SaveState(_current, state);
+            Plugin.Logger.LogInfo(
+                value > 0
+                    ? $"[BossRush] {description} for boss '{key}' set to {value}."
+                    : $"[BossRush] {description} override for boss '{key}' cleared.");
+        }
+
+        private static void SetTextOverride(
+            int bossIndex,
+            Func<BossRushState, Dictionary<string, string>> select,
+            string description,
+            string value)
+        {
+            if (_current == null || bossIndex == NoBossIndex)
+            {
+                return;
+            }
+
+            BossRushState state = GetState();
+            Dictionary<string, string> table = state == null ? null : select(state);
+            if (table == null)
+            {
+                return;
+            }
+
+            string key = GetLeaderOverrideKey(bossIndex);
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                table.Remove(key);
+            }
+            else
+            {
+                table[key] = value;
+            }
+
+            SaveState(_current, state);
+            Plugin.Logger.LogInfo(
+                string.IsNullOrWhiteSpace(value)
+                    ? $"[BossRush] {description} override for boss '{key}' cleared."
+                    : $"[BossRush] {description} for boss '{key}' set to '{value}'.");
+        }
+
+        /// <summary>Card list the boss actually plays with.</summary>
+        public static List<int> ResolveCustomDeck(BossRushBoss boss)
+        {
+            LocalDeck deck = LoadOverrideDeck(boss);
+            if (deck != null && deck.CardIds != null && deck.CardIds.Count > 0)
+            {
+                return deck.CardIds.ToList();
+            }
+            return (boss?.CustomDeckCardIds ?? new List<int>()).ToList();
+        }
+
+        /// <summary>
+        /// Class the enemy AI deck is built with. A deck picked in the lobby
+        /// brings its own class, otherwise the package value is used.
+        /// </summary>
+        public static int ResolveEnemyClass(BossRushBoss boss)
+        {
+            LocalDeck deck = LoadOverrideDeck(boss);
+            if (deck != null && deck.ClassId >= 1 && deck.ClassId <= 8)
+            {
+                return deck.ClassId;
+            }
+            return boss?.EnemyClass ?? 1;
+        }
+
+        public static int ResolveEnemyLife(BossRushBoss boss)
+        {
+            int life = GetLifeOverride(GetBossIndex(boss));
+            if (life > 0)
+            {
+                return life;
+            }
+            return Math.Max(1, boss?.EnemyLife ?? 20);
+        }
+
+        /// <summary>
+        /// Skill strings the boss fights with. An ability picked in the lobby
+        /// replaces the package skills instead of adding to them.
+        /// </summary>
+        public static List<string> ResolveEnemySkills(BossRushBoss boss)
+        {
+            var skills = new List<string>();
+            int abilityId = GetSkillOverride(GetBossIndex(boss));
+            if (abilityId > 0)
+            {
+                BossRushAbility ability = (_current?.Abilities ?? new List<BossRushAbility>())
+                    .FirstOrDefault(item => item != null && item.AbilityId == abilityId);
+                if (ability != null && !string.IsNullOrWhiteSpace(ability.Skill))
+                {
+                    skills.Add(ability.Skill.Trim().Trim(','));
+                    return skills;
+                }
+
+                Plugin.Logger.LogWarning(
+                    $"[BossRush] Enemy skill {abilityId} is not a usable ability; keeping the package skills.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(boss?.EnemySkill))
+            {
+                skills.Add(boss.EnemySkill.Trim().Trim(','));
+            }
+            if (boss?.EnemySkills != null)
+            {
+                skills.AddRange(boss.EnemySkills
+                    .Where(skill => !string.IsNullOrWhiteSpace(skill))
+                    .Select(skill => skill.Trim().Trim(',')));
+            }
+            return skills;
+        }
+
+        private sealed class LocalDeck
+        {
+            [JsonProperty("class_id")] public int ClassId { get; set; }
+            [JsonProperty("deck_name")] public string DeckName { get; set; }
+            [JsonProperty("card_id_array")] public List<int> CardIds { get; set; }
+        }
+
+        /// <summary>Reads the deck file picked for this boss, or null when there is none.</summary>
+        private static LocalDeck LoadOverrideDeck(BossRushBoss boss)
+        {
+            string path = GetDeckOverride(GetBossIndex(boss));
+            if (string.IsNullOrEmpty(path))
+            {
+                return null;
+            }
+
+            try
+            {
+                return JsonConvert.DeserializeObject<LocalDeck>(File.ReadAllText(path), JsonSettings);
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogWarning($"[BossRush] Could not read enemy deck '{path}': {exception.Message}");
+                return null;
+            }
+        }
+
         private static string GetLeaderOverrideKey(int bossIndex)
         {
             return bossIndex == HiddenBossIndex ? "hidden" : bossIndex.ToString();
@@ -658,6 +894,10 @@ namespace Shadowbus
             {
                 return state.EmoteCsvOverrides = state.EmoteCsvOverrides ?? new Dictionary<string, string>();
             }
+            if (string.Equals(kind, "deck", StringComparison.OrdinalIgnoreCase))
+            {
+                return state.DeckCsvOverrides = state.DeckCsvOverrides ?? new Dictionary<string, string>();
+            }
             return null;
         }
 
@@ -675,7 +915,9 @@ namespace Shadowbus
 
             string sharedRoot = string.Equals(kind, "style", StringComparison.OrdinalIgnoreCase)
                 ? PathHelper.AIStylePath
-                : PathHelper.AIEmotePath;
+                : string.Equals(kind, "deck", StringComparison.OrdinalIgnoreCase)
+                    ? PathHelper.AIDeckPath
+                    : PathHelper.AIEmotePath;
             var candidates = new List<string> { Path.Combine(sharedRoot, fileName) };
 
             string packageDirectory = GetPackageDirectory();
@@ -758,7 +1000,7 @@ namespace Shadowbus
                 BossRushBoss boss = _current.Bosses[index];
                 JsonData value = new JsonData();
                 value["name"] = boss.Name;
-                value["enemy_class"] = boss.EnemyClass;
+                value["enemy_class"] = ResolveEnemyClass(boss);
                 value["enemy_chara_id"] = ResolveCharaId(boss);
                 value["enemy_emblem_id"] = boss.EnemyEmblemId;
                 value["enemy_degree_id"] = boss.EnemyDegreeId;
@@ -766,7 +1008,7 @@ namespace Shadowbus
                 value["bossrush_stage_id"] = boss.BossrushStageId;
                 value["battle3dfield_id"] = boss.Battle3dfieldId;
                 value["bgm_id"] = boss.BgmId ?? string.Empty;
-                value["enemy_life"] = Math.Max(1, boss.EnemyLife);
+                value["enemy_life"] = ResolveEnemyLife(boss);
                 value["enemy_skill"] = CreateEnemySkill(boss);
                 value["enemy_skill_desc"] = boss.EnemySkillDesc ?? string.Empty;
                 value["recovery_point"] = boss.RecoveryPoint;
@@ -880,16 +1122,18 @@ namespace Shadowbus
             return value;
         }
 
+        /// <summary>
+        /// The exact skill text the lobby response carries for this boss, so the
+        /// lobby data already in memory can be rewritten with the same value.
+        /// </summary>
+        public static string BuildEnemySkillText(BossRushBoss boss)
+        {
+            return CreateEnemySkill(boss);
+        }
+
         private static string CreateEnemySkill(BossRushBoss boss)
         {
-            List<string> skills = new List<string>();
-            if (!string.IsNullOrWhiteSpace(boss?.EnemySkill)) skills.Add(boss.EnemySkill.Trim().Trim(','));
-            if (boss?.EnemySkills != null)
-            {
-                skills.AddRange(boss.EnemySkills
-                    .Where(skill => !string.IsNullOrWhiteSpace(skill))
-                    .Select(skill => skill.Trim().Trim(',')));
-            }
+            List<string> skills = ResolveEnemySkills(boss);
             if (boss?.EnemyStartFieldCardIds != null)
             {
                 foreach (int cardId in boss.EnemyStartFieldCardIds.Take(5))
@@ -1053,13 +1297,13 @@ namespace Shadowbus
             JsonData data = new JsonData();
             int charaId = ResolveCharaId(boss);
             data["name"] = boss.Name;
-            data["enemy_class"] = boss.EnemyClass;
+            data["enemy_class"] = ResolveEnemyClass(boss);
             data["enemy_chara_id"] = charaId;
             data["texture_id"] = charaId;
             data["enemy_emblem_id"] = boss.EnemyEmblemId;
             data["enemy_degree_id"] = boss.EnemyDegreeId;
             data["enemy_ai_id"] = ResolveAiId(boss.EnemyAiId);
-            data["enemy_life"] = boss.EnemyLife;
+            data["enemy_life"] = ResolveEnemyLife(boss);
             data["battle3dfield_id"] = boss.Battle3dfieldId;
             data["bgm_id"] = boss.BgmId ?? string.Empty;
             data["quest_stage_id"] = boss.BossrushStageId;
@@ -1635,6 +1879,24 @@ namespace Shadowbus
 
         /// <summary>Per-battle AI Emote CSV chosen in the lobby.</summary>
         public Dictionary<string, string> EmoteCsvOverrides { get; set; } = new Dictionary<string, string>();
+
+        /// <summary>Per-battle AI Deck CSV chosen in the lobby.</summary>
+        public Dictionary<string, string> DeckCsvOverrides { get; set; } = new Dictionary<string, string>();
+
+        /// <summary>
+        /// Per-battle enemy deck chosen in the lobby, stored as a path under
+        /// Mods/UnlimitedDecks. Replaces the package's `custom_deck_card_ids`.
+        /// </summary>
+        public Dictionary<string, string> DeckOverrides { get; set; } = new Dictionary<string, string>();
+
+        /// <summary>
+        /// Per-battle enemy skill chosen in the lobby. The value is an
+        /// `abilities` entry id whose skill string replaces the boss skills.
+        /// </summary>
+        public Dictionary<string, int> SkillOverrides { get; set; } = new Dictionary<string, int>();
+
+        /// <summary>Per-battle enemy maximum life chosen in the lobby.</summary>
+        public Dictionary<string, int> LifeOverrides { get; set; } = new Dictionary<string, int>();
         public int TotalTurns { get; set; }
         public bool IsLose { get; set; }
         public bool IsFinished { get; set; }
@@ -1655,7 +1917,11 @@ namespace Shadowbus
                 PlayerDeckCardIds = new List<int>(),
                 LeaderOverrides = new Dictionary<string, int>(),
                 StyleCsvOverrides = new Dictionary<string, string>(),
-                EmoteCsvOverrides = new Dictionary<string, string>()
+                EmoteCsvOverrides = new Dictionary<string, string>(),
+                DeckCsvOverrides = new Dictionary<string, string>(),
+                DeckOverrides = new Dictionary<string, string>(),
+                SkillOverrides = new Dictionary<string, int>(),
+                LifeOverrides = new Dictionary<string, int>()
             };
         }
 
@@ -1670,6 +1936,10 @@ namespace Shadowbus
             LeaderOverrides = LeaderOverrides ?? new Dictionary<string, int>();
             StyleCsvOverrides = StyleCsvOverrides ?? new Dictionary<string, string>();
             EmoteCsvOverrides = EmoteCsvOverrides ?? new Dictionary<string, string>();
+            DeckCsvOverrides = DeckCsvOverrides ?? new Dictionary<string, string>();
+            DeckOverrides = DeckOverrides ?? new Dictionary<string, string>();
+            SkillOverrides = SkillOverrides ?? new Dictionary<string, int>();
+            LifeOverrides = LifeOverrides ?? new Dictionary<string, int>();
         }
     }
 }

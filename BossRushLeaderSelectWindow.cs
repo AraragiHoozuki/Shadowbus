@@ -24,12 +24,25 @@ namespace Shadowbus
 
         // One shared row height so the class filter row cannot drift away from
         // the rest of the layout when the panel is rearranged.
-        private const float ClassButtonRowY = -32f;
+        private const float ClassButtonRowY = -76f;
+        private const int MaxEnemyLife = 99;
 
         private sealed class CsvChoice
         {
             public string Label;
             public string Path;
+        }
+
+        private sealed class DeckChoice
+        {
+            public string Label;
+            public string Path;
+        }
+
+        private sealed class SkillChoice
+        {
+            public string Label;
+            public int AbilityId;
         }
 
         private DialogBase _dialog;
@@ -49,8 +62,16 @@ namespace Shadowbus
         private List<string> _loadedLeaderPaths = new List<string>();
         private List<CsvChoice> _styleCsvChoices = new List<CsvChoice>();
         private List<CsvChoice> _emoteCsvChoices = new List<CsvChoice>();
+        private List<CsvChoice> _deckCsvChoices = new List<CsvChoice>();
+        private List<DeckChoice> _deckChoices = new List<DeckChoice>();
+        private List<SkillChoice> _skillChoices = new List<SkillChoice>();
         private int _styleCsvIndex;
         private int _emoteCsvIndex;
+        private int _deckCsvIndex;
+        private int _deckIndex;
+        private int _skillIndex;
+        private int _enemyLife = 20;
+        private bool _updatingLifeSlider;
 
         private GameObject _contentRoot;
         private GameObject _leaderStripRoot;
@@ -62,6 +83,10 @@ namespace Shadowbus
         private UIButton _leaderNextButton;
         private UIButton _styleCsvButton;
         private UIButton _emoteCsvButton;
+        private UIButton _deckCsvButton;
+        private UIButton _deckButton;
+        private UIButton _skillButton;
+        private ItemSlider _lifeSlider;
         private readonly List<UIButton> _classButtons = new List<UIButton>();
         private readonly List<SelectRandomSkinButton> _leaderButtons = new List<SelectRandomSkinButton>();
         private SettingBase _settingTemplate;
@@ -110,12 +135,14 @@ namespace Shadowbus
                     .ToList();
                 _classFilters = BuildClassFilters(_allLeaders);
                 _classFilter = ResolveInitialClassFilter(boss);
+                _enemyLife = BossRushOfflineData.ResolveEnemyLife(boss);
                 RefreshCsvChoices();
 
                 BuildNativeUi(boss);
                 RebuildLeaders();
                 UpdateClassButtons();
                 UpdateCsvButtons();
+                UpdateLifeSlider();
                 BeginRebuildLeaderButtons();
             }
             catch
@@ -174,47 +201,82 @@ namespace Shadowbus
             _contentRoot = new GameObject("BossRushLeaderSelectContent");
             _contentRoot.layer = _dialog.gameObject.layer;
 
-            CreateSectionHeader("对手设置", new Vector3(-500f, 172f, 0f), 1000);
+            CreateSectionHeader("对手设置", new Vector3(-500f, 178f, 0f), 1000);
             _bossLabel = CreateLabel(
                 DescribeBoss(boss),
-                new Vector3(-500f, 138f, 0f),
-                1000,
+                new Vector3(-500f, 146f, 0f),
+                760,
                 30,
                 17,
                 NGUIText.Alignment.Left);
+            CreateNativeButton("一键恢复默认", new Vector3(400f, 146f, 0f), 200, 36, RestoreAllDefaults);
 
-            CreateLabel("Style CSV", new Vector3(-490f, 100f, 0f), 150, 32, 17, NGUIText.Alignment.Left);
+            CreateLabel("卡组", new Vector3(-500f, 112f, 0f), 130, 32, 17, NGUIText.Alignment.Left);
+            _deckButton = CreateNativeButton(
+                string.Empty,
+                new Vector3(-230f, 112f, 0f),
+                460,
+                38,
+                OpenDeckDialog);
+
+            CreateLabel("Deck CSV", new Vector3(-500f, 74f, 0f), 130, 32, 17, NGUIText.Alignment.Left);
+            _deckCsvButton = CreateNativeButton(
+                string.Empty,
+                new Vector3(-230f, 74f, 0f),
+                460,
+                38,
+                () => OpenCsvDialog("选择 Deck CSV", _deckCsvChoices, _deckCsvIndex, index => _deckCsvIndex = index));
+
+            CreateLabel("Style CSV", new Vector3(-500f, 36f, 0f), 130, 32, 17, NGUIText.Alignment.Left);
             _styleCsvButton = CreateNativeButton(
                 string.Empty,
-                new Vector3(-140f, 100f, 0f),
-                470,
+                new Vector3(-230f, 36f, 0f),
+                460,
                 38,
                 () => OpenCsvDialog("选择 Style CSV", _styleCsvChoices, _styleCsvIndex, index => _styleCsvIndex = index));
 
-            CreateLabel("Emote CSV", new Vector3(-490f, 58f, 0f), 150, 32, 17, NGUIText.Alignment.Left);
+            CreateLabel("Emote CSV", new Vector3(-500f, -2f, 0f), 130, 32, 17, NGUIText.Alignment.Left);
             _emoteCsvButton = CreateNativeButton(
                 string.Empty,
-                new Vector3(-140f, 58f, 0f),
-                470,
+                new Vector3(-230f, -2f, 0f),
+                460,
                 38,
                 () => OpenCsvDialog("选择 Emote CSV", _emoteCsvChoices, _emoteCsvIndex, index => _emoteCsvIndex = index));
 
-            CreateNativeButton("刷新 CSV", new Vector3(340f, 79f, 0f), 170, 38, RefreshCsvChoicesAndControls);
+            CreateLabel("技能", new Vector3(60f, 112f, 0f), 130, 32, 17, NGUIText.Alignment.Left);
+            _skillButton = CreateNativeButton(
+                string.Empty,
+                new Vector3(320f, 112f, 0f),
+                420,
+                38,
+                OpenSkillDialog);
 
-            CreateSectionHeader("主战者", new Vector3(-500f, 14f, 0f), 1000);
+            _lifeSlider = NGUITools.AddChild(_contentRoot, _settingTemplate.m_itemSlider).GetComponent<ItemSlider>();
+            _lifeSlider.name = "EnemyLifeSlider";
+            _lifeSlider.transform.localPosition = new Vector3(290f, 66f, 0f);
+            _lifeSlider.transform.localScale = new Vector3(0.78f, 0.78f, 1f);
+            _lifeSlider.SetTitleLabel("生命上限");
+            _lifeSlider.SetActive_SeparatorLine(false);
+            _lifeSlider.m_slider.numberOfSteps = MaxEnemyLife;
+            _lifeSlider.AddChangeCallback(OnLifeSliderChanged);
+
+            CreateNativeButton("恢复默认生命", new Vector3(180f, 4f, 0f), 190, 36, RestoreDefaultLife);
+            CreateNativeButton("刷新列表", new Vector3(400f, 4f, 0f), 170, 36, RefreshCsvChoicesAndControls);
+
+            CreateSectionHeader("主战者", new Vector3(-500f, -32f, 0f), 1000);
             CreateClassButtons();
-            CreateNativeButton("恢复默认主战者", new Vector3(-410f, -78f, 0f), 220, 36, RestoreDefaultLeader);
-            _leaderPageLabel = CreateLabel(string.Empty, new Vector3(455f, -78f, 0f), 160, 26, 15, NGUIText.Alignment.Right);
+            CreateNativeButton("恢复默认主战者", new Vector3(-410f, -122f, 0f), 220, 36, RestoreDefaultLeader);
+            _leaderPageLabel = CreateLabel(string.Empty, new Vector3(455f, -122f, 0f), 160, 26, 15, NGUIText.Alignment.Right);
 
             _leaderStripRoot = new GameObject("LeaderStrip");
             _leaderStripRoot.transform.parent = _contentRoot.transform;
-            _leaderStripRoot.transform.localPosition = new Vector3(0f, -148f, 0f);
+            _leaderStripRoot.transform.localPosition = new Vector3(0f, -188f, 0f);
             _leaderStripRoot.transform.localScale = Vector3.one;
             _leaderStripRoot.layer = _contentRoot.layer;
 
             CreateLeaderPageButtons();
-            _leaderNameLabel = CreateLabel(string.Empty, new Vector3(0f, -218f, 0f), 900, 28, 18, NGUIText.Alignment.Center);
-            _leaderHintLabel = CreateLabel(string.Empty, new Vector3(0f, -250f, 0f), 900, 26, 14, NGUIText.Alignment.Center);
+            _leaderNameLabel = CreateLabel(string.Empty, new Vector3(0f, -252f, 0f), 900, 28, 18, NGUIText.Alignment.Center);
+            _leaderHintLabel = CreateLabel(string.Empty, new Vector3(0f, -282f, 0f), 900, 26, 14, NGUIText.Alignment.Center);
             _leaderHintLabel.color = new Color(0.82f, 0.82f, 0.82f, 1f);
 
             _dialog.SetObj(_contentRoot, Vector3.zero);
@@ -399,23 +461,220 @@ namespace Shadowbus
         {
             string selectedStyle = GetSelectedPath(_styleCsvChoices, _styleCsvIndex);
             string selectedEmote = GetSelectedPath(_emoteCsvChoices, _emoteCsvIndex);
-            if (selectedStyle == null && selectedEmote == null && _styleCsvChoices.Count == 0)
+            string selectedDeckCsv = GetSelectedPath(_deckCsvChoices, _deckCsvIndex);
+            if (_styleCsvChoices.Count == 0)
             {
                 // First build: start from whatever the state file already holds.
                 selectedStyle = BossRushOfflineData.GetAiCsvOverride(_bossIndex, "style");
                 selectedEmote = BossRushOfflineData.GetAiCsvOverride(_bossIndex, "emote");
+                selectedDeckCsv = BossRushOfflineData.GetAiCsvOverride(_bossIndex, "deck");
             }
 
             _styleCsvChoices = BuildCsvChoices("style");
             _emoteCsvChoices = BuildCsvChoices("emote");
+            _deckCsvChoices = BuildCsvChoices("deck");
             _styleCsvIndex = FindPathIndex(_styleCsvChoices, selectedStyle);
             _emoteCsvIndex = FindPathIndex(_emoteCsvChoices, selectedEmote);
+            _deckCsvIndex = FindPathIndex(_deckCsvChoices, selectedDeckCsv);
+
+            string selectedDeck = _deckChoices.Count == 0
+                ? BossRushOfflineData.GetDeckOverride(_bossIndex)
+                : GetSelectedDeckPath();
+            _deckChoices = BuildDeckChoices();
+            _deckIndex = Math.Max(0, _deckChoices.FindIndex(
+                choice => string.Equals(choice.Path, selectedDeck, StringComparison.OrdinalIgnoreCase)));
+
+            int selectedSkill = _skillChoices.Count == 0
+                ? BossRushOfflineData.GetSkillOverride(_bossIndex)
+                : GetSelectedSkillId();
+            _skillChoices = BuildSkillChoices();
+            _skillIndex = Math.Max(0, _skillChoices.FindIndex(choice => choice.AbilityId == selectedSkill));
+        }
+
+        /// <summary>
+        /// Enemy deck candidates: every deck under Mods/UnlimitedDecks, plus the
+        /// entry that keeps the package's own `custom_deck_card_ids`.
+        /// </summary>
+        private List<DeckChoice> BuildDeckChoices()
+        {
+            var choices = new List<DeckChoice> { new DeckChoice { Label = "使用配置文件卡组", Path = null } };
+            try
+            {
+                foreach (string path in CustomDeckStore.EnumerateDeckFiles()
+                    .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase))
+                {
+                    choices.Add(new DeckChoice { Label = DescribeDeckFile(path), Path = path });
+                }
+            }
+            catch (Exception exception)
+            {
+                Plugin.Logger.LogWarning($"[BossRush] Could not list local decks: {exception.Message}");
+            }
+            return choices;
+        }
+
+        private static string DescribeDeckFile(string path)
+        {
+            string fileName = Path.GetFileNameWithoutExtension(path);
+            try
+            {
+                LocalDeckInfo info = Newtonsoft.Json.JsonConvert.DeserializeObject<LocalDeckInfo>(File.ReadAllText(path));
+                string name = string.IsNullOrWhiteSpace(info?.DeckName) ? fileName : info.DeckName;
+                int count = info?.CardIds == null ? 0 : info.CardIds.Count;
+                return $"{fileName}  {name}  ({count}张)";
+            }
+            catch
+            {
+                return fileName;
+            }
+        }
+
+        private sealed class LocalDeckInfo
+        {
+            [Newtonsoft.Json.JsonProperty("deck_name")] public string DeckName { get; set; }
+            [Newtonsoft.Json.JsonProperty("card_id_array")] public List<int> CardIds { get; set; }
+        }
+
+        /// <summary>
+        /// Enemy skill candidates. The package's `abilities` double as a skill
+        /// library, so anything usable as a player buff can be given to a boss.
+        /// </summary>
+        private List<SkillChoice> BuildSkillChoices()
+        {
+            var choices = new List<SkillChoice> { new SkillChoice { Label = "使用配置文件技能", AbilityId = 0 } };
+            foreach (BossRushAbility ability in BossRushOfflineData.GetAvailableAbilities())
+            {
+                if (string.IsNullOrWhiteSpace(ability.Skill))
+                {
+                    continue;
+                }
+                choices.Add(new SkillChoice
+                {
+                    Label = DescribeSkill(ability),
+                    AbilityId = ability.AbilityId
+                });
+            }
+            return choices;
+        }
+
+        private static string DescribeSkill(BossRushAbility ability)
+        {
+            string desc = ability.SpecialAbilityDesc ?? string.Empty;
+            desc = string.Join(" ", desc.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => line.Trim()).ToArray());
+            if (desc.Length > 52)
+            {
+                desc = desc.Substring(0, 51).TrimEnd() + "…";
+            }
+            return $"[{ability.AbilityId}] {desc}";
+        }
+
+        private string GetSelectedDeckPath()
+        {
+            return _deckIndex >= 0 && _deckIndex < _deckChoices.Count ? _deckChoices[_deckIndex].Path : null;
+        }
+
+        private int GetSelectedSkillId()
+        {
+            return _skillIndex >= 0 && _skillIndex < _skillChoices.Count ? _skillChoices[_skillIndex].AbilityId : 0;
+        }
+
+        private void OpenDeckDialog()
+        {
+            OpenListDialog("选择对手卡组", _deckChoices.Select(choice => choice.Label).ToList(), _deckIndex, index =>
+            {
+                _deckIndex = index;
+                UpdateCsvButtons();
+            });
+        }
+
+        private void OpenSkillDialog()
+        {
+            OpenListDialog("选择对手技能", _skillChoices.Select(choice => choice.Label).ToList(), _skillIndex, index =>
+            {
+                _skillIndex = index;
+                UpdateCsvButtons();
+            });
+        }
+
+        private void OpenListDialog(string title, List<string> labels, int selectedIndex, Action<int> onSelect)
+        {
+            if (labels == null || labels.Count == 0)
+            {
+                return;
+            }
+
+            DialogBase choiceDialog = DrumrollDialog.Create(
+                labels,
+                Mathf.Clamp(selectedIndex, 0, labels.Count - 1),
+                null,
+                null,
+                onSelect,
+                title);
+            RaiseDialogAbove(choiceDialog, _dialog);
+        }
+
+        private void OnLifeSliderChanged()
+        {
+            if (_updatingLifeSlider)
+            {
+                return;
+            }
+
+            _enemyLife = Mathf.Clamp(
+                Mathf.RoundToInt(1f + _lifeSlider.GetValue() * (MaxEnemyLife - 1f)), 1, MaxEnemyLife);
+            UpdateLifeValueLabel();
+        }
+
+        private void UpdateLifeSlider()
+        {
+            if (_lifeSlider == null)
+            {
+                return;
+            }
+
+            _updatingLifeSlider = true;
+            _lifeSlider.SetValue((_enemyLife - 1f) / (MaxEnemyLife - 1f));
+            _updatingLifeSlider = false;
+            UpdateLifeValueLabel();
+        }
+
+        private void UpdateLifeValueLabel()
+        {
+            if (_lifeSlider != null && _lifeSlider.m_valueLabel != null)
+            {
+                _lifeSlider.m_valueLabel.text = _enemyLife.ToString();
+            }
+        }
+
+        /// <summary>
+        /// Drops every choice on this screen back to what the package configures.
+        /// Like the other reset buttons it only edits the screen; 确定 is what
+        /// writes the cleared state.
+        /// </summary>
+        private void RestoreAllDefaults()
+        {
+            _deckIndex = 0;
+            _deckCsvIndex = 0;
+            _styleCsvIndex = 0;
+            _emoteCsvIndex = 0;
+            _skillIndex = 0;
+            RestoreDefaultLife();
+            UpdateCsvButtons();
+            RestoreDefaultLeader();
+        }
+
+        private void RestoreDefaultLife()
+        {
+            BossRushBoss boss = BossRushOfflineData.GetBossByIndex(_bossIndex);
+            _enemyLife = Math.Max(1, boss?.EnemyLife ?? 20);
+            UpdateLifeSlider();
         }
 
         private List<CsvChoice> BuildCsvChoices(string kind)
         {
             BossRushBoss boss = BossRushOfflineData.GetBossByIndex(_bossIndex);
-            string configured = kind == "style" ? boss?.StyleCsv : boss?.EmoteCsv;
+            string configured = kind == "style" ? boss?.StyleCsv : kind == "deck" ? boss?.DeckCsv : boss?.EmoteCsv;
             var choices = new List<CsvChoice>
             {
                 new CsvChoice
@@ -432,7 +691,10 @@ namespace Shadowbus
             {
                 AddCsvFiles(choices, Path.Combine(packageDirectory, "ai", kind), "配置包");
             }
-            AddCsvFiles(choices, kind == "style" ? PathHelper.AIStylePath : PathHelper.AIEmotePath, "AIData");
+            string sharedRoot = kind == "style"
+                ? PathHelper.AIStylePath
+                : kind == "deck" ? PathHelper.AIDeckPath : PathHelper.AIEmotePath;
+            AddCsvFiles(choices, sharedRoot, "AIData");
             return choices;
         }
 
@@ -484,6 +746,22 @@ namespace Shadowbus
             if (_emoteCsvButton != null)
             {
                 SetNativeButtonText(_emoteCsvButton, DescribeCsvChoice(_emoteCsvChoices, _emoteCsvIndex));
+            }
+            if (_deckCsvButton != null)
+            {
+                SetNativeButtonText(_deckCsvButton, DescribeCsvChoice(_deckCsvChoices, _deckCsvIndex));
+            }
+            if (_deckButton != null)
+            {
+                SetNativeButtonText(_deckButton, _deckIndex >= 0 && _deckIndex < _deckChoices.Count
+                    ? _deckChoices[_deckIndex].Label
+                    : "使用配置文件卡组");
+            }
+            if (_skillButton != null)
+            {
+                SetNativeButtonText(_skillButton, _skillIndex >= 0 && _skillIndex < _skillChoices.Count
+                    ? _skillChoices[_skillIndex].Label
+                    : "使用配置文件技能");
             }
         }
 
@@ -563,12 +841,12 @@ namespace Shadowbus
                 : _skinDialogTemplate._btnPrevPage;
             _leaderPreviousButton = CloneLeaderPageButton(
                 previousTemplate,
-                new Vector3(-470f, -148f, 0f),
+                new Vector3(-470f, -188f, 0f),
                 mirrorPrevious,
                 ShowPreviousLeaderPage);
             _leaderNextButton = CloneLeaderPageButton(
                 _skinDialogTemplate._btnNextPage,
-                new Vector3(470f, -148f, 0f),
+                new Vector3(470f, -188f, 0f),
                 false,
                 ShowNextLeaderPage);
         }
@@ -690,6 +968,13 @@ namespace Shadowbus
                 _selectedCharaId == _defaultCharaId ? 0 : _selectedCharaId);
             BossRushOfflineData.SetAiCsvOverride(_bossIndex, "style", GetSelectedPath(_styleCsvChoices, _styleCsvIndex));
             BossRushOfflineData.SetAiCsvOverride(_bossIndex, "emote", GetSelectedPath(_emoteCsvChoices, _emoteCsvIndex));
+            BossRushOfflineData.SetAiCsvOverride(_bossIndex, "deck", GetSelectedPath(_deckCsvChoices, _deckCsvIndex));
+            BossRushOfflineData.SetDeckOverride(_bossIndex, GetSelectedDeckPath());
+            BossRushOfflineData.SetSkillOverride(_bossIndex, GetSelectedSkillId());
+            BossRushBoss configuredBoss = BossRushOfflineData.GetBossByIndex(_bossIndex);
+            BossRushOfflineData.SetLifeOverride(
+                _bossIndex,
+                configuredBoss != null && _enemyLife == Math.Max(1, configuredBoss.EnemyLife) ? 0 : _enemyLife);
             ApplyToLobby(_lobby, _bossIndex, _selectedCharaId);
             _dialog.CloseSoon();
         }
@@ -717,17 +1002,22 @@ namespace Shadowbus
                     return;
                 }
 
+                // The battle reads its enemy out of the lobby data the client
+                // parsed on entry. Only the leader used to be rewritten here, so
+                // life and skill changes did not reach the upcoming battle and
+                // showed up one battle late instead.
+                BossRushBoss boss = BossRushOfflineData.GetBossByIndex(bossIndex);
+                int life = BossRushOfflineData.ResolveEnemyLife(boss);
+                string skill = BossRushOfflineData.BuildEnemySkillText(boss);
+
                 List<BossRushLobbyBossData> bossList = lobbyData.BossDataList;
                 if (bossList != null && bossIndex < bossList.Count)
                 {
-                    SetBackingField(bossList[bossIndex], "CharacterId", charaId);
+                    ApplyToBossData(bossList[bossIndex], charaId, life, skill);
                 }
-                if (lobbyData.CurrentBattleBossData != null)
-                {
-                    SetBackingField(lobbyData.CurrentBattleBossData, "CharacterId", charaId);
-                }
+                ApplyToBossData(lobbyData.CurrentBattleBossData, charaId, life, skill);
 
-                RefreshLobbyVisuals(lobby, charaId);
+                RefreshLobbyVisuals(lobby, charaId, life);
             }
             catch (Exception exception)
             {
@@ -736,7 +1026,19 @@ namespace Shadowbus
             }
         }
 
-        private static void RefreshLobbyVisuals(BossRushLobby lobby, int charaId)
+        private static void ApplyToBossData(BossRushLobbyBossData bossData, int charaId, int life, string skill)
+        {
+            if (bossData == null)
+            {
+                return;
+            }
+
+            SetBackingField(bossData, "CharacterId", charaId);
+            SetBackingField(bossData, "Life", life);
+            SetBackingField(bossData, "Skill", skill ?? string.Empty);
+        }
+
+        private static void RefreshLobbyVisuals(BossRushLobby lobby, int charaId, int life)
         {
             BossRushLobbyBossPanel panel = AccessTools.Field(typeof(BossRushLobby), "_bossPanel")?
                 .GetValue(lobby) as BossRushLobbyBossPanel;
@@ -749,6 +1051,13 @@ namespace Shadowbus
                     AccessTools.Field(typeof(BossRushLobbyBossPanel), "_bossData")?.GetValue(panel),
                     "CharacterId",
                     charaId);
+
+                UILabel lifeLabel = AccessTools.Field(typeof(BossRushLobbyBossPanel), "_life")?
+                    .GetValue(panel) as UILabel;
+                if (lifeLabel != null)
+                {
+                    lifeLabel.text = life.ToString();
+                }
 
                 UITexture bossTexture = AccessTools.Field(typeof(BossRushLobbyBossPanel), "_bossCharaTexture")?
                     .GetValue(panel) as UITexture;

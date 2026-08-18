@@ -177,8 +177,8 @@ public class Plugin : BaseUnityPlugin
         bossRushAbilityPicker = Config.Bind(
             "BossRush",
             "AbilityPicker",
-            false,
-            "Adds a 随便选 button to the BossRush ability select screen that offers every configured buff instead of the three random candidates. Testing aid; false hides the button and keeps the original random selection.");
+            true,
+            "Shows a 随便选 button on the BossRush ability select screen that offers every configured buff instead of the three random candidates. Set to false to hide the button and keep the original random selection.");
         BossRushAbilityPicker.Configure(bossRushAbilityPicker.Value);
         CustomFormats.Initialize();
         P2PTwoPickRules.Initialize();

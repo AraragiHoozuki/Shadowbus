@@ -746,7 +746,7 @@ namespace Shadowbus
             int classID,
             int difficulty,
             ref int logicLevel,
-            int maxLife,
+            ref int maxLife,
             int deckId,
             int styleId,
             int emoteId,
@@ -769,11 +769,12 @@ namespace Shadowbus
             // the local package should control them for both preset and custom decks.
             logicLevel = boss.LogicLevel;
             useInnerEmote = boss.UseInnerEmote;
+            maxLife = BossRushOfflineData.ResolveEnemyLife(boss);
 
             try
             {
                 RegisterBossRushCsv(boss);
-                List<int> customDeck = boss.CustomDeckCardIds?.ToList() ?? new List<int>();
+                List<int> customDeck = BossRushOfflineData.ResolveCustomDeck(boss);
                 if (customDeck.Count == 0)
                 {
                     string localDeckPath = BossRushOfflineData.ResolveAiPath(boss, "deck");
@@ -800,11 +801,11 @@ namespace Shadowbus
                     return true;
                 }
                 __instance.SetEnemyAIDeckFromCustomDeck(
-                    boss.EnemyClass,
+                    BossRushOfflineData.ResolveEnemyClass(boss),
                     customDeck,
                     difficulty,
                     logicLevel,
-                    boss.EnemyLife,
+                    maxLife,
                     styleId,
                     emoteId,
                     useInnerEmote,
