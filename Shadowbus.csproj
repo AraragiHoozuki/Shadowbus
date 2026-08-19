@@ -4,7 +4,7 @@
     <TargetFramework>net46</TargetFramework>
     <AssemblyName>Shadowbus</AssemblyName>
     <Product>My first plugin</Product>
-    <Version>2.4.0</Version>
+    <Version>2.4.1</Version>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
     <RestoreAdditionalProjectSources>

@@ -7,7 +7,7 @@ import { newCardPatch } from "../models/defaults";
 import { Card, CheckboxField, Field, NumberField, RowActions, Section, TextField, moveItem } from "../components/Fields";
 import { StringMapEditor, UnknownFieldsEditor } from "../components/Collections";
 
-const known = ["newCard", "cardId", "templateCardId", "boolFields", "intFields", "stringChangeFields", "stringAppendFields", "stringArrayFields", "localizationFields", "attackEffectFields"];
+const known = ["newCard", "cardId", "templateCardId", "boolFields", "intFields", "intArrayFields", "stringChangeFields", "stringAppendFields", "stringArrayFields", "localizationFields", "attackEffectFields"];
 
 interface SkillRow { Skill: string; SkillTiming: string; SkillCondition: string; SkillTarget: string; SkillOption: string; SkillPreprocess: string }
 
@@ -200,6 +200,7 @@ function PatchForm({ value, onChange }: { value: CardMasterPatch; onChange: (val
     </Section>
     <GenericFieldMap title="布尔属性" field="boolFields" value={value.boolFields} type="boolean" suggestions={cardParameterFields.boolean} onChange={(item) => set("boolFields", item)} />
     <GenericFieldMap title="整数 / 枚举属性" field="intFields" value={value.intFields} type="number" suggestions={cardParameterFields.number} onChange={(item) => set("intFields", item)} />
+    <Section title="整数 / 枚举数组属性" description="intArrayFields；Tribe 使用类型枚举的数值" collapsible defaultOpen={false}><div className="stack">{Object.entries(value.intArrayFields).map(([key, items], index, entries) => <div className="map-row" key={`${index}-${key}`}><input list="suggestions-int-array" value={key} onChange={(event) => set("intArrayFields", Object.fromEntries(entries.map(([oldKey, oldValue], itemIndex) => itemIndex === index ? [event.target.value, oldValue] : [oldKey, oldValue])))} /><textarea rows={2} value={items.join("\n")} onChange={(event) => set("intArrayFields", { ...value.intArrayFields, [key]: event.target.value.split(/\s+/).map(Number).filter(Number.isFinite) })} /><button type="button" className="danger" onClick={() => set("intArrayFields", Object.fromEntries(entries.filter((_, itemIndex) => itemIndex !== index)))}>删除</button></div>)}</div><datalist id="suggestions-int-array">{cardParameterFields.numberArray.map((item) => <option key={item} value={item} />)}</datalist><button type="button" onClick={() => set("intArrayFields", { ...value.intArrayFields, [cardParameterFields.numberArray.find((item) => !(item in value.intArrayFields)) ?? "Field"]: [] })}>新增数组</button></Section>
     <AttackEffectEditor value={value.attackEffectFields ?? {}} onChange={(item) => set("attackEffectFields", item)} />
     <StringReplacementTags value={value.stringChangeFields} suggestions={cardParameterFields.string} onChange={(item) => set("stringChangeFields", item)} />
     <Section title="技能追加编辑器" description="stringAppendFields 中的六个并行技能字段" actions={<button type="button" onClick={() => setSkills([...skillRows, { Skill: "", SkillTiming: "", SkillCondition: "none", SkillTarget: "none", SkillOption: "none", SkillPreprocess: "none" }], skillRows.length ? skillTable.leadingComma : true)}>新增技能</button>}>

@@ -29,6 +29,7 @@ namespace Shadowbus
         public int templateCardId;
         public Dictionary<string, bool> boolFields = [];
         public Dictionary<string, int> intFields = [];
+        public Dictionary<string, int[]> intArrayFields = [];
         public Dictionary<string, string> stringChangeFields = [];
         public Dictionary<string, string> stringAppendFields = [];
         public Dictionary<string, string[]> stringArrayFields = [];
@@ -45,6 +46,7 @@ namespace Shadowbus
 
             ApplyFields(card, boolFields, preserveVariantIdentity);
             ApplyFields(card, intFields, preserveVariantIdentity);
+            ApplyIntArrayFields(card, preserveVariantIdentity);
             ApplyFields(card, stringChangeFields, preserveVariantIdentity);
 
             if (stringAppendFields != null)
@@ -117,6 +119,64 @@ namespace Shadowbus
             {
                 card.AtkEffectParameter._time = ToPairList(attackEffectFields.time, value => value);
             }
+        }
+
+        private void ApplyIntArrayFields(
+            CardParameter card,
+            bool preserveVariantIdentity)
+        {
+            if (intArrayFields == null)
+            {
+                return;
+            }
+
+            foreach (var kvp in intArrayFields)
+            {
+                TrySetProperty(
+                    card,
+                    kvp.Key,
+                    property => ConvertIntArrayValue(property.PropertyType, kvp.Value),
+                    preserveVariantIdentity);
+            }
+        }
+
+        private static object ConvertIntArrayValue(Type propertyType, int[] values)
+        {
+            values = values ?? Array.Empty<int>();
+            Type elementType;
+            if (propertyType.IsArray)
+            {
+                elementType = propertyType.GetElementType();
+                Array array = Array.CreateInstance(elementType, values.Length);
+                for (int index = 0; index < values.Length; index++)
+                {
+                    array.SetValue(ConvertIntValue(values[index], elementType), index);
+                }
+                return array;
+            }
+
+            if (propertyType.IsGenericType &&
+                propertyType.GetGenericTypeDefinition() == typeof(List<>))
+            {
+                elementType = propertyType.GetGenericArguments()[0];
+                System.Collections.IList list =
+                    (System.Collections.IList)Activator.CreateInstance(propertyType);
+                foreach (int value in values)
+                {
+                    list.Add(ConvertIntValue(value, elementType));
+                }
+                return list;
+            }
+
+            throw new InvalidOperationException(
+                $"Property type '{propertyType}' is not an integer array or list.");
+        }
+
+        private static object ConvertIntValue(int value, Type targetType)
+        {
+            return targetType.IsEnum
+                ? Enum.ToObject(targetType, value)
+                : Convert.ChangeType(value, targetType);
         }
 
         private static List<string> ToStringPairList(IEnumerable<string> values)
@@ -276,6 +336,10 @@ namespace Shadowbus
                         this.stringArrayFields[property.Name] = (string[])value;
                     }
                 }
+                else if (TryConvertIntArray(propType, value, out int[] intArray))
+                {
+                    this.intArrayFields[property.Name] = intArray;
+                }
                 else if (propType.IsEnum)
                 {
                     this.intFields[property.Name] = (int)value;
@@ -313,6 +377,42 @@ namespace Shadowbus
                     }
                 };
             }
+        }
+
+        private static bool TryConvertIntArray(
+            Type propertyType,
+            object value,
+            out int[] result)
+        {
+            Type elementType = null;
+            if (propertyType.IsArray)
+            {
+                elementType = propertyType.GetElementType();
+            }
+            else if (propertyType.IsGenericType &&
+                propertyType.GetGenericTypeDefinition() == typeof(List<>))
+            {
+                elementType = propertyType.GetGenericArguments()[0];
+            }
+
+            if (elementType == null ||
+                (!elementType.IsEnum && elementType != typeof(int)))
+            {
+                result = null;
+                return false;
+            }
+
+            if (value == null)
+            {
+                result = Array.Empty<int>();
+                return true;
+            }
+
+            result = ((System.Collections.IEnumerable)value)
+                .Cast<object>()
+                .Select(Convert.ToInt32)
+                .ToArray();
+            return true;
         }
     }
 

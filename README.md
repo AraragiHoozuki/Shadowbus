@@ -115,6 +115,7 @@ P2P 模式不提供账号服务、房间列表、STUN 打洞或 TURN 中继。�
 - `newCard` 为 `false` 时修改 `templateCardId` 对应的卡牌。
 - `newCard` 为 `true` 时以 `templateCardId` 为模板创建 `cardId` 对应的新卡。
 - `intFields` 修改数值字段。
+- `intArrayFields` 修改整数或枚举数组字段；卡牌类型使用 `"Tribe": [类型枚举值]`。
 - `stringChangeFields` 替换技能等字符串字段。
 - `stringAppendFields` 在原字符串后追加内容。
 - `localizationFields` 修改卡名、能力文本和背景文本。
@@ -125,6 +126,7 @@ P2P 模式不提供账号服务、房间列表、STUN 打洞或 TURN 中继。�
 - 进化后卡图命名为 `<ResourceCardId>_evo.png`；未提供时自动使用进化前卡图。
 - 修改已有卡牌时，补丁会同步应用到其普通版和闪卡版，同时保留两个版本各自的身份字段。
 - `stringArrayFields` 可用于替换 `SkillEffectPath`、`SkillSe`、`EvolEffectPath` 等 `string[]` 字段。
+- 游戏内导出卡牌数据时会把卡牌类型写入 `intArrayFields.Tribe`；例如士兵为 `[2]`、机械为 `[7]`。
 
 项目已提供以下扩展：
 

@@ -117,6 +117,7 @@ Card patches live in `Mods/CardMaster/`:
 - With `newCard` set to `false`, the card matching `templateCardId` is modified.
 - With `newCard` set to `true`, a new card with `cardId` is created from `templateCardId`.
 - `intFields` changes numeric fields.
+- `intArrayFields` changes integer or enum array fields; card traits use `"Tribe": [trait enum values]`.
 - `stringChangeFields` replaces string fields such as abilities.
 - `stringAppendFields` appends to the original string.
 - `localizationFields` changes the card name, ability text and flavour text.
@@ -127,6 +128,7 @@ Opening the deck list hot-reloads the configuration. New cards should use an unu
 - Evolved artwork is named `<ResourceCardId>_evo.png`; the base image is used when it is absent.
 - Patching an existing card applies to both its normal and animated versions while keeping each version's own identity fields.
 - `stringArrayFields` replaces `string[]` fields such as `SkillEffectPath`, `SkillSe` and `EvolEffectPath`.
+- In-game card export writes card traits to `intArrayFields.Tribe`; for example, Officer is `[2]` and Machina is `[7]`.
 
 The project ships these extensions:
 

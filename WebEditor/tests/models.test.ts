@@ -35,6 +35,11 @@ describe("JSON 模型保真", () => {
     }])[0];
     expect(attackCard.attackEffectFields.effectPath).toEqual(["normal_attack", "evo_attack"]);
     expect(attackCard.attackEffectFields.time).toEqual([0.5, 0.75]);
+    const tribeCard = normalizeCardMaster([{
+      templateCardId: 1,
+      intArrayFields: { Tribe: [2, "7", "invalid"] },
+    }])[0];
+    expect(tribeCard.intArrayFields.Tribe).toEqual([2, 7]);
   });
 });
 

@@ -32,6 +32,7 @@ export const cardParameterFields = {
     "SameKindNumMaxInUnlimited", "SameKindNumMaxInCrossoverMainClass",
     "SameKindNumMaxInCrossoverSubClass", "SortIndex",
   ],
+  numberArray: ["Tribe"],
   string: [
     "CardHashId", "CardSetId", "Path", "Skill", "SkillTiming", "SkillCondition", "SkillTarget",
     "SkillOption", "SkillPreprocess", "SkillIcon", "SummonEffectPath", "SummonSePath",

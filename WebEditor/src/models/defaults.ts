@@ -68,6 +68,7 @@ export const newCardPatch = (): CardMasterPatch => ({
   templateCardId: 100011010,
   boolFields: {},
   intFields: {},
+  intArrayFields: {},
   stringChangeFields: {},
   stringAppendFields: {},
   stringArrayFields: {},

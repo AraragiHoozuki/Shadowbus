@@ -82,6 +82,7 @@ export interface CardMasterPatch extends JsonRecord {
   templateCardId: number;
   boolFields: Record<string, boolean>;
   intFields: Record<string, number>;
+  intArrayFields: Record<string, number[]>;
   stringChangeFields: Record<string, string>;
   stringAppendFields: Record<string, string>;
   stringArrayFields: Record<string, string[]>;

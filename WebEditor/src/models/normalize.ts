@@ -64,7 +64,7 @@ export function normalizeCardMaster(value: unknown): CardMasterPatch[] {
       effectEnginType: attack.effectEnginType == null ? base.attackEffectFields.effectEnginType : stringArray(attack.effectEnginType),
       time: attack.time == null ? base.attackEffectFields.time : numberArrayOrDefault(attack.time, [0, 0]),
     };
-    return { ...base, ...source, newCard: boolean(source.newCard), cardId: number(source.cardId), templateCardId: number(source.templateCardId), boolFields: Object.fromEntries(Object.entries(object(source.boolFields)).map(([key, value]) => [key, boolean(value)])), intFields: numberMap(source.intFields), stringChangeFields: stringMap(source.stringChangeFields), stringAppendFields: stringMap(source.stringAppendFields), stringArrayFields: Object.fromEntries(Object.entries(object(source.stringArrayFields)).map(([key, value]) => [key, stringArray(value)])), localizationFields: stringMap(source.localizationFields), attackEffectFields };
+    return { ...base, ...source, newCard: boolean(source.newCard), cardId: number(source.cardId), templateCardId: number(source.templateCardId), boolFields: Object.fromEntries(Object.entries(object(source.boolFields)).map(([key, value]) => [key, boolean(value)])), intFields: numberMap(source.intFields), intArrayFields: Object.fromEntries(Object.entries(object(source.intArrayFields)).map(([key, value]) => [key, numberArray(value)])), stringChangeFields: stringMap(source.stringChangeFields), stringAppendFields: stringMap(source.stringAppendFields), stringArrayFields: Object.fromEntries(Object.entries(object(source.stringArrayFields)).map(([key, value]) => [key, stringArray(value)])), localizationFields: stringMap(source.localizationFields), attackEffectFields };
   });
 }
 
