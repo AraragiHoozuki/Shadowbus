@@ -1508,7 +1508,7 @@ namespace Shadowbus
         /// example "1602" for the voice IDs "1602_000_001" and "1602_000_023". Most skins use
         /// their own skin ID; the eight starting leaders use a separate code such as "02001".
         /// </summary>
-        private static string ResolveLeaderVoiceId(ClassCharacterMasterData leader)
+        internal static string ResolveLeaderVoiceId(ClassCharacterMasterData leader)
         {
             if (leader == null)
             {
