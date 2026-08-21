@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BossRushPackage, CardMasterPatch, CsvDocument, CustomFormat, EditorDocument, IdCatalog, TwoPickRule, ValidationIssue } from "./types";
 import { emptyCatalog, mergeCatalogEntries, parseCharacterCatalog, parseQuestAiCatalog } from "./data/catalog";
+import { cardsFromPatches, createCardCatalog, type CardCatalog } from "./data/cards";
 import { importDirectory, openDirectoryWorkspace, downloadBlob, type WorkspaceAdapter } from "./workspace/workspace";
 import { scanWorkspace, type ModuleFiles, type ModuleId } from "./workspace/scanner";
 import { normalizeBossRush, normalizeCardMaster, normalizeFormat, normalizeTwoPick } from "./models/normalize";
@@ -8,6 +9,8 @@ import { newBossRush, newCardPatch, newFormat, newTwoPick } from "./models/defau
 import { normalizeDeckCsv, parseCsv, serializeCsv } from "./models/csv";
 import { validateBossRush, validateCardMaster, validateCsv, validateFormat, validateTwoPick } from "./models/validation";
 import { ValidationPanel } from "./components/ValidationPanel";
+import { CardCatalogProvider } from "./components/CardCatalog";
+import { CardReferencePanel } from "./components/CardReferencePanel";
 import { BossRushEditor } from "./editors/BossRushEditor";
 import { CardMasterEditor } from "./editors/CardMasterEditor";
 import { FormatEditor } from "./editors/FormatEditor";
@@ -53,11 +56,11 @@ function serializeDocument(document: LoadedDocument) {
   return JSON.stringify(document.value, null, 2) + "\n";
 }
 
-function validateDocument(document: LoadedDocument): ValidationIssue[] {
-  if (document.module === "bossrush") return validateBossRush(document.value as BossRushPackage);
-  if (document.module === "cardmaster") return validateCardMaster(document.value as CardMasterPatch[]);
-  if (document.module === "format") return validateFormat(document.value as CustomFormat);
-  if (document.module === "twopick") return validateTwoPick(document.value as TwoPickRule);
+function validateDocument(document: LoadedDocument, cards: CardCatalog): ValidationIssue[] {
+  if (document.module === "bossrush") return validateBossRush(document.value as BossRushPackage, cards);
+  if (document.module === "cardmaster") return validateCardMaster(document.value as CardMasterPatch[], cards);
+  if (document.module === "format") return validateFormat(document.value as CustomFormat, cards);
+  if (document.module === "twopick") return validateTwoPick(document.value as TwoPickRule, cards);
   if (document.module === "aidata") return validateCsv(document.value as CsvDocument, document.csvType!);
   return [];
 }
@@ -86,7 +89,11 @@ export function App() {
   const [confirmDialog, setConfirmDialog] = useState<{ title: string; content: string; okText: string; danger?: boolean } | null>(null);
   const confirmDialogResolver = useRef<((value: boolean) => void) | null>(null);
   const importRef = useRef<HTMLInputElement>(null);
-  const issues = useMemo(() => document ? validateDocument(document) : [], [document]);
+  // Cards created by the CardMaster file currently open resolve to their own name; every
+  // other card comes from the bundled catalog, so no user file has to be read for names.
+  const cardOverrides = useMemo(() => document?.module === "cardmaster" ? cardsFromPatches(document.value as CardMasterPatch[]) : [], [document]);
+  const cards = useMemo(() => createCardCatalog(cardOverrides), [cardOverrides]);
+  const issues = useMemo(() => document ? validateDocument(document, cards) : [], [document, cards]);
   const hasErrors = issues.some((issue) => issue.severity === "error");
   const hasWarnings = issues.some((issue) => issue.severity === "warning");
 
@@ -280,7 +287,7 @@ export function App() {
           <Content className="workspace-main">
             <div className="document-toolbar"><div><Breadcrumb items={pathParts.map((part, index) => ({ title: index === pathParts.length - 1 && document?.dirty ? <Space size={6}><span>{part}</span><Tag color="orange">未保存</Tag></Space> : part }))} /></div><Space size="small">{document && document.module !== "reference" && <><Button icon={<CopyOutlined />} onClick={duplicateFile}>复制</Button><Button icon={<EditOutlined />} onClick={renameFile}>重命名</Button><Button danger icon={<DeleteOutlined />} onClick={deleteFile}>删除</Button><Button type="primary" icon={<SaveOutlined />} loading={busy} disabled={hasErrors || !document.dirty} onClick={save}>保存</Button></>}</Space></div>
             {document && document.module !== "reference" && <ValidationPanel issues={issues} />}
-            <Spin spinning={busy} description="处理中..." className="editor-spin"><div className="scroll-area">{renderEditor()}</div></Spin>
+            <Spin spinning={busy} description="处理中..." className="editor-spin"><div className="scroll-area"><CardCatalogProvider value={cards}>{renderEditor()}</CardCatalogProvider></div></Spin>
           </Content>
         </Layout>
       </Layout>
@@ -288,6 +295,7 @@ export function App() {
         <Form layout="vertical"><Form.Item label={textDialog?.label} required><Input autoFocus value={textDialogValue} placeholder={textDialog?.placeholder} onChange={(event) => setTextDialogValue(event.target.value)} onPressEnter={() => finishTextDialog(textDialogValue.trim() || null)} /></Form.Item></Form>
       </Modal>
       <Modal title={confirmDialog?.title} open={!!confirmDialog} okText={confirmDialog?.okText ?? "继续"} cancelText="取消" okButtonProps={{ danger: confirmDialog?.danger }} onOk={() => finishConfirmDialog(true)} onCancel={() => finishConfirmDialog(false)}>{confirmDialog?.content}</Modal>
+      <CardReferencePanel cards={cards} />
     </AntdApp>
   </ConfigProvider>;
 }

@@ -104,8 +104,25 @@ code { color: #175cd3; font-family: "Cascadia Code", Consolas, monospace; font-s
 .card-id-tooltip-trigger > .ant-input, .card-id-tooltip-trigger > .ant-input-number { max-width: 100%; }
 .card-id-tooltip-trigger > .ant-input-number { width: 100%; }
 .card-id-popover-content { max-width: 230px; padding: 0; }
+.card-id-preview-card { display: grid; gap: 8px; max-width: 220px; }
+.card-id-preview-heading { display: grid; gap: 2px; }
+.card-id-preview-heading > .ant-typography { margin: 0; font-size: 12px; line-height: 1.45; }
+.card-id-preview-heading > .ant-typography:first-child { font-size: 13px; }
 .card-id-preview-link { display: block; line-height: 0; }
 .card-id-preview { display: block; width: 220px; max-width: 100%; height: auto; border: 1px solid #d0d5dd; border-radius: 6px; background: #f8fafc; }
+.card-name-label { display: block; overflow: hidden; color: #344054; font-size: 12px; font-weight: 600; line-height: 1.4; white-space: nowrap; text-overflow: ellipsis; }
+.card-name-label-empty { color: #98a2b3; font-weight: 400; }
+.card-name-label-unknown { color: #b42318; font-weight: 400; }
+.card-name-label-custom { color: #b54708; font-weight: 400; }
+.card-chip { display: grid; gap: 3px; width: 148px; padding: 5px 6px 6px; background: #f8fafc; border: 1px solid #d0d5dd; border-radius: 6px; }
+.card-chip-row { display: flex; }
+.card-chip-row .ant-input-number { flex: 1; min-width: 0; }
+.card-chip-row .ant-input-number input { padding: 0 6px; font-size: 12px; }
+.card-chip-row .ant-btn { width: 26px; padding: 0; }
+.card-chip-list { align-items: start; }
+.card-map-key { display: grid; gap: 3px; width: 100%; min-width: 0; }
+.card-map-key > .ant-input { max-width: 100%; }
+.map-row > .card-id-tooltip-trigger { width: 100%; }
 .field-hint { display: block; margin-top: 5px; font-size: 12px; line-height: 1.4; }
 .full-number, .field .ant-select, .field .ant-input-number { width: 100%; }
 .nullable-input { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 12px; }
@@ -177,6 +194,17 @@ code { color: #175cd3; font-family: "Cascadia Code", Consolas, monospace; font-s
 .chip button { width: 28px; padding: 0; border: 0; border-left: 1px solid #d0d5dd; border-radius: 0; }
 .bulk-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 8px; margin-top: 10px; align-items: end; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; }
+.skill-group { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+.skill-group-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.skill-source-alert { margin-bottom: 14px; }
+.skill-dsl-import .ant-tag { margin-inline-end: 4px; }
+.skill-dsl-preview { padding: 8px 10px; background: #fcfcfd; border: 1px solid #eaecf0; border-radius: 7px; }
+.skill-dsl-preview dl { display: flex; flex-direction: column; gap: 3px; margin: 6px 0 0; }
+.skill-dsl-preview dl > div { display: grid; grid-template-columns: 130px 1fr; gap: 8px; }
+.skill-dsl-preview dt { color: #667085; font: 12px/1.6 "Cascadia Code", Consolas, monospace; }
+.skill-dsl-preview dd { margin: 0; color: #1d2939; word-break: break-all; font: 12px/1.6 "Cascadia Code", Consolas, monospace; }
+.skill-source-alert pre { margin: 6px 0 4px; padding: 8px 10px; overflow-x: auto; border-radius: 6px; background: #ffffffb3; font: 12px/1.6 "Cascadia Code", Consolas, monospace; }
+.skill-add-evolution { align-self: flex-start; }
 .skill-tag-editor { display: flex; flex-direction: column; gap: 14px; padding: 14px; border: 1px solid #d6e4ff; border-radius: 10px; background: linear-gradient(135deg, #f8fbff 0%, #fff 100%); box-shadow: inset 0 1px 0 #fff, 0 4px 14px #1677ff0d; }
 .skill-tag-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding-bottom: 10px; border-bottom: 1px solid #e4e7ec; }
 .skill-index-label { display: inline-flex; align-items: center; padding: 2px 8px; border: 1px solid currentColor; border-radius: 999px; font-size: 12px; font-weight: 600; line-height: 20px; }
@@ -257,6 +285,49 @@ code { color: #175cd3; font-family: "Cascadia Code", Consolas, monospace; font-s
 .empty-state h2 { margin: 8px 0 4px; color: #1d2939; }
 .empty-state p { max-width: 480px; margin: 0 auto; color: var(--muted); }
 .empty-icon { color: #84adf7; font-size: 46px; }
+
+/* Floating card reference. z-index sits above antd's modal layer (1000) so the
+   panel stays readable over the skill DSL dialog it exists to help write. */
+.card-ref-fab { position: fixed; right: 24px; bottom: 24px; z-index: 1500; display: grid; place-content: center; width: 48px; height: 48px; padding: 0; color: #fff; font-size: 20px; background: #1677ff; border: none; border-radius: 50%; box-shadow: 0 6px 18px #1677ff59; cursor: pointer; transition: transform 0.15s, background 0.15s; }
+.card-ref-fab:hover { transform: translateY(-2px); background: #4096ff; }
+.card-ref-fab-active { background: #0958d9; }
+.card-ref-panel { position: fixed; right: 24px; bottom: 84px; z-index: 1500; display: flex; flex-direction: column; overflow: hidden; background: #fff; border: 1px solid #d0d5dd; border-radius: 10px; box-shadow: 0 16px 48px #10182833; }
+.card-ref-panel-header { display: flex; align-items: center; justify-content: space-between; flex: none; gap: 8px; padding: 8px 8px 8px 12px; background: #f8fafc; border-bottom: 1px solid #eaecf0; cursor: move; user-select: none; touch-action: none; }
+.card-ref-panel-search { flex: none; padding: 10px 12px; border-bottom: 1px solid #f2f4f7; }
+.card-ref-panel-body { flex: 1; overflow: auto; padding: 10px 12px 16px; }
+.card-ref-loading { display: grid; place-content: center; height: 100%; }
+.card-ref-alert, .card-ref-count { margin-bottom: 10px; }
+.card-ref-rows { display: flex; flex-direction: column; gap: 8px; }
+.card-ref-row { border: 1px solid #e4e7ec; border-radius: 8px; background: #fff; }
+.card-ref-row-open { border-color: #84adf7; box-shadow: 0 2px 10px #1677ff1a; }
+.card-ref-row-head { display: flex; flex-direction: column; gap: 4px; width: 100%; padding: 8px 10px; text-align: left; background: none; border: none; border-radius: 8px; cursor: pointer; }
+.card-ref-row-head:hover { background: #f8fafc; }
+.card-ref-row-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.card-ref-row-name { color: #1d2939; font-weight: 600; }
+.card-ref-row-title code { color: #667085; font-size: 11px; }
+.card-ref-row-summary { display: -webkit-box; overflow: hidden; color: var(--muted); font-size: 12px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.card-ref-detail { display: flex; flex-direction: column; gap: 10px; padding: 0 10px 10px; border-top: 1px dashed #eaecf0; }
+.card-ref-detail-top { display: flex; gap: 10px; padding-top: 10px; }
+.card-ref-art { flex: none; width: 84px; }
+.card-ref-art img { width: 100%; border-radius: 6px; background: #f2f4f7; }
+.card-ref-detail-meta { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.card-ref-text { color: #344054; font-size: 12px; line-height: 1.6; white-space: pre-wrap; }
+.card-ref-text-evo { padding-left: 8px; border-left: 2px solid #d3adf7; }
+.card-ref-effect-condition { display: flex; flex-direction: column; gap: 4px; }
+.card-ref-effect-condition code { padding: 6px 8px; color: #344054; background: #fffbe6; border: 1px solid #ffe58f; border-radius: 6px; word-break: break-all; }
+.card-ref-fields-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.card-ref-raw { margin: 0; max-height: 220px; overflow: auto; padding: 8px 10px; color: #344054; background: #f8fafc; border: 1px solid #eaecf0; border-radius: 6px; white-space: pre-wrap; word-break: break-all; font: 11px/1.6 "Cascadia Code", Consolas, monospace; }
+.card-ref-note { display: block; margin-top: 6px; font-size: 11px; }
+.card-ref-skill { padding: 8px 10px; background: #fcfcfd; border: 1px solid #eaecf0; border-radius: 7px; }
+.card-ref-skill-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.card-ref-skill-dsl { margin-top: 6px; max-height: 120px; background: #fff; }
+.card-ref-skill-fields { display: flex; flex-direction: column; gap: 3px; margin: 0; }
+.card-ref-skill-row { display: grid; grid-template-columns: 92px 1fr; gap: 8px; }
+.card-ref-skill-row dt { color: #667085; font: 11px/1.6 "Cascadia Code", Consolas, monospace; }
+.card-ref-skill-row dd { margin: 0; color: #1d2939; word-break: break-all; font: 11px/1.6 "Cascadia Code", Consolas, monospace; }
+.card-ref-skill-row-extra dd { color: #6941c6; }
+.card-ref-muted { color: #98a2b3; }
+.card-ref-resize { position: absolute; right: 0; bottom: 0; width: 16px; height: 16px; background: linear-gradient(135deg, transparent 50%, #d0d5dd 50%, #d0d5dd 70%, transparent 70%); cursor: nwse-resize; touch-action: none; }
 
 @media (max-width: 1200px) {
   .field-grid { grid-template-columns: repeat(2, minmax(250px, 1fr)); }

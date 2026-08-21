@@ -154,6 +154,17 @@ export interface EnemyCharacterEntry {
   skinId?: number;
 }
 
+/** One card of the bundled catalog. `clan` is a `classes` id, `charType` indexes `cardTypes`. */
+export interface CardEntry {
+  id: number;
+  name: string;
+  clan: number;
+  charType: number;
+  cost: number;
+  atk: number;
+  life: number;
+}
+
 export interface QuestAiEntry {
   enemyAiId: number;
   deckId: number;

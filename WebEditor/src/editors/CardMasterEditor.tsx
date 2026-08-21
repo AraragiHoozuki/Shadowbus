@@ -1,20 +1,24 @@
 import type { AttackEffectFields, CardMasterPatch } from "../types";
-import { useState } from "react";
-import { CheckOutlined, CloseOutlined, EditOutlined, PlusOutlined } from "@ant-design/icons";
-import { Button, Input, Modal, Space, Tag, Tooltip, Typography } from "antd";
+import { useMemo, useState, type ReactNode } from "react";
+import { CheckOutlined, CloseOutlined, EditOutlined, ImportOutlined, PlusOutlined } from "@ant-design/icons";
+import { Alert, Button, Input, Modal, Space, Tag, Tooltip, Typography } from "antd";
 import { cardParameterFields, localizationKeys, skillParallelKeys } from "../data/catalog";
 import { newCardPatch } from "../models/defaults";
-import { Card, CheckboxField, Field, NumberField, RowActions, Section, TextField, moveItem } from "../components/Fields";
+import { skillRowsFromDsl } from "../models/cardDsl";
+import { applySkillGroups, emptySkillRow, isSkillField, onlySkillFields, parseSkillGroups, type SkillFieldSource, type SkillGroups, type SkillRow } from "../models/skills";
+import { Card, CheckboxField, Field, NumberField, RowActions, Section, TextField, cardTitle, moveItem } from "../components/Fields";
+import { useCardCatalog } from "../components/CardCatalog";
 import { StringMapEditor, UnknownFieldsEditor } from "../components/Collections";
 
 const known = ["newCard", "cardId", "templateCardId", "boolFields", "intFields", "intArrayFields", "stringChangeFields", "stringAppendFields", "stringArrayFields", "localizationFields", "attackEffectFields"];
 
-interface SkillRow { Skill: string; SkillTiming: string; SkillCondition: string; SkillTarget: string; SkillOption: string; SkillPreprocess: string }
+/** The patch map each write mode stores the six parallel skill fields in. */
+const skillSourceMap = { append: "stringAppendFields", change: "stringChangeFields" } as const;
 
 const skillTagColors = ["blue", "green", "gold", "purple", "cyan", "magenta", "orange", "geekblue"] as const;
 const replacementTagColors = ["processing", "success", "warning", "purple", "cyan", "magenta", "orange", "geekblue"] as const;
 
-function SkillTagMatrix({ rows, onChange, onMove, onCopy, onDelete }: { rows: SkillRow[]; onChange: (rows: SkillRow[]) => void; onMove: (from: number, to: number) => void; onCopy: (index: number) => void; onDelete: (index: number) => void }) {
+function SkillTagMatrix({ groupLabel, rows, onChange, onMove, onCopy, onDelete }: { groupLabel: string; rows: SkillRow[]; onChange: (rows: SkillRow[]) => void; onMove: (from: number, to: number) => void; onCopy: (index: number) => void; onDelete: (index: number) => void }) {
   const [editingRow, setEditingRow] = useState<number | null>(null);
   const [draft, setDraft] = useState<SkillRow | null>(null);
   const beginEdit = (row: number) => { setEditingRow(row); setDraft({ ...rows[row] }); };
@@ -30,7 +34,7 @@ function SkillTagMatrix({ rows, onChange, onMove, onCopy, onDelete }: { rows: Sk
   const cancelEdit = () => { setEditingRow(null); setDraft(null); };
   const removeRow = (index: number) => onDelete(index);
   return <div className="skill-tag-editor">
-    <div className="skill-tag-legend"><Typography.Text type="secondary">技能序号：</Typography.Text>{rows.map((_, index) => <span key={index} className={`skill-index-label skill-index-${index % skillTagColors.length}`}>技能 {index + 1}</span>)}<Typography.Text type="secondary">字段名独立显示；点击技能值或“编辑”打开弹窗，关闭 Tag 删除整组并行技能。</Typography.Text></div>
+    <div className="skill-tag-legend"><Typography.Text type="secondary">技能序号：</Typography.Text>{rows.map((_, index) => <span key={index} className={`skill-index-label skill-index-${index % skillTagColors.length}`}>{groupLabel} {index + 1}</span>)}<Typography.Text type="secondary">字段名独立显示；点击技能值或“编辑”打开弹窗，关闭 Tag 删除整组并行技能。</Typography.Text></div>
     <div className="skill-tag-matrix">
       {skillParallelKeys.map((key) => <div className="skill-tag-row" key={key}>
         <div className="skill-tag-label"><Typography.Text strong>{key}</Typography.Text><Typography.Text type="secondary" code>{key}</Typography.Text></div>
@@ -40,32 +44,83 @@ function SkillTagMatrix({ rows, onChange, onMove, onCopy, onDelete }: { rows: Sk
         })}</div>
       </div>)}
     </div>
-    <div className="skill-row-actions">{rows.map((row, index) => <Space key={index} size={4}><span className={`skill-index-label skill-index-${index % skillTagColors.length}`}>技能 {index + 1}</span><Button size="small" icon={<EditOutlined />} onClick={() => beginEdit(index)}>编辑</Button><Button size="small" disabled={index === 0} onClick={() => onMove(index, index - 1)}>上移</Button><Button size="small" disabled={index === rows.length - 1} onClick={() => onMove(index, index + 1)}>下移</Button><Button size="small" onClick={() => onCopy(index)}>复制</Button><Button size="small" danger onClick={() => removeRow(index)}>删除</Button></Space>)}</div>
-    <Modal className="skill-row-modal" open={editingRow != null} title={`编辑技能 ${editingRow == null ? "" : editingRow + 1}`} width={820} centered okText="应用修改" cancelText="取消" onCancel={cancelEdit} onOk={commitEdit}>
+    <div className="skill-row-actions">{rows.map((row, index) => <Space key={index} size={4}><span className={`skill-index-label skill-index-${index % skillTagColors.length}`}>{groupLabel} {index + 1}</span><Button size="small" icon={<EditOutlined />} onClick={() => beginEdit(index)}>编辑</Button><Button size="small" disabled={index === 0} onClick={() => onMove(index, index - 1)}>上移</Button><Button size="small" disabled={index === rows.length - 1} onClick={() => onMove(index, index + 1)}>下移</Button><Button size="small" onClick={() => onCopy(index)}>复制</Button><Button size="small" danger onClick={() => removeRow(index)}>删除</Button></Space>)}</div>
+    <Modal className="skill-row-modal" open={editingRow != null} title={`编辑${groupLabel} ${editingRow == null ? "" : editingRow + 1}`} width={820} centered okText="应用修改" cancelText="取消" onCancel={cancelEdit} onOk={commitEdit}>
       {draft && <div className="field-grid skill-row-modal-fields">{skillParallelKeys.map((key) => <Field key={key} label={key} field={key} wide={key === "Skill"}><Input.TextArea value={draft[key]} rows={key === "Skill" ? 5 : 3} autoSize={{ minRows: key === "Skill" ? 4 : 2, maxRows: 8 }} spellCheck={false} onChange={(event) => updateDraft(key, event.target.value)} /></Field>)}</div>}
     </Modal>
   </div>;
 }
 
-function parseSkillRows(fields: Record<string, string>): { rows: SkillRow[]; leadingComma: boolean } {
-  const populated = skillParallelKeys.filter((key) => fields[key] != null);
-  const leadingComma = populated.length > 0 && populated.every((key) => fields[key].startsWith(","));
-  const values = Object.fromEntries(skillParallelKeys.map((key) => {
-    const raw = fields[key] ?? "";
-    return [key, (leadingComma ? raw.slice(1) : raw).split(",")];
-  })) as Record<typeof skillParallelKeys[number], string[]>;
-  const count = Math.max(0, ...skillParallelKeys.map((key) => values[key].length));
-  const rows: SkillRow[] = [];
-  for (let index = 0; index < count; index++) rows.push(Object.fromEntries(skillParallelKeys.map((key) => [key, values[key][index] ?? ""])) as unknown as SkillRow);
-  if (rows.length === 1 && skillParallelKeys.every((key) => rows[0][key] === "")) return { rows: [], leadingComma };
-  return { rows, leadingComma };
+/**
+ * Pastes bracket DSL — normally copied out of the card reference panel — into one
+ * form's list. Parsed live so the preview shows exactly which rows would be
+ * appended, because appending to the wrong form is the mistake this editor exists
+ * to prevent.
+ */
+function SkillDslImport({ label, onImport }: { label: string; onImport: (rows: SkillRow[]) => void }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const parsed = useMemo(() => skillRowsFromDsl(text), [text]);
+  const close = () => { setOpen(false); setText(""); };
+  return <>
+    <Button size="small" type="dashed" icon={<ImportOutlined />} onClick={() => setOpen(true)}>导入 DSL</Button>
+    <Modal
+      open={open}
+      title={`导入 DSL 到${label}`}
+      width={760}
+      centered
+      okText={parsed.rows.length ? `追加 ${parsed.rows.length} 个技能` : "追加技能"}
+      cancelText="取消"
+      okButtonProps={{ disabled: !parsed.rows.length }}
+      onCancel={close}
+      onOk={() => { onImport(parsed.rows); close(); }}
+    >
+      <div className="stack skill-dsl-import">
+        <Typography.Text type="secondary">
+          粘贴 <code>(skill:...)(timing:...)</code> 形式的括号 DSL，多个技能用逗号分隔。
+          解析结果会<strong>追加</strong>到{label}现有技能之后，不会覆盖。
+        </Typography.Text>
+        <Input.TextArea
+          autoFocus
+          rows={4}
+          spellCheck={false}
+          value={text}
+          placeholder="(skill:damage)(timing:on_play)(condition:none)(target:enemy_follower)(option:amount_2)(preprocess:none)"
+          onChange={(event) => setText(event.target.value)}
+        />
+        {parsed.error && <Alert type="error" showIcon message="无法解析" description={parsed.error} />}
+        {!!parsed.ignored.length && <Alert
+          type="warning"
+          showIcon
+          message="以下字段不会被导入"
+          description={<>{parsed.ignored.map((key) => <Tag key={key}>{key}</Tag>)}技能编辑器只管理六个并行字段。演出类字段（<code>SkillEffectPath</code> 等）需要在「字符串替换」中手动添加。</>}
+        />}
+        {parsed.rows.map((row, index) => <div className="skill-dsl-preview" key={index}>
+          <Tag color="blue">{label} 第 {index + 1} 个</Tag>
+          <dl>{skillParallelKeys.map((key) => <div key={key}><dt>{key}</dt><dd>{row[key] || "（空）"}</dd></div>)}</dl>
+        </div>)}
+      </div>
+    </Modal>
+  </>;
 }
 
-function applySkillRows(fields: Record<string, string>, rows: SkillRow[], leadingComma: boolean) {
-  const rest = Object.fromEntries(Object.entries(fields).filter(([key]) => !(skillParallelKeys as readonly string[]).includes(key)));
-  for (const key of skillParallelKeys) if (rows.length) rest[key] = `${leadingComma ? "," : ""}${rows.map((row) => row[key]).join(",")}`;
-  return rest;
+/**
+ * One half of a card's skills. The two halves are edited separately because the
+ * game keeps them apart: appending a skill to the wrong half silently makes it
+ * evolution-only, which is exactly what a single flat list gets wrong.
+ */
+function SkillGroupPanel({ label, color, description, empty, rows, onChange, extra }: { label: string; color: string; description: string; empty: string; rows: SkillRow[]; onChange: (rows: SkillRow[]) => void; extra?: ReactNode }) {
+  return <div className="skill-group">
+    <div className="skill-group-heading">
+      <Space size={8}><Tag color={color}>{label}</Tag><Typography.Text type="secondary">{rows.length} 个技能 · {description}</Typography.Text></Space>
+      <Space size={4}>{extra}<SkillDslImport label={label} onImport={(imported) => onChange([...rows, ...imported])} /><Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => onChange([...rows, emptySkillRow()])}>新增技能</Button></Space>
+    </div>
+    {rows.length
+      ? <SkillTagMatrix groupLabel={label} rows={rows} onChange={onChange} onMove={(from, to) => onChange(moveItem(rows, from, to))} onCopy={(index) => onChange([...rows.slice(0, index + 1), { ...rows[index] }, ...rows.slice(index + 1)])} onDelete={(index) => onChange(rows.filter((_, itemIndex) => itemIndex !== index))} />
+      : <Typography.Text type="secondary">{empty}</Typography.Text>}
+  </div>;
 }
+
 
 function StringReplacementTags({ value, suggestions, onChange }: { value: Record<string, string>; suggestions: string[]; onChange: (value: Record<string, string>) => void }) {
   const entries = Object.entries(value);
@@ -112,7 +167,7 @@ function StringReplacementTags({ value, suggestions, onChange }: { value: Record
     setEditingKey(entries.length);
     setDraftKey(key);
   };
-  return <Section title="字符串替换" description={`stringChangeFields · ${entries.length} 个字段；每个逗号分段都是一个 Tag`}>
+  return <Section title="字符串替换" description={`stringChangeFields · ${entries.length} 个字段；每个逗号分段都是一个 Tag。六个技能字段在上方的技能编辑器中编辑。`}>
     <datalist id="suggestions-string-change">{suggestions.map((item) => <option key={item} value={item} />)}</datalist>
     <div className="replacement-tag-editor">
       <div className="replacement-field-list">
@@ -187,9 +242,26 @@ function AttackEffectEditor({ value, onChange }: { value: AttackEffectFields; on
 
 function PatchForm({ value, onChange }: { value: CardMasterPatch; onChange: (value: CardMasterPatch) => void }) {
   const set = <K extends keyof CardMasterPatch>(key: K, item: CardMasterPatch[K]) => onChange({ ...value, [key]: item });
-  const skillTable = parseSkillRows(value.stringAppendFields);
-  const skillRows = skillTable.rows;
-  const setSkills = (rows: SkillRow[], leadingComma = skillTable.leadingComma) => set("stringAppendFields", applySkillRows(value.stringAppendFields, rows, leadingComma));
+  // Replacement runs before appending, so when both maps carry skill fields the
+  // replacement is the base and the one worth editing. The other stays visible
+  // in an alert rather than silently disappearing behind this form.
+  const inChange = skillParallelKeys.some((key) => key in value.stringChangeFields);
+  const inAppend = skillParallelKeys.some((key) => key in value.stringAppendFields);
+  const skillSource: SkillFieldSource = inChange ? "change" : "append";
+  const skillMap = skillSourceMap[skillSource];
+  const otherSkillFields = inChange && inAppend ? onlySkillFields(value.stringAppendFields) : null;
+  const groups = parseSkillGroups(value[skillMap], skillSource);
+  const setGroups = (next: SkillGroups) => set(skillMap, applySkillGroups(value[skillMap], next));
+  const switchSkillSource = (next: SkillFieldSource) => {
+    if (next === skillSource) return;
+    const target = skillSourceMap[next];
+    onChange({
+      ...value,
+      [skillMap]: applySkillGroups(value[skillMap], { ...groups, normal: [], evolved: [], hasEvolution: false }),
+      // Appending without a leading comma would glue onto the template's last entry.
+      [target]: applySkillGroups(value[target], { ...groups, leadingComma: next === "append" }),
+    });
+  };
   return <div className="stack">
     <Section title="补丁目标">
       <div className="field-grid">
@@ -202,12 +274,22 @@ function PatchForm({ value, onChange }: { value: CardMasterPatch; onChange: (val
     <GenericFieldMap title="整数 / 枚举属性" field="intFields" value={value.intFields} type="number" suggestions={cardParameterFields.number} onChange={(item) => set("intFields", item)} />
     <Section title="整数 / 枚举数组属性" description="intArrayFields；Tribe 使用类型枚举的数值" collapsible defaultOpen={false}><div className="stack">{Object.entries(value.intArrayFields).map(([key, items], index, entries) => <div className="map-row" key={`${index}-${key}`}><input list="suggestions-int-array" value={key} onChange={(event) => set("intArrayFields", Object.fromEntries(entries.map(([oldKey, oldValue], itemIndex) => itemIndex === index ? [event.target.value, oldValue] : [oldKey, oldValue])))} /><textarea rows={2} value={items.join("\n")} onChange={(event) => set("intArrayFields", { ...value.intArrayFields, [key]: event.target.value.split(/\s+/).map(Number).filter(Number.isFinite) })} /><button type="button" className="danger" onClick={() => set("intArrayFields", Object.fromEntries(entries.filter((_, itemIndex) => itemIndex !== index)))}>删除</button></div>)}</div><datalist id="suggestions-int-array">{cardParameterFields.numberArray.map((item) => <option key={item} value={item} />)}</datalist><button type="button" onClick={() => set("intArrayFields", { ...value.intArrayFields, [cardParameterFields.numberArray.find((item) => !(item in value.intArrayFields)) ?? "Field"]: [] })}>新增数组</button></Section>
     <AttackEffectEditor value={value.attackEffectFields ?? {}} onChange={(item) => set("attackEffectFields", item)} />
-    <StringReplacementTags value={value.stringChangeFields} suggestions={cardParameterFields.string} onChange={(item) => set("stringChangeFields", item)} />
-    <Section title="技能追加编辑器" description="stringAppendFields 中的六个并行技能字段" actions={<button type="button" onClick={() => setSkills([...skillRows, { Skill: "", SkillTiming: "", SkillCondition: "none", SkillTarget: "none", SkillOption: "none", SkillPreprocess: "none" }], skillRows.length ? skillTable.leadingComma : true)}>新增技能</button>}>
-      <CheckboxField label="前置逗号（追加到模板已有技能）" value={skillTable.leadingComma} disabled={!skillRows.length} onChange={(item) => setSkills(skillRows, item)} />
-      {skillRows.length ? <SkillTagMatrix rows={skillRows} onChange={setSkills} onMove={(from, to) => setSkills(moveItem(skillRows, from, to))} onCopy={(index) => setSkills([...skillRows.slice(0, index + 1), { ...skillRows[index] }, ...skillRows.slice(index + 1)])} onDelete={(index) => setSkills(skillRows.filter((_, itemIndex) => itemIndex !== index))} /> : <Typography.Text type="secondary">暂无技能。点击“新增技能”创建第一组并行技能字段。</Typography.Text>}
+    <StringReplacementTags value={Object.fromEntries(Object.entries(value.stringChangeFields).filter(([key]) => !isSkillField(key)))} suggestions={cardParameterFields.string.filter((key) => !isSkillField(key))} onChange={(item) => set("stringChangeFields", { ...onlySkillFields(value.stringChangeFields), ...item })} />
+    <Section title="技能编辑器" description={`${skillMap} 中的六个并行技能字段 · 普通形态 ${groups.normal.length} 个 / 进化形态 ${groups.evolved.length} 个`}>
+      {otherSkillFields && <Alert className="skill-source-alert" type="warning" showIcon message="技能字段同时写在两个 map 中" description={<>游戏先应用 <code>stringChangeFields</code> 再追加 <code>stringAppendFields</code>。下方编辑的是 <code>stringChangeFields</code>；另一份仍会生效：<pre>{Object.entries(otherSkillFields).map(([key, item]) => `${key}: ${item}`).join("\n")}</pre>建议合并到一处。</>} />}
+      <Field label="写入方式" hint={skillSource === "append" ? "追加到模板卡已有技能之后。若模板卡本身带进化技能（字段中已有 //），追加的内容会落进进化形态，这种情况应改用完全替换。" : "忽略模板卡原有技能，整体写入这六个字段。"}>
+        <Space.Compact>
+          <Button type={skillSource === "append" ? "primary" : "default"} onClick={() => switchSkillSource("append")}>追加到模板技能</Button>
+          <Button type={skillSource === "change" ? "primary" : "default"} onClick={() => switchSkillSource("change")}>完全替换模板技能</Button>
+        </Space.Compact>
+      </Field>
+      {skillSource === "append" && <CheckboxField label="前置逗号（追加到模板已有技能）" value={groups.leadingComma} disabled={!groups.normal.length && !groups.evolved.length} onChange={(item) => setGroups({ ...groups, leadingComma: item })} />}
+      <SkillGroupPanel label="普通形态" color="blue" description="进化前生效，写在 // 之前" empty="暂无普通形态技能。点击“新增技能”创建第一组并行技能字段。" rows={groups.normal} onChange={(rows) => setGroups({ ...groups, normal: rows })} />
+      {groups.hasEvolution || groups.evolved.length
+        ? <SkillGroupPanel label="进化形态" color="volcano" description="进化后生效，写在 // 之后" empty="进化形态已启用但没有技能条目；保存后会写出空的 // 右半段。" rows={groups.evolved} onChange={(rows) => setGroups({ ...groups, evolved: rows })} extra={<Button size="small" type="text" danger onClick={() => setGroups({ ...groups, evolved: [], hasEvolution: false })}>移除进化形态</Button>} />
+        : <Button className="skill-add-evolution" type="dashed" icon={<PlusOutlined />} disabled={!groups.normal.length} onClick={() => setGroups({ ...groups, hasEvolution: true, evolved: [emptySkillRow()] })}>添加进化形态技能（写入 //）</Button>}
     </Section>
-    <StringMapEditor label="其他字符串追加" field="stringAppendFields" value={Object.fromEntries(Object.entries(value.stringAppendFields).filter(([key]) => !(skillParallelKeys as readonly string[]).includes(key)))} onChange={(item) => set("stringAppendFields", { ...Object.fromEntries(skillParallelKeys.filter((key) => key in value.stringAppendFields).map((key) => [key, value.stringAppendFields[key]])), ...item })} valueMultiline />
+    <StringMapEditor label="其他字符串追加" field="stringAppendFields" value={Object.fromEntries(Object.entries(value.stringAppendFields).filter(([key]) => !isSkillField(key)))} onChange={(item) => set("stringAppendFields", { ...onlySkillFields(value.stringAppendFields), ...item })} valueMultiline />
     <Section title="字符串数组属性" description="stringArrayFields" collapsible defaultOpen={false}><div className="stack">{Object.entries(value.stringArrayFields).map(([key, items], index, entries) => <div className="map-row" key={`${index}-${key}`}><input list="suggestions-string-array" value={key} onChange={(event) => set("stringArrayFields", Object.fromEntries(entries.map(([oldKey, oldValue], itemIndex) => itemIndex === index ? [event.target.value, oldValue] : [oldKey, oldValue])))} /><textarea rows={2} value={items.join("\n")} onChange={(event) => set("stringArrayFields", { ...value.stringArrayFields, [key]: event.target.value.split(/\r?\n/) })} /><button type="button" className="danger" onClick={() => set("stringArrayFields", Object.fromEntries(entries.filter((_, itemIndex) => itemIndex !== index)))}>删除</button></div>)}</div><datalist id="suggestions-string-array">{cardParameterFields.stringArray.map((item) => <option key={item} value={item} />)}</datalist><button type="button" onClick={() => set("stringArrayFields", { ...value.stringArrayFields, [cardParameterFields.stringArray.find((item) => !(item in value.stringArrayFields)) ?? "Field"]: [] })}>新增数组</button></Section>
     <Section title="本地化文本" description="localizationFields"><div className="field-grid">{localizationKeys.map((key) => <TextField key={key} label={key} field={key} value={value.localizationFields[key] ?? ""} multiline={key !== "CardName"} wide={key !== "CardName"} onChange={(item) => set("localizationFields", { ...value.localizationFields, [key]: item })} />)}</div><StringMapEditor label="其他本地化字段" value={Object.fromEntries(Object.entries(value.localizationFields).filter(([key]) => !localizationKeys.includes(key)))} onChange={(item) => set("localizationFields", { ...Object.fromEntries(localizationKeys.filter((key) => key in value.localizationFields).map((key) => [key, value.localizationFields[key]])), ...item })} valueMultiline /></Section>
     <UnknownFieldsEditor value={value} knownKeys={known} onChange={(item) => onChange(item as CardMasterPatch)} />
@@ -215,5 +297,6 @@ function PatchForm({ value, onChange }: { value: CardMasterPatch; onChange: (val
 }
 
 export function CardMasterEditor({ value, onChange }: { value: CardMasterPatch[]; onChange: (value: CardMasterPatch[]) => void }) {
-  return <div className="editor-content"><Section title="卡牌补丁" description={`${value.length} 项`} actions={<button type="button" onClick={() => onChange([...value, newCardPatch()])}>新增补丁</button>}><div className="stack">{value.map((patch, index) => <details className="boss-details" key={index} open={index === 0}><summary><span><strong>{patch.newCard ? `新卡 ${patch.cardId}` : `修改卡 ${patch.templateCardId}`}</strong><small>模板 {patch.templateCardId}</small></span><span className="row-actions" onClick={(event) => event.preventDefault()}><RowActions index={index} count={value.length} onMove={(from, to) => onChange(moveItem(value, from, to))} onCopy={() => onChange([...value.slice(0, index + 1), structuredClone(patch), ...value.slice(index + 1)])} onDelete={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))} /></span></summary><PatchForm value={patch} onChange={(item) => { const next = [...value]; next[index] = item; onChange(next); }} /></details>)}</div></Section></div>;
+  const cards = useCardCatalog();
+  return <div className="editor-content"><Section title="卡牌补丁" description={`${value.length} 项`} actions={<button type="button" onClick={() => onChange([...value, newCardPatch()])}>新增补丁</button>}><div className="stack">{value.map((patch, index) => <details className="boss-details" key={index} open={index === 0}><summary><span><strong>{patch.newCard ? `新卡 · ${cardTitle(cards.get(patch.cardId), patch.cardId)}` : `修改卡 · ${cardTitle(cards.get(patch.templateCardId), patch.templateCardId)}`}</strong><small>{patch.newCard ? `模板 ${cardTitle(cards.get(patch.templateCardId), patch.templateCardId)}` : `模板 ${patch.templateCardId}`}</small></span><span className="row-actions" onClick={(event) => event.preventDefault()}><RowActions index={index} count={value.length} onMove={(from, to) => onChange(moveItem(value, from, to))} onCopy={() => onChange([...value.slice(0, index + 1), structuredClone(patch), ...value.slice(index + 1)])} onDelete={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))} /></span></summary><PatchForm value={patch} onChange={(item) => { const next = [...value]; next[index] = item; onChange(next); }} /></details>)}</div></Section></div>;
 }

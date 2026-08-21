@@ -1,19 +1,35 @@
 import { useEffect, useState } from "react";
 import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
 import { Button, Input, InputNumber, Space, Typography } from "antd";
-import { Card, CardIdTooltip, Field, Section, SkillDslField } from "./Fields";
+import { Card, CardIdTooltip, CardNameLabel, Field, Section, SkillDslField } from "./Fields";
+import { useCardCatalog } from "./CardCatalog";
 
 function parseNumbers(text: string) {
   return text.split(/[\s,;，；]+/).map(Number).filter((value) => Number.isFinite(value));
 }
 
+/** "12 项 · 已识别 9/12" so an unrecognised paste is visible without expanding the list. */
+function listDescription(field: string | undefined, count: number, recognized: number, cardIds: boolean) {
+  const base = `${field ?? "列表"} · ${count} 项`;
+  return cardIds && count ? `${base} · 已识别 ${recognized}/${count}` : base;
+}
+
 export function NumberListEditor({ label, field, value, onChange, max, hint, cardIds = false }: { label: string; field?: string; value: number[]; onChange: (value: number[]) => void; max?: number; hint?: string; cardIds?: boolean }) {
   const [bulk, setBulk] = useState("");
-  const renderItem = (item: number, index: number) => <Space.Compact className="chip" key={`${index}-${item}`}><InputNumber value={item} onChange={(next) => { const updated = [...value]; updated[index] = next ?? 0; onChange(updated); }} /><Button aria-label={`删除第 ${index + 1} 项`} danger icon={<DeleteOutlined />} onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))} /></Space.Compact>;
-  return <Section title={label} description={`${field ?? "列表"} · ${value.length} 项`} collapsible defaultOpen={false}>
+  const catalog = useCardCatalog();
+  const recognized = cardIds ? value.filter((item) => catalog.get(item)).length : 0;
+  const setAt = (index: number, next: number | null) => { const updated = [...value]; updated[index] = next ?? 0; onChange(updated); };
+  const removeAt = (index: number) => onChange(value.filter((_, itemIndex) => itemIndex !== index));
+  const deleteButton = (index: number) => <Button aria-label={`删除第 ${index + 1} 项`} danger icon={<DeleteOutlined />} onClick={() => removeAt(index)} />;
+  const renderItem = (item: number, index: number) => <Space.Compact className="chip" key={`${index}-${item}`}><InputNumber value={item} onChange={(next) => setAt(index, next)} />{deleteButton(index)}</Space.Compact>;
+  const renderCardItem = (item: number, index: number) => <div className="card-chip" key={`${index}-${item}`}>
+    <CardNameLabel cardId={item} />
+    <Space.Compact className="card-chip-row"><InputNumber value={item} onChange={(next) => setAt(index, next)} />{deleteButton(index)}</Space.Compact>
+  </div>;
+  return <Section title={label} description={listDescription(field, value.length, recognized, cardIds)} collapsible defaultOpen={false}>
     {hint && <Typography.Text type="secondary" className="field-hint">{hint}</Typography.Text>}
-    <Space wrap className="chip-list">
-      {value.map((item, index) => cardIds ? <CardIdTooltip cardId={item} key={`${index}-${item}`}>{renderItem(item, index)}</CardIdTooltip> : renderItem(item, index))}
+    <Space wrap className={cardIds ? "chip-list card-chip-list" : "chip-list"}>
+      {value.map((item, index) => cardIds ? <CardIdTooltip cardId={item} key={`${index}-${item}`}>{renderCardItem(item, index)}</CardIdTooltip> : renderItem(item, index))}
     </Space>
     <Space.Compact className="bulk-row">
       <Input.TextArea value={bulk} onChange={(event) => setBulk(event.target.value)} placeholder="批量粘贴 ID，以逗号、空格或换行分隔" autoSize={{ minRows: 1, maxRows: 3 }} />
@@ -49,10 +65,13 @@ export function StringMapEditor({ label, field, value, onChange, valueMultiline 
 
 export function NumberMapEditor({ label, field, value, onChange, cardIds = false }: { label: string; field?: string; value: Record<string, number>; onChange: (value: Record<string, number>) => void; cardIds?: boolean }) {
   const entries = Object.entries(value);
+  const catalog = useCardCatalog();
+  const recognized = cardIds ? entries.filter(([key]) => catalog.get(key)).length : 0;
   const update = (index: number, key: string, itemValue: number) => onChange(Object.fromEntries(entries.map(([oldKey, oldValue], itemIndex) => itemIndex === index ? [key, itemValue] : [oldKey, oldValue])));
   const renderKey = (key: string, itemValue: number, index: number) => <Input value={key} placeholder="ID" onChange={(event) => update(index, event.target.value, itemValue)} />;
-  return <Section title={label} description={`${field ?? "字典"} · ${entries.length} 项`} collapsible defaultOpen={false}>
-    <div className="stack">{entries.map(([key, itemValue], index) => <Space.Compact className="map-row" key={`${index}-${key}`}>{cardIds ? <CardIdTooltip cardId={key}>{renderKey(key, itemValue, index)}</CardIdTooltip> : renderKey(key, itemValue, index)}<InputNumber value={itemValue} onChange={(next) => update(index, key, next ?? 0)} /><Button danger icon={<DeleteOutlined />} onClick={() => onChange(Object.fromEntries(entries.filter((_, itemIndex) => itemIndex !== index)))}>删除</Button></Space.Compact>)}</div>
+  const renderCardKey = (key: string, itemValue: number, index: number) => <div className="card-map-key">{renderKey(key, itemValue, index)}<CardNameLabel cardId={key} /></div>;
+  return <Section title={label} description={listDescription(field ?? "字典", entries.length, recognized, cardIds)} collapsible defaultOpen={false}>
+    <div className="stack">{entries.map(([key, itemValue], index) => <Space.Compact className="map-row" key={`${index}-${key}`}>{cardIds ? <CardIdTooltip cardId={key}>{renderCardKey(key, itemValue, index)}</CardIdTooltip> : renderKey(key, itemValue, index)}<InputNumber value={itemValue} onChange={(next) => update(index, key, next ?? 0)} /><Button danger icon={<DeleteOutlined />} onClick={() => onChange(Object.fromEntries(entries.filter((_, itemIndex) => itemIndex !== index)))}>删除</Button></Space.Compact>)}</div>
     <Button icon={<PlusOutlined />} onClick={() => onChange({ ...value, "0": 1 })}>新增项目</Button>
   </Section>;
 }

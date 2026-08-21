@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:catalog": "node scripts/build-card-catalog.mjs",
+    "build:reference": "node scripts/build-card-reference.mjs",
+    "build:han": "node scripts/build-han-variants.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",

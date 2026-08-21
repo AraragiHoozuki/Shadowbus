@@ -1,4 +1,10 @@
 import "@testing-library/jest-dom/vitest";
+import { cleanup } from "@testing-library/react";
+import { afterEach } from "vitest";
+
+// Vitest runs without globals here, so Testing Library cannot register its own
+// afterEach and rendered trees would otherwise pile up across tests in a file.
+afterEach(cleanup);
 
 if (typeof window !== "undefined" && !window.matchMedia) {
   window.matchMedia = ((query: string) => ({

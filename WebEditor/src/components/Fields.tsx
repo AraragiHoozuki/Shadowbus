@@ -1,28 +1,60 @@
 import { useState, type KeyboardEvent, type ReactNode } from "react";
 import { ArrowDownOutlined, ArrowUpOutlined, CopyOutlined, DeleteOutlined, EditOutlined } from "@ant-design/icons";
 import { Alert, Button, Card as AntCard, Checkbox, Collapse, Form, Input, InputNumber, Modal, Popover, Select, Space, Switch, Tag, Tooltip, Typography } from "antd";
+import type { CardEntry } from "../types";
+import { baseCardId, cardSummary, isCustomCardId, normalizeCardId } from "../data/cards";
+import { defaultSkillDslGroup, dslKeyColors, formatSkillDsl, parseSkillDsl, type SkillDslBlock, type SkillDslGroup } from "../models/skillDsl";
+import { useCardEntry } from "./CardCatalog";
 
-const cardPortalUrl = (cardId: number | string) => `https://shadowverse-portal.com/card/${encodeURIComponent(String(cardId))}?lang=zh-tw`;
-const cardImageUrl = (cardId: number) => `https://svgdb.me/assets/cards/jp/C_${cardId}.png`;
+export const cardPortalUrl = (cardId: number | string) => `https://shadowverse-portal.com/card/${encodeURIComponent(String(cardId))}?lang=zh-tw`;
+export const cardImageUrl = (cardId: number) => `https://svgdb.me/assets/cards/jp/C_${cardId}.png`;
 
-function normalizedCardId(cardId: number | string) {
-  const value = Number(cardId);
-  return Number.isSafeInteger(value) && value > 0 ? value : null;
+/** What to call a card the bundled catalog does not list. */
+function unknownCardLabel(cardId: number) {
+  return isCustomCardId(cardId) ? "自制卡牌" : "未知卡牌";
 }
 
-function normalCardId(cardId: number) {
-  return cardId % 10 === 1 ? cardId - 1 : cardId;
+/** Secondary line under a card ID input: the resolved name plus its stats. */
+function cardHint(entry: CardEntry | undefined, cardId: number | string) {
+  const id = normalizeCardId(cardId);
+  if (id == null) return undefined;
+  if (entry) return `${entry.name} · ${cardSummary(entry)}`;
+  return isCustomCardId(id) ? "自制卡牌 · 内置卡表不含此 ID" : "未知卡牌 · 内置卡表中没有此 ID";
+}
+
+/** Card name for inline use in chips, list rows and card titles. */
+export function CardNameLabel({ cardId }: { cardId: number | string }) {
+  const entry = useCardEntry(cardId);
+  const id = normalizeCardId(cardId);
+  if (id == null) return <span className="card-name-label card-name-label-empty">未设置</span>;
+  if (entry) return <span className="card-name-label" title={`${entry.name} · ${cardSummary(entry)}`}>{entry.name}</span>;
+  return <span className={`card-name-label ${isCustomCardId(id) ? "card-name-label-custom" : "card-name-label-unknown"}`}>{unknownCardLabel(id)}</span>;
+}
+
+/** Plain-string card name for titles and subtitles that cannot host an element. */
+export function cardTitle(entry: CardEntry | undefined, cardId: number | string) {
+  const id = normalizeCardId(cardId);
+  if (id == null) return "未设置卡牌";
+  return `${entry ? entry.name : unknownCardLabel(id)} #${id}`;
 }
 
 function CardIdPopoverContent({ cardId, url }: { cardId: number; url: string }) {
-  const normalId = normalCardId(cardId);
-  return <a className="card-id-preview-link" href={url} target="_blank" rel="noreferrer">
-    <img className="card-id-preview" src={cardImageUrl(normalId)} alt={`Card ${normalId}`} />
-  </a>;
+  const normalId = baseCardId(cardId);
+  const entry = useCardEntry(cardId);
+  return <div className="card-id-preview-card">
+    <div className="card-id-preview-heading">
+      <Typography.Text strong>{entry ? entry.name : unknownCardLabel(cardId)}</Typography.Text>
+      <Typography.Text type="secondary">{entry ? cardSummary(entry) : "内置卡表中没有此 ID"}</Typography.Text>
+      <Typography.Text type="secondary" code>#{cardId}</Typography.Text>
+    </div>
+    <a className="card-id-preview-link" href={url} target="_blank" rel="noreferrer">
+      <img className="card-id-preview" src={cardImageUrl(normalId)} alt={`Card ${normalId}`} />
+    </a>
+  </div>;
 }
 
 export function CardIdTooltip({ cardId, children, block = false }: { cardId: number | string; children: ReactNode; block?: boolean }) {
-  const normalized = normalizedCardId(cardId);
+  const normalized = normalizeCardId(cardId);
   if (normalized == null) return <>{children}</>;
   const url = cardPortalUrl(normalized);
   return <Popover
@@ -34,6 +66,7 @@ export function CardIdTooltip({ cardId, children, block = false }: { cardId: num
     <span className={`card-id-tooltip-trigger${block ? " card-id-tooltip-trigger-block" : ""}`}>{children}</span>
   </Popover>;
 }
+
 
 export function Field({ label, field, hint, children, wide = false }: { label: string; field?: string; hint?: string; children: ReactNode; wide?: boolean }) {
   return <Form.Item layout="vertical" className={`field ${wide ? "field-wide" : ""}`} label={<span className="field-label">{label}{field && <code>{field}</code>}</span>}>
@@ -48,81 +81,8 @@ export function TextField({ label, field, value, onChange, multiline = false, pl
   </Field>;
 }
 
-export interface SkillDslBlock { key: string; value: string }
-export interface SkillDslGroup { blocks: SkillDslBlock[] }
-export interface SkillDslParseResult { groups: SkillDslGroup[]; error?: string }
-
-const defaultSkillDslGroup = (): SkillDslGroup => ({ blocks: [
-  { key: "skill", value: "" },
-  { key: "timing", value: "" },
-  { key: "condition", value: "" },
-  { key: "target", value: "" },
-  { key: "option", value: "none" },
-  { key: "preprocess", value: "none" },
-] });
-
-const dslKeyColors: Record<string, string> = {
-  skill: "blue",
-  timing: "purple",
-  condition: "orange",
-  target: "green",
-  option: "cyan",
-  preprocess: "magenta",
-};
-
-export function parseSkillDsl(input: string): SkillDslParseResult {
-  const groups: SkillDslGroup[] = [];
-  let blocks: SkillDslBlock[] = [];
-  let cursor = 0;
-  const pushGroup = () => {
-    if (blocks.length) groups.push({ blocks });
-    blocks = [];
-  };
-
-  while (cursor < input.length) {
-    while (cursor < input.length && /\s/.test(input[cursor])) cursor++;
-    if (cursor >= input.length) break;
-    if (input[cursor] === ",") { pushGroup(); cursor++; continue; }
-    if (input[cursor] !== "(") return { groups: [], error: `第 ${cursor + 1} 个字符不是“(”，无法识别 DSL 字段。` };
-
-    const start = cursor;
-    let depth = 0;
-    let quote: string | null = null;
-    let end = -1;
-    for (; cursor < input.length; cursor++) {
-      const character = input[cursor];
-      if (character === "\\") { cursor++; continue; }
-      if (quote) {
-        if (character === quote) quote = null;
-        continue;
-      }
-      if (character === '"' || character === "'") { quote = character; continue; }
-      if (character === "(") depth++;
-      if (character === ")") {
-        depth--;
-        if (depth === 0) { end = cursor; break; }
-      }
-    }
-    if (end < 0) return { groups: [], error: `从第 ${start + 1} 个字符开始的 DSL 字段缺少右括号。` };
-
-    const body = input.slice(start + 1, end);
-    const separator = body.indexOf(":");
-    if (separator < 1) return { groups: [], error: `第 ${start + 1} 个字符开始的 DSL 字段缺少“字段名:字段值”分隔符。` };
-    const key = body.slice(0, separator).trim();
-    if (!key) return { groups: [], error: `第 ${start + 1} 个字符开始的 DSL 字段名为空。` };
-    blocks.push({ key, value: body.slice(separator + 1).trim() });
-    cursor = end + 1;
-  }
-  pushGroup();
-  return { groups };
-}
-
-export function formatSkillDsl(groups: SkillDslGroup[]) {
-  return groups
-    .map((group) => group.blocks.map((block) => `(${block.key.trim()}:${block.value.trim()})`).join(""))
-    .filter(Boolean)
-    .join(",");
-}
+export { formatSkillDsl, parseSkillDsl } from "../models/skillDsl";
+export type { SkillDslBlock, SkillDslGroup, SkillDslParseResult } from "../models/skillDsl";
 
 export function SkillDslField({ label, field, value, onChange, wide = true, hint }: { label: string; field?: string; value: string; onChange: (value: string) => void; wide?: boolean; hint?: string }) {
   const [open, setOpen] = useState(false);
@@ -236,8 +196,9 @@ export function SkillDslField({ label, field, value, onChange, wide = true, hint
 }
 
 export function NumberField({ label, field, value, onChange, min, max, disabled, cardId = false }: { label: string; field?: string; value: number; onChange: (value: number) => void; min?: number; max?: number; disabled?: boolean; cardId?: boolean }) {
+  const entry = useCardEntry(cardId ? value : null);
   const input = <InputNumber className="full-number" value={Number.isFinite(value) ? value : 0} min={min} max={max} disabled={disabled} onChange={(item) => onChange(item ?? 0)} />;
-  return <Field label={label} field={field}>
+  return <Field label={label} field={field} hint={cardId ? cardHint(entry, value) : undefined}>
     {cardId ? <CardIdTooltip cardId={value} block>{input}</CardIdTooltip> : input}
   </Field>;
 }
