@@ -78,7 +78,8 @@ namespace Shadowbus
             string path = Path.Combine(PathHelper.CardMasterReferencePath, "card_names.csv");
 
             StringBuilder csv = new StringBuilder();
-            csv.AppendLine("card_id,card_name,clan,char_type,cost,atk,life,base_card_id,skill_description");
+            csv.AppendLine(
+                "card_id,card_name,clan,char_type,cost,atk,life,base_card_id,skill_description,evo_skill_description");
             int named = 0;
             foreach (CardParameter card in cards)
             {
@@ -95,7 +96,11 @@ namespace Shadowbus
                     .Append(card.Atk).Append(',')
                     .Append(card.Life).Append(',')
                     .Append(card.BaseCardId).Append(',')
-                    .Append(Escape(SafeText(() => card.SkillDescription))).AppendLine();
+                    .Append(Escape(SafeText(() => card.SkillDescription))).Append(',')
+                    // Cards whose only effect appears after evolving keep an empty
+                    // SkillDescription and put their text here, so the WebEditor's
+                    // card reference panel would otherwise show them with no text.
+                    .Append(Escape(SafeText(() => card.EvoSkillDescription))).AppendLine();
             }
 
             File.WriteAllText(path, csv.ToString(), new UTF8Encoding(false));
